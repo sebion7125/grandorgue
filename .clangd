@@ -1,0 +1,12 @@
+CompileFlags:
+  Add:
+    - -isystem
+    - /usr/lib/gcc/x86_64-w64-mingw32/12-win32/include
+    - -isystem
+    - /usr/lib/gcc/x86_64-w64-mingw32/12-win32/include-fixed
+    - -isystem
+    - /usr/lib/gcc/x86_64-w64-mingw32/12-win32/../../../../x86_64-w64-mingw32/include
+    - -isystem
+    - /mingw64/include/wx-3.2
+    - -isystem
+    - /mingw64/lib/wx/include/msw-unicode-static-3.2

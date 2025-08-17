@@ -8,8 +8,11 @@
 #include "GOSoundFader.h"
 
 #include <algorithm>
+#include <cstdio>
 
-void GOSoundFader::Setup(
+
+// backup old version of setup:
+/*void GOSoundFader::Setup(
   float targetVolume, float velocityVolume, unsigned nFramesToIncreaseIn) {
   m_TargetVolume = targetVolume;
 
@@ -23,14 +26,68 @@ void GOSoundFader::Setup(
   m_DecreasingDeltaPerFrame = 0.0f;
   m_VelocityVolume = velocityVolume;
   m_LastExternalVolumePoint = -1; // will be set on the first Process() call
+}*/
+
+void GOSoundFader::Setup(
+  float targetVolume, float velocityVolume, unsigned nFramesToIncreaseIn) {
+
+  m_CurrentFadeMode = FadeMode::Sinus;
+  
+  /*FILE* f = fopen("debug.txt", "a");
+fprintf(f, "[FADER] Setup: target=%f, velocity=%f, nFrames=%u\n",
+  targetVolume, velocityVolume, nFramesToIncreaseIn);
+fclose(f);*/
+  
+  m_TargetVolume = targetVolume;
+  m_VelocityVolume = velocityVolume;
+  m_DecreasingDeltaPerFrame = 0.0f;  // kein FadeOut aktiv
+  m_LastExternalVolumePoint = -1.0f;
+
+  m_CurrentSampleCounter = 0;
+  
+  if (nFramesToIncreaseIn == 0) {
+    // Sofort auf Ziel-Lautstärke
+    m_LastTargetVolumePoint = targetVolume;
+    m_IncreasingDeltaPerFrame = 0.0f;
+    m_FadeLengthSamples = 0;
+    m_FadeStartSample = 0;
+    m_FadeStartVolume = targetVolume;
+  } else {
+    m_LastTargetVolumePoint = 0.0f;
+    m_FadeLengthSamples = nFramesToIncreaseIn;
+    m_FadeStartSample = 0;
+
+    if (m_CurrentFadeMode == FadeMode::Sinus) {
+      /*FILE* f = fopen("debug.txt", "a");
+      fprintf(f, "[FADER] Sinus-Fade aktiv: Sample %u / %u\n",
+        m_CurrentSampleCounter, m_FadeLengthSamples);
+      fclose(f);*/
+              
+      m_FadeStartVolume = 0.0f;
+      m_IncreasingDeltaPerFrame = 1.0f;  // Marker: Sinus-Fade aktiv
+      m_FadeStartSample = m_CurrentSampleCounter = 0;
+    } else {
+      /*FILE* f = fopen("debug.txt", "a");
+      fprintf(f, "[FADER] Linear-Fade aktiv: Sample %u / %u\n",
+        m_CurrentSampleCounter, m_FadeLengthSamples);
+      fclose(f);*/
+      m_FadeStartVolume = targetVolume;
+      m_IncreasingDeltaPerFrame = targetVolume / nFramesToIncreaseIn;
+    }
+  }
 }
 
 // if the external volume is changed, do it smoothly in this number of frames
 static constexpr unsigned EXTERNAL_VOLUME_CHANGE_FRAMES = 1024;
 
-void GOSoundFader::Process(
+void GOSoundFader::Process(  
   unsigned nFrames, float *buffer, float externalVolume) {
   // setup process
+  
+  if (m_CurrentFadeMode == FadeMode::Sinus) {
+    ProcessSinusFade(nFrames, buffer, externalVolume);
+    return;
+  }
 
   float startTargetVolumePoint = m_LastTargetVolumePoint;
 
@@ -119,6 +176,81 @@ void GOSoundFader::Process(
       buffer[0] *= frameTotalVolume;
       buffer[1] *= frameTotalVolume;
       frameTotalVolume += frameTotalVolumeDelta;
+    }
+  }
+}
+
+// sinus mode processing
+void GOSoundFader::ProcessSinusFade(unsigned nFrames, float* buffer, float externalVolume) {
+  if (nFrames == 0)
+    return;  // Keine Verarbeitung, aber Fader läuft weiter
+
+  // Smooth externalVolume (wie im linearen Fader)
+  float targetExternalVolume = m_VelocityVolume * externalVolume;
+
+  if (m_LastExternalVolumePoint < 0.0f)
+    m_LastExternalVolumePoint = targetExternalVolume;
+
+  if (targetExternalVolume != m_LastExternalVolumePoint) {
+    m_LastExternalVolumePoint +=
+      (targetExternalVolume - m_LastExternalVolumePoint)
+      * std::max(nFrames, EXTERNAL_VOLUME_CHANGE_FRAMES)
+      / EXTERNAL_VOLUME_CHANGE_FRAMES;
+  }
+
+  float baseVolume = m_TargetVolume * m_LastExternalVolumePoint;
+
+  // Sicherheitskorrektur: Wenn m_FadeLengthSamples == 0, dann keine Skalierung → direkter Lautstärke-Faktor 1.0
+  if (m_FadeLengthSamples == 0) {
+    for (unsigned i = 0; i < nFrames; ++i, buffer += 2) {
+      buffer[0] *= baseVolume;
+      buffer[1] *= baseVolume;
+    }
+
+    // Fade abschließen
+    if (m_IncreasingDeltaPerFrame > 0.0f) {
+      m_LastTargetVolumePoint = m_TargetVolume;
+      m_IncreasingDeltaPerFrame = 0.0f;
+    }
+    if (m_DecreasingDeltaPerFrame > 0.0f) {
+      m_LastTargetVolumePoint = 0.0f;
+      m_DecreasingDeltaPerFrame = 0.0f;
+    }
+    return;
+  }
+
+  float volume;
+  // Normaler Fade-Verlauf mit sin² / cos²
+  for (unsigned i = 0; i < nFrames; ++i, buffer += 2, ++m_CurrentSampleCounter) {
+    float x = float(m_CurrentSampleCounter) / float(m_FadeLengthSamples);
+    if (x > 1.0f) x = 1.0f;
+
+    float fadeFactor = 1.0f;
+
+    if (m_IncreasingDeltaPerFrame > 0.0f) {
+      float s = sinf(0.5f * M_PI * x);
+      fadeFactor = s;
+    } else if (m_DecreasingDeltaPerFrame > 0.0f) {
+      float c = cosf(0.5f * M_PI * x);
+      fadeFactor = c;
+    }
+
+    volume = baseVolume * fadeFactor;
+    buffer[0] *= volume;
+    buffer[1] *= volume;
+  }
+  
+  m_LastTargetVolumePoint = volume;
+
+  // Fade abschließen
+  if (m_CurrentSampleCounter >= m_FadeLengthSamples) {
+    if (m_IncreasingDeltaPerFrame > 0.0f) {
+      m_LastTargetVolumePoint = m_TargetVolume;
+      m_IncreasingDeltaPerFrame = 0.0f;
+    }
+    else if (m_DecreasingDeltaPerFrame > 0.0f) {
+      m_LastTargetVolumePoint = 0.0f;
+      m_DecreasingDeltaPerFrame = 0.0f;
     }
   }
 }
