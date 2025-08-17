@@ -1,0 +1,16 @@
+%compile_commands.json
+
+%h
+-x c++-header
+
+--target=x86_64-w64-mingw32
+-std=gnu++20
+
+# GCC Includes (anpassen, falls Pfade abweichen!)
+-isystem/usr/lib/gcc/x86_64-w64-mingw32/12-win32/include
+-isystem/usr/lib/gcc/x86_64-w64-mingw32/12-win32/include-fixed
+-isystem/usr/x86_64-w64-mingw32/include
+
+# wxWidgets (wenn lokal installiert z. B. durch prepare-for-linux.sh)
+-isystem/mingw64/include/wx-3.2
+-isystem/mingw64/lib/wx/include/msw-unicode-static-3.2

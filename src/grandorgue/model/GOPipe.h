@@ -52,6 +52,10 @@ public:
   void SetVelocity(unsigned velocity, unsigned referenceID = 0);
   unsigned RegisterReference(GOPipe *pipe);
   virtual void SetTemperament(const GOTemperament &temperament);
+
+  // Debug sollution to retrieve the associated rank
+  // TODO: remove this in the next release
+  GORank* GetRank() const { return m_Rank; }
 };
 
 #endif

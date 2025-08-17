@@ -233,6 +233,7 @@ sound/GOSoundStream.cpp
 sound/GOSound.cpp
 sound/GOSoundFilter.cpp
 sound/GOSoundToneBalanceFilter.cpp
+sound/GO_Attack_Parameters.cpp
 updater/GOUpdateChecker.cpp
 yaml/GOSaveableToYaml.cpp
 yaml/GOYamlModel.cpp

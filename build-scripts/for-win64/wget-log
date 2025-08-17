@@ -1,0 +1,6 @@
+--2025-08-07 10:09:53--  https://code.visualstudio.com/sha/download?build=stable
+Resolving code.visualstudio.com (code.visualstudio.com)... 40.90.65.148, 2620:1ec:27:e660::cafe:e660
+Connecting to code.visualstudio.com (code.visualstudio.com)|40.90.65.148|:443... connected.
+HTTP request sent, awaiting response... 404 Not Found
+2025-08-07 10:09:53 ERROR 404: Not Found.
+

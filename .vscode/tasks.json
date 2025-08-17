@@ -1,0 +1,19 @@
+// .vscode/tasks.json
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "GO-Win-Build",
+            "type": "shell",
+            "command": "./update-build-on-linux.sh",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [],
+            "options": {
+                "cwd": "${workspaceFolder}/build-scripts/for-win64"
+            }
+        }
+    ]
+}
