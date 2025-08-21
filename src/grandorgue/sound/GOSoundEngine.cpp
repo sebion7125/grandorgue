@@ -592,7 +592,7 @@ void GOSoundEngine::CreateReleaseSampler(GOSoundSampler *handle) {
 
           auto* pipe = prov->GetOwnerPipe();
           GORank* rank = pipe ? pipe->GetRank() : nullptr;
-          const wxString rankName = rank ? rank->GetName().Lower() : wxEmptyString;
+          const wxString rankName = rank ? rank->GetName().Lower() : wxString();
 
           const ChannelKind chan = ChannelFromRankName(rankName);
           const bool chamade    = IsChamade(rankName);
