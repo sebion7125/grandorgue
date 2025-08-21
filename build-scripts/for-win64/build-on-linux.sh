@@ -30,9 +30,14 @@ pushd build/win64
 rm -rf *
 export LANG=C
 
-WX_CONFIG=$MINGW_DIR/bin/wx-config; export WX_CONFIG
-
 source "$SCRIPT_DIR/set-mingw-vars.sh"
+
+# Ensure MinGW bin is first in PATH so the MinGW wx-config (/mingw64/bin/wx-config)
+# is found by CMake and tools before the system wx-config.
+export PATH="$MINGW_DIR/bin:$PATH"
+
+# Export WX_CONFIG (now that MINGW_DIR is defined)
+WX_CONFIG="$MINGW_DIR/bin/wx-config"; export WX_CONFIG
 
 # ⚠️ Verhindert unnötige Debug-Infos
 export CXXFLAGS="-O3 -DNDEBUG -g0"
