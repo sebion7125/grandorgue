@@ -6,6 +6,8 @@
  */
 
 #include "GOSoundFader.h"
+#include "GOCrossfadeMode.h"
+#include "GOCrossfadeParam.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -31,7 +33,7 @@
 void GOSoundFader::Setup(
   float targetVolume, float velocityVolume, unsigned nFramesToIncreaseIn) {
 
-  m_CurrentFadeMode = FadeMode::Sinus;
+  m_CurrentFadeMode = GOCrossfadeMode::SinEqualPower;
   
   /*FILE* f = fopen("debug.txt", "a");
 fprintf(f, "[FADER] Setup: target=%f, velocity=%f, nFrames=%u\n",
@@ -40,13 +42,13 @@ fclose(f);*/
   
   m_TargetVolume = targetVolume;
   m_VelocityVolume = velocityVolume;
-  m_DecreasingDeltaPerFrame = 0.0f;  // kein FadeOut aktiv
+  m_DecreasingDeltaPerFrame = 0.0f;  // no FadeOut active
   m_LastExternalVolumePoint = -1.0f;
 
   m_CurrentSampleCounter = 0;
   
   if (nFramesToIncreaseIn == 0) {
-    // Sofort auf Ziel-Lautstärke
+    // Immediately set to target volume
     m_LastTargetVolumePoint = targetVolume;
     m_IncreasingDeltaPerFrame = 0.0f;
     m_FadeLengthSamples = 0;
@@ -57,14 +59,14 @@ fclose(f);*/
     m_FadeLengthSamples = nFramesToIncreaseIn;
     m_FadeStartSample = 0;
 
-    if (m_CurrentFadeMode == FadeMode::Sinus) {
+    if (m_CurrentFadeMode == GOCrossfadeMode::SinEqualPower) {
       /*FILE* f = fopen("debug.txt", "a");
       fprintf(f, "[FADER] Sinus-Fade aktiv: Sample %u / %u\n",
         m_CurrentSampleCounter, m_FadeLengthSamples);
       fclose(f);*/
               
       m_FadeStartVolume = 0.0f;
-      m_IncreasingDeltaPerFrame = 1.0f;  // Marker: Sinus-Fade aktiv
+      m_IncreasingDeltaPerFrame = 1.0f;  // Marker: sinus-fade active
       m_FadeStartSample = m_CurrentSampleCounter = 0;
     } else {
       /*FILE* f = fopen("debug.txt", "a");
@@ -83,9 +85,11 @@ static constexpr unsigned EXTERNAL_VOLUME_CHANGE_FRAMES = 1024;
 void GOSoundFader::Process(  
   unsigned nFrames, float *buffer, float externalVolume) {
   // setup process
-  
-  if (m_CurrentFadeMode == FadeMode::Sinus) {
-    ProcessSinusFade(nFrames, buffer, externalVolume);
+
+  // Legacy fast-path: if Linear, continue with existing linear logic below.
+  // For any non-linear mode, delegate to the non-linear processor.
+  if (m_CurrentFadeMode != GOCrossfadeMode::Linear) {
+    ProcessNonLinearFade(nFrames, buffer, externalVolume);
     return;
   }
 
@@ -180,12 +184,12 @@ void GOSoundFader::Process(
   }
 }
 
-// sinus mode processing
-void GOSoundFader::ProcessSinusFade(unsigned nFrames, float* buffer, float externalVolume) {
+ // non-linear fade processing
+void GOSoundFader::ProcessNonLinearFade(unsigned nFrames, float* buffer, float externalVolume) {
   if (nFrames == 0)
     return;
 
-  // Zielwert berechnen
+  // compute target external volume
   float targetExternalVolume = m_VelocityVolume * externalVolume;
   if (m_LastExternalVolumePoint < 0.0f)
     m_LastExternalVolumePoint = targetExternalVolume;
@@ -207,22 +211,33 @@ void GOSoundFader::ProcessSinusFade(unsigned nFrames, float* buffer, float exter
   float volume = 0.0f;
 
   for (unsigned i = 0; i < nFrames; ++i, buffer += 2, ++m_CurrentSampleCounter) {
-    // aktuelles ExternalVolume interpolieren
+    // interpolate current external volume
     float currentExternal = startExternalVolume + i * externalDelta;
     float baseVolume = m_TargetVolume * currentExternal;
 
-    // Sinus-Fade berechnen
-    float x = float(m_CurrentSampleCounter) / float(m_FadeLengthSamples);
+    // fade position x in [0,1]
+    float x = m_FadeLengthSamples ? float(m_CurrentSampleCounter) / float(m_FadeLengthSamples) : 1.0f;
     if (x > 1.0f) x = 1.0f;
 
     float fadeFactor = 1.0f;
+
+    // Choose curve based on runtime crossfade mode; keep linear fast-path for legacy
+    using namespace GOAudioParams;
+    const auto mode = GetCrossfadeMode();
+
+    
+    // Use go_crossfade_eval for non-linear curves.
+    const auto g = go_crossfade_eval(mode, x);
     if (m_IncreasingDeltaPerFrame > 0.0f) {
-      float s = sinf(0.5f * M_PI * x);
-      fadeFactor = s;
+      // increasing from 0 -> target: use b (second weight)
+      fadeFactor = g.b;
     } else if (m_DecreasingDeltaPerFrame > 0.0f) {
-      float c = cosf(0.5f * M_PI * x);
-      fadeFactor = c;
+      // decreasing to 0: use a (first weight)
+      fadeFactor = g.a;
+    } else {
+      fadeFactor = 1.0f;
     }
+    
 
     volume = baseVolume * fadeFactor;
     buffer[0] *= volume;
@@ -231,7 +246,7 @@ void GOSoundFader::ProcessSinusFade(unsigned nFrames, float* buffer, float exter
 
   m_LastTargetVolumePoint = volume;
 
-  // Fade abschließen
+  // finalize fade
   if (m_CurrentSampleCounter >= m_FadeLengthSamples) {
     if (m_IncreasingDeltaPerFrame > 0.0f) {
       m_LastTargetVolumePoint = m_TargetVolume;

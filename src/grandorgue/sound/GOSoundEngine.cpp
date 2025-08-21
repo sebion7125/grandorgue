@@ -26,6 +26,7 @@
 #include "GOSoundReleaseAlignTable.h"
 #include "GOSoundSampler.h"
 #include "GO_Attack_Parameters.h"
+#include "GOCrossfadeParam.h"
 
 // needed for Debugging the new Release Model
 #include "model/GOSoundingPipe.h"
@@ -623,8 +624,10 @@ void GOSoundEngine::CreateReleaseSampler(GOSoundSampler *handle) {
 
             if (time < (int)attack_duration) {
               float attack_index = (float)time / attack_duration;
-              float gain_delta
-                = g_0 * (1.0f - attack_index) + attack_index; // old model: a * (time - attack_duration) * (time - attack_duration) + 1.0f;
+              using namespace GOAudioParams;
+              const auto mode = GetCrossfadeMode();
+              const auto g = go_crossfade_eval(mode, attack_index);
+              float gain_delta = g.a * g_0 + g.b * 1.0f;
               gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
               gain_target *= gain_delta; // test without attenuation of reverb
               //gain_target = 0;
@@ -643,8 +646,10 @@ void GOSoundEngine::CreateReleaseSampler(GOSoundSampler *handle) {
             
             if (time < (int)attack_duration) {
               float attack_index = (float)time / attack_duration;
-              float gain_delta
-                = g_0 * (1.0f - attack_index) + attack_index; // old model: a * (time - attack_duration) * (time - attack_duration) + 1.0f;
+              using namespace GOAudioParams;
+              const auto mode = GetCrossfadeMode();
+              const auto g = go_crossfade_eval(mode, attack_index);
+              float gain_delta = g.a * g_0 + g.b * 1.0f;
               gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
               gain_target *= gain_delta; // test without attenuation of reverb
               //gain_target = 0;
