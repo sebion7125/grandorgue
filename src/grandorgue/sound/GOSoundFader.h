@@ -9,7 +9,9 @@
 #define GOSOUNDFADER_H_
 
 #include <assert.h>
-#include <math.h>
+#include <cmath>
+#include "GOCrossfadeMode.h"
+#include "GOCrossfadeParam.h"
 
 /**
  * This class is responsible for smoothly changing a volume of samples.
@@ -36,8 +38,13 @@
  * This volume is applied in the Process() call
  */
  
-// Sinus-Fade-Modus
+#if 0
+// Sinus fade mode
 enum class FadeMode { None, Linear, Sinus };
+#endif
+// Legacy FadeMode is replaced by GOCrossfadeMode (see GOCrossfadeMode.h).
+// The enum above is retained in an #if 0 block to preserve reference until
+// all uses are migrated to the new GOCrossfadeMode and GOAudioParams.
 
 
 class GOSoundFader {
@@ -57,14 +64,14 @@ private:
   float m_LastTargetVolumePoint;
   float m_LastExternalVolumePoint;
   
-  FadeMode m_CurrentFadeMode = FadeMode::Sinus;
+  GOCrossfadeMode m_CurrentFadeMode = GOCrossfadeMode::SinEqualPower;
 
-  // für Sinus-Fade
+  // for sinus-fade
   unsigned m_FadeStartSample = 0;
   unsigned m_FadeLengthSamples = 0;
   float m_FadeStartVolume = 0.0f;
 
-  // globaler Fortschritt
+  // global progress
   unsigned m_CurrentSampleCounter = 0;
 public:
   /**
@@ -85,21 +92,21 @@ public:
    * @param nFrames number of frames for full decay
    */
   inline void StartDecreasingVolume(unsigned nFrames) {
-    m_CurrentFadeMode = FadeMode::Sinus;
+    m_CurrentFadeMode = GOCrossfadeMode::SinEqualPower;
     m_DecreasingDeltaPerFrame = m_TargetVolume / nFrames;
 
-    if (m_CurrentFadeMode == FadeMode::Sinus) {
-      // Sinus-Fade-Out: Zähler zurücksetzen, Länge und Startlautstärke merken
+    if (m_CurrentFadeMode == GOCrossfadeMode::SinEqualPower) {
+      // Sinus fade-out: reset counter, remember length and start volume
       m_FadeStartSample = m_CurrentSampleCounter = 0;
       m_FadeLengthSamples = nFrames;
       m_FadeStartVolume = m_LastTargetVolumePoint;
 
-      // Kein linearer Verlauf → nichts mehr zu tun
+      // Not a linear transition -> nothing more to do
       return;
     }
 
     if (m_IncreasingDeltaPerFrame > 0.0f) {
-      // Wir unterbrechen einen noch laufenden Fade-In
+      // Interrupt an ongoing fade-in
       assert(m_LastTargetVolumePoint < m_TargetVolume);
       m_TargetVolume = (m_TargetVolume - m_LastTargetVolumePoint)
           * m_IncreasingDeltaPerFrame
@@ -112,7 +119,7 @@ public:
   inline void SetVelocityVolume(float volume) { m_VelocityVolume = volume; }
 
   void Process(unsigned nFrames, float *buffer, float externalVolume);
-  void ProcessSinusFade(unsigned nFrames, float *buffer, float externalVolume);
+  void ProcessNonLinearFade(unsigned nFrames, float *buffer, float externalVolume);
 
   bool IsSilent() const { return (m_LastTargetVolumePoint <= 0.0f); }
   /*bool IsSilent() const {

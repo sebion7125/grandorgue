@@ -14,6 +14,19 @@
             "options": {
                 "cwd": "${workspaceFolder}/build-scripts/for-win64"
             }
+        },
+        {
+            "label": "GO-Win-ReBuild",
+            "type": "shell",
+            "command": "./update-build-on-linux.sh --clean",
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "problemMatcher": [],
+            "options": {
+                "cwd": "${workspaceFolder}/build-scripts/for-win64"
+            }
         }
     ]
 }
