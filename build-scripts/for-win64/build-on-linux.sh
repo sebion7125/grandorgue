@@ -17,15 +17,16 @@ fi
 
 PARALLEL_PRMS="-j$(nproc)"
 
-mkdir -p build/build-tools
-pushd build/build-tools
+BUILD_ROOT="$SCRIPT_DIR/build"
+mkdir -p "$BUILD_ROOT/build-tools"
+pushd "$BUILD_ROOT/build-tools"
 rm -rf *
 cmake $SRC_DIR/src/build
 make
 popd
 
-mkdir -p build/win64
-pushd build/win64
+mkdir -p "$BUILD_ROOT/win64"
+pushd "$BUILD_ROOT/win64"
 
 rm -rf *
 export LANG=C
@@ -67,7 +68,7 @@ popd
 
 # === Ergebnis in gemeinsamen Zielordner kopieren ===
 
-BUILD_BIN_DIR="/home/vboxuser/grandorgue/build-scripts/for-win64/build/win64/bin"
+BUILD_BIN_DIR="$BUILD_ROOT/win64/bin"
 EXPORT_DIR="/media/sf_Code_Exchange/GrandOrgue Dev/bin"
 
 # Sicherstellen, dass Zielverzeichnis existiert

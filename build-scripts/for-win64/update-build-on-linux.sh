@@ -1,12 +1,24 @@
 #!/bin/bash
 set -e
 
-echo "📄 Kopiere GO_Attack_Parameters.[cpp/h] ins src-Verzeichnis ..."
-cp -v /media/sf_Code_Exchange/GO_Attack_Parameters.cpp ../../src/grandorgue/sound/
-cp -v /media/sf_Code_Exchange/GO_Attack_Parameters.h ../../src/grandorgue/sound/
 
 # $1..: Optionen/Versionen
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "📄 Kopiere GO_Attack_Parameters.[cpp/h] ins src-Verzeichnis (falls vorhanden) ..."
+# Ziel relativ zum Skriptverzeichnis bestimmen (script-local), nicht relativ zum Aufruf-cwd
+TARGET_SOUND_DIR="$(readlink -f "$SCRIPT_DIR/../../src/grandorgue/sound")"
+mkdir -p "$TARGET_SOUND_DIR"
+if [ -e /media/sf_Code_Exchange/GO_Attack_Parameters.cpp ]; then
+  cp -v /media/sf_Code_Exchange/GO_Attack_Parameters.cpp "$TARGET_SOUND_DIR/"
+else
+  echo "Warnung: /media/sf_Code_Exchange/GO_Attack_Parameters.cpp nicht gefunden, überspringe."
+fi
+if [ -e /media/sf_Code_Exchange/GO_Attack_Parameters.h ]; then
+  cp -v /media/sf_Code_Exchange/GO_Attack_Parameters.h "$TARGET_SOUND_DIR/"
+else
+  echo "Warnung: /media/sf_Code_Exchange/GO_Attack_Parameters.h nicht gefunden, überspringe."
+fi
+
 BUILD_DIR="$SCRIPT_DIR/build/win64"     # <<< früh setzen!
 
 # ---- CLI-Optionen ----------------------------------------------------------
@@ -69,8 +81,13 @@ if $DO_CLEAN; then
 fi
 
 export LANG=C
-export WX_CONFIG="$MINGW_DIR/bin/wx-config"
+# This script performs a win64 cross-build — always load mingw vars so
+# cmake is configured to find the MinGW toolchain and headers.
 source "$SCRIPT_DIR/set-mingw-vars.sh"
+# set WX_CONFIG if mingw wx-config exists
+if [[ -x "${MINGW_DIR:-}/bin/wx-config" ]]; then
+  export WX_CONFIG="$MINGW_DIR/bin/wx-config"
+fi
 
 # ⚙️ Compiler-Flags
 export CXXFLAGS="-O3 -DNDEBUG -g0"
