@@ -26,3 +26,17 @@ Makefile
 /_CPack_Packages/
 
 .DS_Store
+
+# Ignore editor/IDE caches and indexes
+.cache/
+.cache/clangd/
+.vscode/
+*.idx
+*.log
+*.swp
+tags
+
+# Ignore common OS/editor files
+*.~ 
+*.tmp
+*.bak
