@@ -9,6 +9,7 @@
 #define GOSOUNDFADER_H_
 
 #include <assert.h>
+#include <math.h>
 
 /**
  * This class is responsible for smoothly changing a volume of samples.
@@ -34,6 +35,10 @@
  * totalVol = targetVolume * externalVolume
  * This volume is applied in the Process() call
  */
+ 
+// Sinus-Fade-Modus
+enum class FadeMode { None, Linear, Sinus };
+
 
 class GOSoundFader {
 private:
@@ -51,7 +56,16 @@ private:
   // Last volume points are the volumes at the end of previous Process()
   float m_LastTargetVolumePoint;
   float m_LastExternalVolumePoint;
+  
+  FadeMode m_CurrentFadeMode = FadeMode::Sinus;
 
+  // für Sinus-Fade
+  unsigned m_FadeStartSample = 0;
+  unsigned m_FadeLengthSamples = 0;
+  float m_FadeStartVolume = 0.0f;
+
+  // globaler Fortschritt
+  unsigned m_CurrentSampleCounter = 0;
 public:
   /**
    * Setup the fader for constant volume or for increasing from 0 to
@@ -71,16 +85,21 @@ public:
    * @param nFrames number of frames for full decay
    */
   inline void StartDecreasingVolume(unsigned nFrames) {
-    // maybe m_TargetVolume has not yet been reached, but the velocity of
-    // decreasing should be the same as it has reached
+    m_CurrentFadeMode = FadeMode::Sinus;
     m_DecreasingDeltaPerFrame = m_TargetVolume / nFrames;
+
+    if (m_CurrentFadeMode == FadeMode::Sinus) {
+      // Sinus-Fade-Out: Zähler zurücksetzen, Länge und Startlautstärke merken
+      m_FadeStartSample = m_CurrentSampleCounter = 0;
+      m_FadeLengthSamples = nFrames;
+      m_FadeStartVolume = m_LastTargetVolumePoint;
+
+      // Kein linearer Verlauf → nichts mehr zu tun
+      return;
+    }
+
     if (m_IncreasingDeltaPerFrame > 0.0f) {
-      /*
-        The increasing has not yet finished. We are starting a "virtual"
-        decreasing from m_TargetVolume to 0.
-        The increasing processus will continue until it meet the "virtual"
-        decreasing one at the new m_TargetVolume. Let's calculate it
-       */
+      // Wir unterbrechen einen noch laufenden Fade-In
       assert(m_LastTargetVolumePoint < m_TargetVolume);
       m_TargetVolume = (m_TargetVolume - m_LastTargetVolumePoint)
           * m_IncreasingDeltaPerFrame
@@ -93,8 +112,16 @@ public:
   inline void SetVelocityVolume(float volume) { m_VelocityVolume = volume; }
 
   void Process(unsigned nFrames, float *buffer, float externalVolume);
+  void ProcessSinusFade(unsigned nFrames, float *buffer, float externalVolume);
 
   bool IsSilent() const { return (m_LastTargetVolumePoint <= 0.0f); }
+  /*bool IsSilent() const {
+  return (
+    m_DecreasingDeltaPerFrame == 0.0f &&
+    m_IncreasingDeltaPerFrame == 0.0f &&
+    m_LastTargetVolumePoint <= 0.00001f &&
+    m_CurrentSampleCounter >= m_FadeLengthSamples
+  ); }*/
 };
 
 #endif /* GOSOUNDFADER_H_ */

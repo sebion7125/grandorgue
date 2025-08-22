@@ -11,6 +11,8 @@
 
 #include "buffer/GOSoundBufferMutable.h"
 #include "model/GOOrganModel.h"
+#include "model/GORank.h"
+#include "model/GOSoundingPipe.h"
 #include "model/GOPipe.h"
 #include "model/GOWindchest.h"
 #include "playing/GOSoundReleaseAlignTable.h"
@@ -26,6 +28,8 @@
 
 #include "GOEvent.h"
 #include "GOSoundRecorder.h"
+#include "GO_Attack_Parameters.h"
+#include "GO_DebugRelease.h"
 
 GOSoundOrganEngine::GOSoundOrganEngine()
   : m_PolyphonyLimiting(true),
@@ -519,9 +523,28 @@ void GOSoundOrganEngine::SwitchToAnotherAttack(GOSoundSampler *pSampler) {
   }
 }
 
+enum ChannelKind { CK_Unknown, CK_Dry, CK_Front, CK_Rear };
+
+static ChannelKind ChannelFromRankName(const wxString &n) {
+  if (n.Contains("dry"))    return CK_Dry;
+  if (n.Contains("rear:")) return CK_Rear;
+  if (n.Contains("front:")) return CK_Front;
+  return CK_Dry;
+}
+
+static bool IsChamade(const wxString &n) {
+  return n.Contains("trompeta batalla 8") || n.Contains("batalla")
+    || n.Contains("cham.");
+}
+
 void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
   if (!handle->p_SoundProvider)
     return;
+
+    //handle->p_SoundProvider->GetAttack(unsigned int velocity, unsigned int releasedDurationMs)
+  
+    
+    
 
   /* The beloow code creates a new sampler to playback the release, the
    * following code takes the active sampler for this pipe (which will be
@@ -545,6 +568,7 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
     ? m_WindchestTasks[windchestTaskToIndex(taskId)]->GetWindchestVolume()
     : 1.0f;
 
+    
   // FIXME: this is wrong... the intention is to not create a release for a
   // sample being played back with zero amplitude but this is a comparison
   // against a double. We should test against a minimum level.
@@ -561,13 +585,14 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
       const bool not_a_tremulant = isWindchestTask(handle->m_SamplerTaskId);
 
       if (not_a_tremulant) {
+        
         /* Because this sampler is about to be moved to a detached
          * windchest, we must apply the gain of the existing windchest
          * to the gain target for this fader - otherwise the playback
          * volume on the detached chest will not match the volume on
          * the existing chest. */
         gain_target *= vol;
-        if (m_ScaledReleases) {
+        //if (m_ScaledReleases) {
           /* Note: "time" is in milliseconds. */
           int time = ((m_CurrentTime - handle->time) * 1000) / m_SampleRate;
           /* TODO: below code should be replaced by a more accurate model of the
@@ -588,14 +613,70 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
               attack_duration
                 = 500.0f + ((24.0f - (float)midikey_frequency) * 6.25f);
           }
-          /* calculate gain (gain_target) to apply to tail amplitude as a
-           * function of when the note is released during the attack */
-          if (time < (int)attack_duration) {
-            float attack_index = (float)time / attack_duration;
-            float gain_delta
-              = (0.2f + (0.8f * (2.0f * attack_index - (attack_index * attack_index))));
-            gain_target *= gain_delta;
+          auto *prov = handle->p_SoundProvider;
+          if (!prov) return;
+          auto *pipe = prov->GetOwnerPipe();
+          GORank *rank = pipe ? pipe->GetRank() : nullptr;
+          const wxString rankName
+            = rank ? rank->GetName().Lower() : wxEmptyString;
+          const ChannelKind chan = ChannelFromRankName(rankName);
+          const bool chamade    = IsChamade(rankName);
+
+          CHAMADE_DEBUG(
+            "Release: Rank: %s , bCham=%i, Type=%i",
+            rankName.mb_str(),
+            chamade,
+            chan);
+
+          float a;
+          if (chamade) {
+            switch (chan) {
+              case CK_Dry:
+                attack_duration = attack_time_dry_by_midi[midikey_frequency];
+                a = curvature_dry_by_midi[midikey_frequency];
+                CHAMADE_DEBUG("Release gestartet: Cham Dry ");
+                break;
+              case CK_Front:
+                attack_duration = attack_time_front_by_midi[midikey_frequency];
+                a = curvature_front_by_midi[midikey_frequency];
+                CHAMADE_DEBUG("Release gestartet: Cham Front ");
+                break;
+              case CK_Rear:
+                attack_duration = attack_time_rear_by_midi[midikey_frequency];
+                a = curvature_rear_by_midi[midikey_frequency];
+                CHAMADE_DEBUG("Release gestartet: Cham Rear ");
+                break;
+              default: break;
+            }
+            if (time < (int)attack_duration) {
+              float gain_delta
+                = a * (time - attack_duration) * (time - attack_duration)
+                + 1.0f;
+              gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
+              gain_target *= gain_delta;
+            }
           }
+                    
+          /*float attack_duration = attack_time_by_midi[midikey_frequency];
+          float a = curvature_by_midi[midikey_frequency];*/
+          
+          
+          else
+          {
+              
+            if (time < (int)attack_duration) {
+              float attack_index = (float)time / attack_duration;
+              float gain_delta
+                = (0.2f + (0.8f * (2.0f * attack_index - (attack_index * attack_index))));
+              gain_target *= gain_delta; // test without attenuation of reverb
+            }
+          }
+          
+          //float attack_index = (float)time / attack_duration;
+          //float gain_delta = (0.2f + (0.8f * (2.0f * attack_index - (attack_index * attack_index))));
+          
+          //gain_target *= 1.0f; // test with extreme reverb
+          
           /* calculate the volume decay to be applied to the release to take
            * into account the fact that reverb is not completely formed during
            * staccato. Time to full reverb is estimated as a function of release
@@ -603,7 +684,7 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
            * time_to_full_reverb is around 350 ms; for an organ with a release
            * length of 1 second or less, time_to_full_reverb is around 100 ms;
            * time_to_full_reverb is linear in between */
-          int time_to_full_reverb = ((60 * release_section->GetLength())
+          /*int time_to_full_reverb = ((60 * release_section->GetLength())
                                      / release_section->GetSampleRate())
             + 40;
           if (time_to_full_reverb > 350)
@@ -616,10 +697,10 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
              * release
              * 700 ms and 6 s for release with large reverberation e.g. long
              * release */
-            gain_decay_length
-              = time_to_full_reverb + 6000 * time / time_to_full_reverb;
-          }
-        }
+            //gain_decay_length = 0; 
+              //= time_to_full_reverb + 6000 * time / time_to_full_reverb;
+          //}
+        //}
       }
 
       const unsigned releaseLength = this_pipe->GetReleaseTail();
@@ -632,9 +713,9 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
         && (releaseLength < gain_decay_length || gain_decay_length == 0))
         gain_decay_length = releaseLength;
 
-      if (gain_decay_length > 0)
+      /*if (gain_decay_length > 0)
         new_sampler->fader.StartDecreasingVolume(
-          MsToSamples(gain_decay_length));
+          MsToSamples(gain_decay_length));*/
 
       if (
         m_ReleaseAlignmentEnabled
