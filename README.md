@@ -27,6 +27,12 @@ See [INSTALL.md](INSTALL.md) for the downloading and installation prebuilt Grand
 ## Building from sources
 See [BUILD.md](BUILD.md) for instructions on how to build GrandOrgue from the source code.
 
+## Developer documentation
+- Architecture/navigation map: `docs/RepoMap.md`
+- Meta logbook: `docs/GrandOrgue-Odyssey.md`
+- Conversation transcripts: `docs/GO_Project_Chats.md`
+- API context bundle: `docs/GO_API_Context_Bundle.zip`
+
 ## External libraries
 
 ![ASIO](https://user-images.githubusercontent.com/19529533/139595107-954ae23d-fa37-4346-ada6-3f69f203dcd2.jpg)

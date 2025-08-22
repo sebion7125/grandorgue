@@ -13,6 +13,7 @@
 #include <wx/filedlg.h>
 #include <wx/image.h>
 #include <wx/menu.h>
+#include <wx/accel.h>
 #include <wx/msgdlg.h>
 #include <wx/platinfo.h>
 #include <wx/sizer.h>
@@ -258,12 +259,12 @@ GOFrame::GOFrame(
     ID_MIDI_MONITOR, _("&Log MIDI events"), wxEmptyString, wxITEM_CHECK);
 
   m_crossfade_menu = new wxMenu;
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Linear,  _("Linear"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_SinEq,   _("Sinus (equal power)"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Sin2,    _("Sin^2"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_SqrtEq,  _("Sqrt (equal power)"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_X2,      _("x^2"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Custom,  _("Custom (Placeholder)"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Linear,  _("Linear\tF7"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_SinEq,   _("Sinus (equal power)\tF8"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Sin2,    _("Sin^2\tF9"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_SqrtEq,  _("Sqrt (equal power)\tF10"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_X2,      _("x^2\tF11"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Custom,  _("Custom (Placeholder)\tF12"));
   m_audio_menu->AppendSubMenu(m_crossfade_menu, _("&Crossfade"));
 
   // Mark the menu radio item that matches the current runtime crossfade mode
@@ -311,6 +312,19 @@ GOFrame::GOFrame(
   menu_bar->Append(m_panel_menu, _("&Panel"));
   menu_bar->Append(help_menu, _("&Help"));
   SetMenuBar(menu_bar);
+
+  // Accelerator keys for Crossfade menu (F7..F12)
+  {
+    wxAcceleratorEntry entries[6];
+    entries[0].Set(wxACCEL_NORMAL, WXK_F7,  ID_Crossfade_Linear);
+    entries[1].Set(wxACCEL_NORMAL, WXK_F8,  ID_Crossfade_SinEq);
+    entries[2].Set(wxACCEL_NORMAL, WXK_F9,  ID_Crossfade_Sin2);
+    entries[3].Set(wxACCEL_NORMAL, WXK_F10, ID_Crossfade_SqrtEq);
+    entries[4].Set(wxACCEL_NORMAL, WXK_F11, ID_Crossfade_X2);
+    entries[5].Set(wxACCEL_NORMAL, WXK_F12, ID_Crossfade_Custom);
+    wxAcceleratorTable accel(WXSIZEOF(entries), entries);
+    SetAcceleratorTable(accel);
+  }
 
   m_ToolBar = CreateToolBar(wxNO_BORDER | wxTB_HORIZONTAL | wxTB_FLAT);
   m_ToolBar->SetToolBitmapSize(wxSize(16, 16));
