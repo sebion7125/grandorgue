@@ -181,50 +181,39 @@ void GOSoundFader::Process(
 // sinus mode processing
 void GOSoundFader::ProcessSinusFade(unsigned nFrames, float* buffer, float externalVolume) {
   if (nFrames == 0)
-    return;  // Keine Verarbeitung, aber Fader läuft weiter
+    return;
 
-  // Smooth externalVolume (wie im linearen Fader)
+  // Zielwert berechnen
   float targetExternalVolume = m_VelocityVolume * externalVolume;
-
   if (m_LastExternalVolumePoint < 0.0f)
     m_LastExternalVolumePoint = targetExternalVolume;
 
-  if (targetExternalVolume != m_LastExternalVolumePoint) {
+  float startExternalVolume = m_LastExternalVolumePoint;
+
+  if (targetExternalVolume != startExternalVolume) {
     m_LastExternalVolumePoint +=
-      (targetExternalVolume - m_LastExternalVolumePoint)
+      (targetExternalVolume - startExternalVolume)
       * std::max(nFrames, EXTERNAL_VOLUME_CHANGE_FRAMES)
       / EXTERNAL_VOLUME_CHANGE_FRAMES;
   }
 
-  float baseVolume = m_TargetVolume * m_LastExternalVolumePoint;
+  float endExternalVolume = m_LastExternalVolumePoint;
 
-  // Sicherheitskorrektur: Wenn m_FadeLengthSamples == 0, dann keine Skalierung → direkter Lautstärke-Faktor 1.0
-  if (m_FadeLengthSamples == 0) {
-    for (unsigned i = 0; i < nFrames; ++i, buffer += 2) {
-      buffer[0] *= baseVolume;
-      buffer[1] *= baseVolume;
-    }
+  // Delta pro Frame
+  float externalDelta = (endExternalVolume - startExternalVolume) / nFrames;
 
-    // Fade abschließen
-    if (m_IncreasingDeltaPerFrame > 0.0f) {
-      m_LastTargetVolumePoint = m_TargetVolume;
-      m_IncreasingDeltaPerFrame = 0.0f;
-    }
-    if (m_DecreasingDeltaPerFrame > 0.0f) {
-      m_LastTargetVolumePoint = 0.0f;
-      m_DecreasingDeltaPerFrame = 0.0f;
-    }
-    return;
-  }
+  float volume = 0.0f;
 
-  float volume;
-  // Normaler Fade-Verlauf mit sin² / cos²
   for (unsigned i = 0; i < nFrames; ++i, buffer += 2, ++m_CurrentSampleCounter) {
+    // aktuelles ExternalVolume interpolieren
+    float currentExternal = startExternalVolume + i * externalDelta;
+    float baseVolume = m_TargetVolume * currentExternal;
+
+    // Sinus-Fade berechnen
     float x = float(m_CurrentSampleCounter) / float(m_FadeLengthSamples);
     if (x > 1.0f) x = 1.0f;
 
     float fadeFactor = 1.0f;
-
     if (m_IncreasingDeltaPerFrame > 0.0f) {
       float s = sinf(0.5f * M_PI * x);
       fadeFactor = s;
@@ -237,7 +226,7 @@ void GOSoundFader::ProcessSinusFade(unsigned nFrames, float* buffer, float exter
     buffer[0] *= volume;
     buffer[1] *= volume;
   }
-  
+
   m_LastTargetVolumePoint = volume;
 
   // Fade abschließen
@@ -245,8 +234,7 @@ void GOSoundFader::ProcessSinusFade(unsigned nFrames, float* buffer, float exter
     if (m_IncreasingDeltaPerFrame > 0.0f) {
       m_LastTargetVolumePoint = m_TargetVolume;
       m_IncreasingDeltaPerFrame = 0.0f;
-    }
-    else if (m_DecreasingDeltaPerFrame > 0.0f) {
+    } else if (m_DecreasingDeltaPerFrame > 0.0f) {
       m_LastTargetVolumePoint = 0.0f;
       m_DecreasingDeltaPerFrame = 0.0f;
     }
