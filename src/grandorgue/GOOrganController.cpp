@@ -249,11 +249,22 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg) {
     = cfg.ReadString(CMBSetting, WX_ORGAN, wxT("Temperament"), false);
 
   // Read persisted crossfade mode for this organ (if present)
+  // Backwards compatibility: older organ files that do not contain a
+  // CrossfadeMode entry should keep the legacy Linear behaviour.
   {
-    long cf = static_cast<long>(GOCrossfadeMode::SinEqualPower);
-    cf = cfg.ReadInteger(
-      CMBSetting, WX_ORGAN, wxT("CrossfadeMode"), 0, 10, false, cf);
-    GOAudioParams::SetCrossfadeMode(static_cast<GOCrossfadeMode>(cf));
+    // Check presence by attempting to read the entry as a string (non-required).
+    const wxString cf_entry = cfg.ReadString(
+      CMBSetting, WX_ORGAN, wxT("CrossfadeMode"), false, wxEmptyString);
+    if (cf_entry.IsEmpty()) {
+      // Old organ file: keep legacy default (Linear)
+      GOAudioParams::SetCrossfadeMode(GOCrossfadeMode::Linear);
+    } else {
+      // Newer files: parse stored integer (fall back to SinEqualPower if parse fails)
+      long cf = static_cast<long>(GOCrossfadeMode::SinEqualPower);
+      cf = cfg.ReadInteger(
+        CMBSetting, WX_ORGAN, wxT("CrossfadeMode"), 0, 10, false, cf);
+      GOAudioParams::SetCrossfadeMode(static_cast<GOCrossfadeMode>(cf));
+    }
   }
 
   // It must be created before GOOrganModel::Load because lots of objects

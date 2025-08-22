@@ -21,6 +21,18 @@
 #include "threading/GOMutex.h"
 #include "updater/GOUpdateChecker.h"
 
+#include "GOEvent.h"
+
+enum {
+  ID_Crossfade_Linear = wxID_HIGHEST + 500,
+  ID_Crossfade_SinEq,
+  ID_Crossfade_Sin2,
+  ID_Crossfade_SqrtEq,
+  ID_Crossfade_X2,
+  ID_Crossfade_Custom
+};
+
+
 class GOApp;
 class GOAudioGauge;
 class GOConfig;
@@ -52,6 +64,7 @@ private:
 
   wxMenu *m_file_menu;
   wxMenu *m_audio_menu;
+  wxMenu *m_crossfade_menu;
   wxMenu *m_panel_menu;
   wxMenu *m_favorites_menu;
   wxMenu *m_recent_menu;
@@ -129,6 +142,7 @@ private:
   void OnAudioPanic(wxCommandEvent &event);
   void OnAudioMemset(wxCommandEvent &event);
   void OnAudioState(wxCommandEvent &event);
+  void OnSetCrossfade(wxCommandEvent &event);
 
   void SetEventAfterSettings(
     wxEventType eventType, int eventId, GOOrgan *pOrganFile = NULL);
