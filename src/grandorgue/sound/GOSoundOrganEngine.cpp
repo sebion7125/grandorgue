@@ -628,48 +628,58 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
             chamade,
             chan);
 
-          float a;
+          float g_0;
           if (chamade) {
             switch (chan) {
               case CK_Dry:
-                attack_duration = attack_time_dry_by_midi[midikey_frequency];
-                a = curvature_dry_by_midi[midikey_frequency];
+                attack_duration = tmax_dry_by_midi[midikey_frequency];
+                g_0 = g0_dry_by_midi[midikey_frequency];
                 CHAMADE_DEBUG("Release gestartet: Cham Dry ");
                 break;
               case CK_Front:
-                attack_duration = attack_time_front_by_midi[midikey_frequency];
-                a = curvature_front_by_midi[midikey_frequency];
+                attack_duration = tmax_front_by_midi[midikey_frequency];
+                g_0 = g0_front_by_midi[midikey_frequency];
                 CHAMADE_DEBUG("Release gestartet: Cham Front ");
                 break;
               case CK_Rear:
-                attack_duration = attack_time_rear_by_midi[midikey_frequency];
-                a = curvature_rear_by_midi[midikey_frequency];
+                attack_duration = tmax_rear_by_midi[midikey_frequency];
+                g_0 = g0_rear_by_midi[midikey_frequency];
                 CHAMADE_DEBUG("Release gestartet: Cham Rear ");
                 break;
               default: break;
             }
             if (time < (int)attack_duration) {
-              float gain_delta
-                = a * (time - attack_duration) * (time - attack_duration)
-                + 1.0f;
+              float attack_index = (float)time / attack_duration;
+              float gain_delta = g_0 * (1.0f - attack_index) + attack_index;
               gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
               gain_target *= gain_delta;
             }
           }
                     
-          /*float attack_duration = attack_time_by_midi[midikey_frequency];
+          /*float attack_duration = tmax_by_midi[midikey_frequency];
           float a = curvature_by_midi[midikey_frequency];*/
           
           
           else
           {
-              
+            // new modell with estimated values
+            attack_duration = 70;
+            g_0 = 0.1f;
+            
             if (time < (int)attack_duration) {
+              float attack_index = (float)time / attack_duration;
+              float gain_delta
+                = g_0 * (1.0f - attack_index) + attack_index; // old model: a * (time - attack_duration) * (time - attack_duration) + 1.0f;
+              gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
+              gain_target *= gain_delta; // test without attenuation of reverb
+              //gain_target = 0;
+            }              
+            /*if (time < (int)attack_duration) {
               float attack_index = (float)time / attack_duration;
               float gain_delta
                 = (0.2f + (0.8f * (2.0f * attack_index - (attack_index * attack_index))));
               gain_target *= gain_delta; // test without attenuation of reverb
-            }
+            }*/
           }
           
           //float attack_index = (float)time / attack_duration;
