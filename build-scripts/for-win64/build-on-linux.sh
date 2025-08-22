@@ -66,6 +66,26 @@ make $PARALLEL_PRMS VERBOSE=1 GrandOrgue
 
 popd
 
+# Versuch: Erzeuge Installer mit CPack (falls von CMake konfiguriert).
+# Wechsel ins win64-Buildverzeichnis und versuche das package-Target / CPack.
+pushd "$BUILD_ROOT/win64"
+
+echo "Erzeuge Installer (CPack / package target)..."
+
+# Versuche zuerst das CMake package target (plattformunabhängig).
+if cmake --build . --target package; then
+    echo "Erfolg: cmake --build --target package"
+else
+    echo "Hinweis: package-target nicht verfügbar oder fehlgeschlagen, versuche cpack direkt..."
+    if /usr/bin/cpack --config ./CPackConfig.cmake; then
+        echo "Erfolg: cpack hat Pakete erzeugt."
+    else
+        echo "Warnung: cpack/package erzeugte keine Installer. Fortfahren und ggf. Binärdateien kopieren."
+    fi
+fi
+
+popd
+
 # === Ergebnis in gemeinsamen Zielordner kopieren ===
 
 BUILD_BIN_DIR="$BUILD_ROOT/win64/bin"
