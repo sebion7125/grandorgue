@@ -10,6 +10,8 @@
 #include <algorithm>
 
 #include <wx/intl.h>
+#include <wx/log.h>
+#include <wx/stopwatch.h>
 
 #include "config/GOConfigReader.h"
 
@@ -109,6 +111,9 @@ void GORank::Load(
   m_PipeConfig.SetParent(&windchest->GetPipeConfig());
 
   m_Pipes.clear();
+  // Rank-level timing
+  wxStopWatch __go_rank_sw;
+  __go_rank_sw.Start();
   for (unsigned i = 0; i < number_of_logical_pipes; i++) {
     wxString buffer;
     buffer.Printf(wxT("Pipe%03u"), i + 1);
@@ -130,6 +135,7 @@ void GORank::Load(
         m_MaxVolume,
         m_RetuneRank));
     }
+
     m_Pipes[i]->Load(cfg, group, buffer);
 
     // Per-pipe progress suppressed here; the overall "Building: ranks (i/n)"

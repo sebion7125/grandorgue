@@ -8,6 +8,8 @@
 #include "GOStop.h"
 
 #include <wx/intl.h>
+#include <wx/log.h>
+#include <wx/stopwatch.h>
 
 #include "config/GOConfigReader.h"
 
@@ -37,6 +39,9 @@ unsigned GOStop::IsAuto() const {
 void GOStop::Load(GOConfigReader &cfg, const wxString &group) {
   unsigned number_of_ranks = cfg.ReadInteger(
     ODFSetting, group, wxT("NumberOfRanks"), 0, 999, false, 0);
+  // stop-level timing
+  wxStopWatch __go_stop_sw;
+  __go_stop_sw.Start();
 
   m_FirstAccessiblePipeLogicalKeyNumber = cfg.ReadInteger(
     ODFSetting, group, wxT("FirstAccessiblePipeLogicalKeyNumber"), 1, 128);
@@ -90,18 +95,26 @@ void GOStop::Load(GOConfigReader &cfg, const wxString &group) {
       ODFSetting, group, wxT("FirstAccessiblePipeLogicalPipeNumber"), 1, 192);
     info.FirstAccessibleKeyNumber = 1;
     info.PipeCount = m_NumberOfAccessiblePipes;
-    info.Rank->Load(
-      cfg,
-      group,
-      m_FirstMidiNoteNumber - info.FirstPipeNumber
-        + info.FirstAccessibleKeyNumber + m_FirstAccessiblePipeLogicalKeyNumber
-        - 1);
+    {
+      wxStopWatch __go_rank_from_stop_sw;
+      __go_rank_from_stop_sw.Start();
+      info.Rank->Load(
+        cfg,
+        group,
+        m_FirstMidiNoteNumber - info.FirstPipeNumber
+          + info.FirstAccessibleKeyNumber + m_FirstAccessiblePipeLogicalKeyNumber
+          - 1);
+      long __go_rank_from_stop_ms = __go_rank_from_stop_sw.Time();
+      wxLogMessage(wxString::Format("Timing: GOStop %s created Rank Load %ld ms", group.c_str(), __go_rank_from_stop_ms));
+    }
     info.StopID = info.Rank->RegisterStop(this);
     m_RankInfo.push_back(info);
   }
 
   m_KeyVelocity.resize(m_NumberOfAccessiblePipes);
   std::fill(m_KeyVelocity.begin(), m_KeyVelocity.end(), 0);
+  // Log total stop load time
+  wxLogMessage(wxString::Format("Timing: GOStop %s Load total %ld ms", group.c_str(), __go_stop_sw.Time()));
   GODrawstop::Load(cfg, group);
 }
 
