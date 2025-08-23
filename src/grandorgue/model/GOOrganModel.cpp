@@ -80,6 +80,8 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
   };
   // model build timing
   wxStopWatch __go_model_sw;
+  wxStopWatch __sw_model_total;
+  __sw_model_total.Start();
   __go_model_sw.Start();
   reportPhase(0, _("Building organ model and GUI resources"));
   wxLogMessage(wxString::Format("Timing: ModelPhase 'start' %ld ms", __go_model_sw.Time()));
@@ -231,9 +233,11 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
 
   m_ODFRankCount = cfg.ReadInteger(
     ODFSetting, WX_ORGAN, wxT("NumberOfRanks"), 0, 999, false);
+  wxStopWatch __sw_ranks;
   if (m_ODFRankCount > 0) {
     reportPhase(50, _("Building: ranks"));
     wxLogMessage(wxString::Format("Timing: ModelPhase 'ranks-start' %ld ms", __go_model_sw.Time()));
+    __sw_ranks.Start();
     __go_model_sw.Start();
   }
   unsigned lastPct = 50;
@@ -352,6 +356,8 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
   for (GOReferencingObject *pObj : GetReferencingObjects())
     pObj->ResolveReferences();
   reportPhase(100, _("Building organ model and GUI resources"));
+  m_tim_ranks_ms = __sw_ranks.Time();
+  m_tim_rest_ms = __sw_model_total.Time() - m_tim_ranks_ms;
   wxLogMessage(wxString::Format("Timing: ModelPhase 'complete' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 }

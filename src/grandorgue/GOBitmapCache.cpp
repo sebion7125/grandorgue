@@ -17,6 +17,7 @@
 #include "GOBuffer.h"
 #include "GOLog.h"
 #include "GOOrganController.h"
+#define GUI_BITMAP_TIMING 1
 #include "Images.h"
 
 #define BITMAP_LIST                                                            \
@@ -214,6 +215,10 @@ GOBitmap GOBitmapCache::GetBitmap(wxString filename, wxString maskName) {
 
   wxImage image, maskimage;
 
+#if GUI_BITMAP_TIMING
+  wxStopWatch swBmp;
+#endif
+
   if (!loadFile(image, filename))
     throw wxString::Format(
       _("Failed to open the graphic '%s'"), filename.c_str());
@@ -237,6 +242,17 @@ GOBitmap GOBitmapCache::GetBitmap(wxString filename, wxString maskName) {
   wxImage *bitmap = new wxImage(image);
   if (bitmap->HasMask())
     bitmap->InitAlpha();
+
   RegisterBitmap(bitmap, filename, maskName);
+
+#if GUI_BITMAP_TIMING
+  long long ms = swBmp.Time();
+  // Log only relatively slow decodes to avoid spamming the log
+  if (ms > 120) {
+    wxLogMessage(wxString::Format("GUI.Bitmap.Load key=\"%s\" ms=%lld", filename.c_str(), ms));
+    wxLog::FlushActive();
+  }
+#endif
+
   return GOBitmap(bitmap);
 }
