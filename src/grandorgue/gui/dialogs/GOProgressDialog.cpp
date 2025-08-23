@@ -45,8 +45,9 @@ void GOProgressDialog::Setup(
   // Some wx ports do not expose SetSize/GetSize on wxProgressDialog; adding
   // trailing spaces to the initial message helps the dialog lay out wider.
   wxString paddedMsg = msg;
-  const int padSpaces = 120; // larger padding to increase visible width
-  paddedMsg += wxString(padSpaces, ' ');
+  const int padSpaces = 80; // larger padding to increase visible width
+  paddedMsg += wxString(padSpaces, wxChar(0x00A0));
+
 
   m_dlg = new wxProgressDialog(
     title,
