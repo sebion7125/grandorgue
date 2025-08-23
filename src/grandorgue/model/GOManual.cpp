@@ -224,7 +224,22 @@ void GOManual::Load(GOConfigReader &cfg, const wxString &group) {
         nb_stops));
     }
 
+#ifdef GO_PROFILE_ODFLOAD
+    wxStopWatch __go_stopwatch;
+    __go_stopwatch.Start();
+#endif
     pStop->Load(cfg, buffer);
+#ifdef GO_PROFILE_ODFLOAD
+    {
+      long __go_ms = __go_stopwatch.Time();
+      wxLogMessage(
+        wxString::Format(
+          "Timing: GOManual %d Stop %u Load %ld ms",
+          m_manual_number,
+          localNumber,
+          __go_ms));
+    }
+#endif
     pStop->SetElementId(r_OrganModel.GetRecorderElementID(
       wxString::Format(wxT("M%dS%d"), m_manual_number, i)));
     m_stops.push_back(pStop);

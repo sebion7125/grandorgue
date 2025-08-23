@@ -49,7 +49,7 @@ private:
     GOBool3 (GOPipeConfig::*getThisValue)() const,
     bool (GOPipeConfigNode::*getParentValue)() const,
     const T GOConfig::*globalValue) const {
-    return to_bool((m_PipeConfig.*getThisValue)(), [=]() {
+    return to_bool((m_PipeConfig.*getThisValue)(), [=, this]() {
       return m_parent ? (m_parent->*getParentValue)()
                       : globalValue && (bool)(m_config.*globalValue)();
     });

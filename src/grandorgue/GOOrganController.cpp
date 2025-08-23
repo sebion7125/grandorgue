@@ -15,6 +15,8 @@
 #include <wx/txtstrm.h>
 #include <wx/wfstream.h>
 #include <wx/stopwatch.h>
+#include <map>
+#include <string>
 
 #include "archive/GOArchive.h"
 #include "archive/GOArchiveFile.h"
@@ -319,11 +321,21 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg) {
   m_PitchLabel.Load(cfg, wxT("SetterMasterPitch"), _("organ pitch"));
   m_TemperamentLabel.Load(
     cfg, wxT("SetterMasterTemperament"), _("temperament"));
-  m_MainWindowData.Load(cfg);
 
-  // Load dialog sizes
-  if (GODialogSizeSet::isPresentInCfg(cfg, CMBSetting))
+  {
+    wxStopWatch __go_mainwnd_sw;
+    __go_mainwnd_sw.Start();
+    m_MainWindowData.Load(cfg);
+    wxLogMessage(wxString::Format("Timing: MainWindowData.Load %ld ms", __go_mainwnd_sw.Time()));
+  }
+
+  // Load dialog sizes (measured)
+  if (GODialogSizeSet::isPresentInCfg(cfg, CMBSetting)) {
+    wxStopWatch __go_dialogsizes_sw;
+    __go_dialogsizes_sw.Start();
     m_config.m_DialogSizes.Load(cfg, CMBSetting);
+    wxLogMessage(wxString::Format("Timing: DialogSizes.Load %ld ms", __go_dialogsizes_sw.Time()));
+  }
 
   m_panels.resize(0);
   m_panels.push_back(new GOGUIPanel(this));
@@ -571,13 +583,22 @@ wxString GOOrganController::Load(
         dummy.resize(1024 * 1024 * 50);
 #ifdef GO_PROFILE_ODFLOAD
         wxLogMessage(wxString::Format("Timing: Parse/ODF processing: %ld ms", sw_phase.Time()));
-        sw_phase.Restart();
+        sw_phase.Start();
 #endif
+
+        // Measure any delay between model completion and start of reference resolution
+        wxStopWatch __go_postmodel_sw;
+        __go_postmodel_sw.Start();
+
         dlg->Reset(1, _("Resolving object references"));
         ResolveReferences();
+
+        // Time from end of model -> end of ResolveReferences
+        wxLogMessage(wxString::Format("Timing: Post-model -> ResolveReferences total %ld ms", __go_postmodel_sw.Time()));
+
 #ifdef GO_PROFILE_ODFLOAD
         wxLogMessage(wxString::Format("Timing: ResolveReferences: %ld ms", sw_phase.Time()));
-        sw_phase.Restart();
+        sw_phase.Start();
 #endif
 
         /* Figure out list of pipes to load */
@@ -594,7 +615,11 @@ wxString GOOrganController::Load(
         GOCacheObject *obj = nullptr;
 
         /* Load pipes */
+        // Measure small sequence: preparing->cache open/header
         if (wxFileExists(m_CacheFilename)) {
+          wxStopWatch __go_prep_to_cache_sw;
+          __go_prep_to_cache_sw.Start();
+
           wxFile cache_file(m_CacheFilename);
           GOCache reader(cache_file, m_pool);
           cache_ok = cache_file.IsOpened();
@@ -615,23 +640,48 @@ wxString GOOrganController::Load(
             }
           }
 
+          // Log time taken to reach cache-open+header stage (aggregated small log)
+          wxLogMessage(wxString::Format("Timing: PreparingObjects->CacheOpenHeader %ld ms", __go_prep_to_cache_sw.Time()));
+
           GOCacheObject *obj = nullptr;
 
           if (cache_ok) {
+            // Aggregated summary: total objects, total time, average time (single line)
+            long long __go_cache_total_ms = 0;
+            long long __go_cache_objects = 0;
+
+            // Logpoint immediately before cache deserialization starts
+            wxLogMessage(wxString::Format("Timing: BeforeCacheDeserialization objects=%u", objectDistributor.GetNObjects()));
+
             while ((obj = objectDistributor.FetchNext())) {
+              wxStopWatch __go_obj_sw;
+              __go_obj_sw.Start();
+
               if (!obj->LoadFromCacheWithoutExc(m_pool, reader)) {
                 wxLogWarning(_("Cache load failure: %s"), obj->GetLoadError());
                 break;
               }
+
+              __go_cache_total_ms += __go_obj_sw.Time();
+              __go_cache_objects++;
+
               if (!dlg->Update(objectDistributor.GetPos(), obj->GetLoadTitle()))
                 throw GOLoadAborted(); // Skip the rest of the loading code
             }
+
             if (!obj)
               m_Cacheable = true;
             else
               // obj points to an object with a load error. We will try to load
               // it from the file later
               cache_ok = false;
+
+            if (__go_cache_objects > 0) {
+              long long __go_cache_avg_ms = __go_cache_total_ms / __go_cache_objects;
+              wxLogMessage(wxString::Format(
+                "Timing: Cache load summary total_objects=%lld total_ms=%lld avg_ms=%lld",
+                __go_cache_objects, __go_cache_total_ms, __go_cache_avg_ms));
+            }
           }
 
           if (!cache_ok && !m_config.ManageCache())
