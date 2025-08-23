@@ -131,6 +131,19 @@ void GORank::Load(
         m_RetuneRank));
     }
     m_Pipes[i]->Load(cfg, group, buffer);
+
+    // Report fine-grained progress while loading pipes inside a rank.
+    // Map this rank's pipe progress into the global "ranks" phase (50..70).
+    // If number_of_logical_pipes is zero, avoid division by zero.
+    unsigned pipesTotal = number_of_logical_pipes ? number_of_logical_pipes : 1;
+    unsigned pipeIndex = i + 1;
+    unsigned pct = 50 + (pipeIndex * 20) / pipesTotal;
+    r_OrganModel.ReportProgress(
+      pct,
+      wxString::Format(
+        _("Building: ranks (%u/%u)").c_str(),
+        pipeIndex,
+        pipesTotal));
   }
   m_PipeConfig.SetName(GetName());
   Resize();

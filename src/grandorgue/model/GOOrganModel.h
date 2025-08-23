@@ -9,6 +9,7 @@
 #define GOORGANMODEL_H
 
 #include <set>
+#include <functional>
 
 #include "ptrvector.h"
 
@@ -56,6 +57,9 @@ private:
 
   bool m_OrganModelModified;
 
+  // Progress reporting during model build
+  std::function<void(unsigned, const wxString &)> m_onProgress;
+
   /**
    * Walks across all manuals with divisional coupler engaged and returns the
    *   set of manuals where the divisional with the same number should be pushed
@@ -101,6 +105,19 @@ protected:
 public:
   GOOrganModel(GOConfig &config);
   virtual ~GOOrganModel();
+
+  // Set a progress sink to receive percent [0..100] and a phase label.
+  // Pass {} to disable.
+  void SetProgressSink(std::function<void(unsigned, const wxString &)> cb);
+
+  // Report progress from subcomponents. Accepts percent [0..100] relative to
+  // the whole model build. Subcomponents (e.g. GOManual) should call this to
+  // forward local progress to the global sink.
+  // Implemented inline to avoid possible link-order issues when cross-compiling.
+  void ReportProgress(unsigned pct, const wxString &label) {
+    if (m_onProgress)
+      m_onProgress(pct, label);
+  }
 
   const GOConfig &GetConfig() const { return m_config; }
   GOConfig &GetConfig() { return m_config; }
