@@ -167,3 +167,133 @@ bool GOConfigFileReader::Read(GOOpenedFile *file) {
 
   return true;
 }
+
+bool GOConfigFileReader::ReadWithProgress(
+  GOOpenedFile *file, const wxString &phaseLabel, ProgressFn onProgress) {
+  m_Entries.clear();
+
+  if (!file->Open()) {
+    wxLogError(_("Failed to open file '%s'"), file->GetName().c_str());
+    return false;
+  }
+  GOBuffer<uint8_t> data;
+  try {
+    data.resize(file->GetSize());
+  } catch (GOOutOfMemory e) {
+    wxLogError(
+      _("Failed to load file '%s' into the memory"), file->GetName().c_str());
+    file->Close();
+    return false;
+  }
+  if (!file->Read(data)) {
+    file->Close();
+    wxLogError(_("Failed to read file '%s'"), file->GetName().c_str());
+    return false;
+  }
+  file->Close();
+  GOHash hash;
+  hash.Update(data.get(), data.GetSize());
+  m_Hash = hash.getStringHash();
+
+  if (isBufferCompressed(data)) {
+    if (!uncompressBuffer(data)) {
+      wxLogError(_("Failed to decompress file '%s'"), file->GetName().c_str());
+      return false;
+    }
+  }
+
+  wxMBConv *conv;
+  wxCSConv isoConv(wxT("ISO-8859-1"));
+  uint8_t *dataPtr = data.get();
+  size_t length = data.GetCount();
+  if (length >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) {
+    conv = &wxConvUTF8;
+    dataPtr = data.get() + 3;
+    length -= 3;
+  } else
+    conv = &isoConv;
+  wxString input((const char *)dataPtr, *conv, length);
+  data.free();
+  if (length && input.Len() == 0) {
+    wxLogError(_("Failed to decode file '%s'"), file->GetName().c_str());
+    return false;
+  }
+
+  unsigned pos = 0;
+  // Compute total line count for line-based progress
+  unsigned totalLines = 0;
+  for (unsigned i = 0; i < input.Len(); ++i)
+    if (input[i] == wxT('\n'))
+      ++totalLines;
+  if (!totalLines)
+    totalLines = 1;
+  unsigned lastPercent = 0;
+  if (onProgress)
+    onProgress(0, phaseLabel);
+
+  wxString group;
+  std::map<wxString, wxString> *grp = NULL;
+  unsigned lineno = 0;
+
+  while (pos < input.Len()) {
+    wxString line = GetNextLine(input, pos);
+    lineno++;
+
+    int currPercent = (int)((uint64_t)lineno * 100 / totalLines);
+    if (onProgress && (unsigned)currPercent != lastPercent) {
+      lastPercent = currPercent;
+      onProgress(lastPercent, phaseLabel);
+    }
+
+    /* Skip the comment */
+    int semicolumnPos = line.find(wxT(";"), 0);
+
+    if (semicolumnPos >= 0)
+      line = line.substr(0, semicolumnPos).Trim();
+
+    if (line == wxEmptyString)
+      continue;
+    if (line.Len() > 1 && line[0] == wxT('[')) {
+      if (line[line.Len() - 1] != wxT(']')) {
+        line = line.Trim();
+        if (line[line.Len() - 1] != wxT(']')) {
+          wxLogError(
+            _("Invalid Config entry at line %d: %s"), lineno, line.c_str());
+          continue;
+        }
+        wxLogError(
+          _("Invalid section start at line %d: %s"), lineno, line.c_str());
+      }
+      group = line.Mid(1, line.Len() - 2);
+      if (m_Entries.find(group) != m_Entries.end()) {
+        wxLogWarning(
+          _("Duplicate group at line %d: %s"), lineno, group.c_str());
+      }
+      grp = &m_Entries[group];
+    } else {
+      if (!grp) {
+        wxLogError(_("Config entry without any group at line %d"), lineno);
+        continue;
+      }
+      int datapos = line.find(wxT("="), 0);
+      if (datapos <= 0) {
+        wxLogError(
+          _("Invalid Config entry at line %d: %s"), lineno, line.c_str());
+        continue;
+      }
+      wxString name = line.Mid(0, datapos);
+      if (grp->find(name) != grp->end()) {
+        wxLogWarning(
+          _("Duplicate entry in section %s at line %d: %s"),
+          group.c_str(),
+          lineno,
+          name.c_str());
+      }
+      (*grp)[name] = line.Mid(datapos + 1);
+    }
+  }
+
+  if (onProgress)
+    onProgress(100, phaseLabel);
+  return true;
+}

@@ -56,8 +56,8 @@ std::unique_ptr<GOOpenedFile> GOLoaderFilename::Open(
 
     if (fullPath.IsEmpty())
       throw _("File name is empty");
-    if (!wxFileExists(fullPath))
-      throw wxString::Format(_("File '%s' does not exist"), fullPath);
+    // Avoid redundant filesystem stat here; defer existence checks to Open()
+    // on GOStandardFile/GOWave to reduce per-file overhead during mass loads.
     file = new GOStandardFile(fullPath, m_path);
   }
   return std::unique_ptr<GOOpenedFile>(file);

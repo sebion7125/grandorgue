@@ -14,6 +14,7 @@
 #include <wx/msgdlg.h>
 #include <wx/txtstrm.h>
 #include <wx/wfstream.h>
+#include <wx/stopwatch.h>
 
 #include "archive/GOArchive.h"
 #include "archive/GOArchiveFile.h"
@@ -31,6 +32,7 @@
 #include "control/GOPushbuttonControl.h"
 #include "files/GOOpenedFile.h"
 #include "files/GOStdFileName.h"
+#include "files/GOStandardFile.h"
 #include "gui/dialogs/GOProgressDialog.h"
 #include "gui/dialogs/go-message-boxes.h"
 #include "gui/panels/GOGUIBankedGeneralsPanel.h"
@@ -76,6 +78,7 @@
 #include "GOMetronome.h"
 #include "GOOrgan.h"
 #include "go_path.h"
+#include "GOMemoryPool.h"
 
 static const wxString WX_ORGAN = wxT("Organ");
 static const wxString WX_GRANDORGUE_VERSION = wxT("GrandOrgueVersion");
@@ -127,7 +130,11 @@ GOOrganController::GOOrganController(GOConfig &config, bool isAppInitialized)
   }
   GOOrganModel::SetModelModificationListener(this);
   m_setter = new GOSetter(this);
-  m_pool.SetMemoryLimit(m_config.MemoryLimit() * 1024 * 1024);
+  // Set memory limit from settings (no automatic clamping; 0 = unlimited)
+  {
+    size_t cfgMB = m_config.MemoryLimit();
+    m_pool.SetMemoryLimit(cfgMB ? cfgMB * 1024 * 1024 : 0);
+  }
 }
 
 GOOrganController::~GOOrganController() {
@@ -378,6 +385,12 @@ wxString GOOrganController::Load(
   bool isGuiOnly) {
   GOBuffer<char> dummy;
   wxString errMsg;
+#ifdef GO_PROFILE_ODFLOAD
+  wxStopWatch sw_total;
+  sw_total.Start();
+  wxStopWatch sw_phase;
+  sw_phase.Start();
+#endif
 
   try {
     GOLoaderFilename odf_name;
@@ -413,8 +426,33 @@ wxString GOOrganController::Load(
 
     GOConfigFileReader odf_ini_file;
 
-    if (!odf_ini_file.Read(odf_name.Open(m_FileStore).get()))
-      throw wxString::Format(_("Unable to read '%s'"), odf_name.GetPath());
+    {
+      auto opened = odf_name.Open(m_FileStore);
+
+      // Use the same model progress segment for parsing + model build (mapped
+      // to 40 units). Install progress sink early so model callbacks map into
+      // the same segment.
+      SetProgressSink([dlg](unsigned pc, const wxString &msg) {
+        unsigned mapped = (unsigned)((uint64_t)pc * 40 / 100);
+        // Never let model-phase reach the absolute end of its segment to avoid
+        // showing 100% before audio loading begins. Reserve one unit so the
+        // dialog will only hit full after audio phase is started.
+        if (mapped >= 40)
+          mapped = 39;
+        dlg->Update(mapped, msg);
+      });
+      dlg->Reset(40, _("Parsing sample set definition file"));
+
+      bool ok = odf_ini_file.ReadWithProgress(
+        opened.get(),
+        _("Parsing sample set definition file"),
+        [dlg](unsigned pc, const wxString &msg) {
+          // Scale parser percent into the 0..40 model segment.
+          dlg->Update((unsigned)((uint64_t)pc * 40 / 100), msg);
+        });
+      if (!ok)
+        throw wxString::Format(_("Unable to read '%s'"), odf_name.GetPath());
+    }
 
     m_ODFHash = odf_ini_file.GetHash();
     m_b_customized = false;
@@ -448,12 +486,29 @@ wxString GOOrganController::Load(
 
     if (!setting_file.IsEmpty()) {
       GOConfigFileReader extra_odf_config;
+      // Read organ settings (.cmb). Feed progress into the same model segment
+      // (0..40) so the progress bar does not exceed the model portion before
+      // audio loading.
       if (can_read_cmb_directly) {
-        if (!extra_odf_config.Read(setting_file))
+        GOStandardFile cmbFile(setting_file);
+        if (
+          !extra_odf_config.ReadWithProgress(
+            &cmbFile,
+            _("Reading organ settings (.cmb)"),
+            [dlg](unsigned pc, const wxString &msg) {
+              dlg->Update((unsigned)((uint64_t)pc * 40 / 100), msg);
+            }))
           throw wxString::Format(_("Unable to read '%s'"), setting_file);
       } else {
-        if (!extra_odf_config.Read(
-              m_FileStore.FindArchiveContaining(m_odf)->OpenFile(setting_file)))
+        GOOpenedFile *cmbFromArchive
+          = m_FileStore.FindArchiveContaining(m_odf)->OpenFile(setting_file);
+        if (
+          !extra_odf_config.ReadWithProgress(
+            cmbFromArchive,
+            _("Reading organ settings (.cmb)"),
+            [dlg](unsigned pc, const wxString &msg) {
+              dlg->Update((unsigned)((uint64_t)pc * 40 / 100), msg);
+            }))
           throw wxString::Format(_("Unable to read '%s'"), setting_file);
       }
 
@@ -503,20 +558,38 @@ wxString GOOrganController::Load(
     cfg.ReadString(CMBSetting, WX_ORGAN, wxT("ODFPath"), false);
     cfg.ReadString(CMBSetting, WX_ORGAN, wxT("ODFHash"), false);
     cfg.ReadString(CMBSetting, WX_ORGAN, wxT("ArchiveID"), false);
+    // Model progress sink already set earlier; just call ReadOrganFile.
     ReadOrganFile(cfg);
-    ini.ReportUnused();
+    SetProgressSink({});
+    if (m_config.ODFCheck())
+      ini.ReportUnused();
 
     if (!isGuiOnly) {
       try {
         bool cache_ok = false;
 
         dummy.resize(1024 * 1024 * 50);
+#ifdef GO_PROFILE_ODFLOAD
+        wxLogMessage(wxString::Format("Timing: Parse/ODF processing: %ld ms", sw_phase.Time()));
+        sw_phase.Restart();
+#endif
+        dlg->Reset(1, _("Resolving object references"));
         ResolveReferences();
+#ifdef GO_PROFILE_ODFLOAD
+        wxLogMessage(wxString::Format("Timing: ResolveReferences: %ld ms", sw_phase.Time()));
+        sw_phase.Restart();
+#endif
 
         /* Figure out list of pipes to load */
+#ifdef GO_PROFILE_ODFLOAD
+        wxLogMessage("Timing: Preparing audio objects…");
+#endif
+        dlg->Reset(1, _("Preparing audio objects"));
         GOCacheObjectDistributor objectDistributor(GetCacheObjects());
 
-        dlg->Reset(objectDistributor.GetNObjects());
+        // Audio loading occupies the remaining portion (mapped to objects).
+        // Each object contributes one unit; total units = object count.
+        dlg->Reset(objectDistributor.GetNObjects(), _("Loading audio data (cache/disk)"));
 
         GOCacheObject *obj = nullptr;
 
