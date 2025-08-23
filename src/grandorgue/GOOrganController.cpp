@@ -802,7 +802,31 @@ wxString GOOrganController::Load(
               ent.count++;
               ent.total_ms += __ms;
 
-              if (!dlg->Update(objectDistributor.GetPos(), obj->GetLoadTitle()))
+              // Time-based progress estimation (on-the-fly)
+              unsigned __processed = __go_cache_objects;
+              unsigned __total = __objUnits;
+              unsigned __syntheticUnit = __processed; // fallback to count
+              if (__processed > 0 && __total > 0) {
+                double avg_ms = (double)__go_cache_total_ms / (double)__processed;
+                unsigned long long remaining = (__total > __processed) ? (__total - __processed) : 0;
+                double rem_est_ms = avg_ms * (double)remaining;
+                double frac_time = 0.0;
+                double denom = (double)__go_cache_total_ms + rem_est_ms;
+                if (denom > 0.0)
+                  frac_time = (double)__go_cache_total_ms / denom;
+                else
+                  frac_time = (double)__processed / (double)__total;
+                if (frac_time < 0.0) frac_time = 0.0;
+                if (frac_time > 1.0) frac_time = 1.0;
+                long long rounded = std::llround(frac_time * (double)__total);
+                if (rounded < 1 && __processed > 0)
+                  rounded = 1;
+                if ((unsigned)rounded > __total)
+                  rounded = __total;
+                __syntheticUnit = (unsigned)rounded;
+              }
+
+              if (!dlg->Update(__syntheticUnit, obj->GetLoadTitle()))
                 throw GOLoadAborted(); // Skip the rest of the loading code
             }
 
@@ -847,27 +871,65 @@ wxString GOOrganController::Load(
           reader.Close();
         }
 
-        if (!cache_ok) {
-          GOLoadWorker thisWorker(m_FileStore, m_pool, objectDistributor);
-          ptr_vector<GOLoadThread> threads;
+          if (!cache_ok) {
+            GOLoadWorker thisWorker(m_FileStore, m_pool, objectDistributor);
+            ptr_vector<GOLoadThread> threads;
 
-          // Create and run additional worker threads
-          for (unsigned i = 0; i < m_config.LoadConcurrency(); i++)
-            threads.push_back(
-              new GOLoadThread(m_FileStore, m_pool, objectDistributor));
-          for (unsigned i = 0; i < threads.size(); i++)
-            threads[i]->Run();
+            // Create and run additional worker threads
+            for (unsigned i = 0; i < m_config.LoadConcurrency(); i++)
+              threads.push_back(
+                new GOLoadThread(m_FileStore, m_pool, objectDistributor));
+            for (unsigned i = 0; i < threads.size(); i++)
+              threads[i]->Run();
 
-          // try to load the object that we could not load from cache
-          if (obj)
-            thisWorker.LoadObjectNoExc(obj);
+            // try to load the object that we could not load from cache
+            if (obj)
+              thisWorker.LoadObjectNoExc(obj);
 
-          while (thisWorker.LoadNextObject(obj))
-            // show the progress and process possible Cancel
-            if (!dlg->Update(objectDistributor.GetPos(), obj->GetLoadTitle()))
-              throw GOLoadAborted(); // skip the rest of loading code
-          // rethrow exception if any occured in thisWorker.LoadNextObject
-          bool wereExceptions = thisWorker.WereExceptions();
+            // Time-based estimation variables for direct loads
+            unsigned __go_load_objects = 0;
+            long long __go_load_total_ms = 0;
+
+            while (true) {
+              wxStopWatch __go_obj_sw2;
+              __go_obj_sw2.Start();
+              if (!thisWorker.LoadNextObject(obj))
+                break;
+              long long __ms2 = __go_obj_sw2.Time();
+              __go_load_total_ms += __ms2;
+              __go_load_objects++;
+
+              // compute synthetic unit based on elapsed time
+              unsigned __processed = __go_load_objects;
+              unsigned __total = __objUnits;
+              unsigned __syntheticUnit = __processed; // fallback
+              if (__processed > 0 && __total > 0) {
+                double avg_ms = (double)__go_load_total_ms / (double)__processed;
+                unsigned long long remaining = (__total > __processed) ? (__total - __processed) : 0;
+                double rem_est_ms = avg_ms * (double)remaining;
+                double frac_time = 0.0;
+                double denom = (double)__go_load_total_ms + rem_est_ms;
+                if (denom > 0.0)
+                  frac_time = (double)__go_load_total_ms / denom;
+                else
+                  frac_time = (double)__processed / (double)__total;
+                if (frac_time < 0.0) frac_time = 0.0;
+                if (frac_time > 1.0) frac_time = 1.0;
+                long long rounded = std::llround(frac_time * (double)__total);
+                if (rounded < 1 && __processed > 0)
+                  rounded = 1;
+                if ((unsigned)rounded > __total)
+                  rounded = __total;
+                __syntheticUnit = (unsigned)rounded;
+              }
+
+              // show the progress and process possible Cancel
+              if (!dlg->Update(__syntheticUnit, obj->GetLoadTitle()))
+                throw GOLoadAborted(); // skip the rest loading code
+            }
+
+            // rethrow exception if any occured in thisWorker.LoadNextObject
+            bool wereExceptions = thisWorker.WereExceptions();
 
           for (unsigned i = 0; i < threads.size(); i++)
             wereExceptions |= threads[i]->CheckExceptions();

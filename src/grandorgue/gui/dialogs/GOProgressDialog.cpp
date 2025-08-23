@@ -41,14 +41,21 @@ void GOProgressDialog::Setup(
   long max, const wxString &title, const wxString &msg) {
   if (m_dlg)
     m_dlg->Destroy();
+  // Pad the message to encourage a wider dialog (platform-portable).
+  // Some wx ports do not expose SetSize/GetSize on wxProgressDialog; adding
+  // trailing spaces to the initial message helps the dialog lay out wider.
+  wxString paddedMsg = msg;
+  const int padSpaces = 40; // approx +10% width on typical systems
+  paddedMsg += wxString(padSpaces, ' ');
+
   m_dlg = new wxProgressDialog(
     title,
-    msg,
+    paddedMsg,
     DLG_MAX_VALUE,
     NULL,
     wxPD_CAN_ABORT | wxPD_APP_MODAL | wxPD_ELAPSED_TIME | wxPD_ESTIMATED_TIME
       | wxPD_REMAINING_TIME);
-  m_dlg->SetIcon(get_go_icon());
+
   m_last = 0;
   m_const = 0;
   m_value = 0;
