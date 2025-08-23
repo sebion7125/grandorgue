@@ -363,8 +363,8 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
     m_panels[0]->Load(cfg, wxT(""));
     wxString buffer;
     unsigned totalPanels = NumberOfPanels;
-    // Panels occupy 35..40%
-    if (dlg) dlg->ResetRange(totalPanels, 35, 40, _("Loading panels"));
+    // Panels occupy measured window.
+    if (dlg) dlg->ResetRange(totalPanels, 30, 43, _("Loading panels"));
     for (unsigned i = 0; i < NumberOfPanels; i++) {
       buffer.Printf(wxT("Panel%03d"), i + 1);
       m_panels.push_back(new GOGUIPanel(this));
@@ -546,9 +546,8 @@ wxString GOOrganController::Load(
       SetProgressSink([dlg](unsigned pc, const wxString &msg) {
         dlg->Update(pc, msg);
       });
-      // Parsing is a percent-based phase (0..100) mapped to a small percent
-      // window (0..4%). Use ResetRange so ReadWithProgress can emit 0..100.
-      if (dlg) dlg->ResetRange(100, 0, 4, _("Parsing sample set definition file"));
+      // Parsing is a percent-based phase (0..100). Use measured window.
+      if (dlg) dlg->ResetRange(100, 0, 1, _("Parsing sample set definition file"));
 
       // measure parsing time
       wxStopWatch __sw_parse;
@@ -598,8 +597,8 @@ wxString GOOrganController::Load(
 
       if (!setting_file.IsEmpty()) {
       GOConfigFileReader extra_odf_config;
-      // Read organ settings (.cmb). Map to 4..10% window.
-      if (dlg) dlg->ResetRange(100, 4, 10, _("Reading organ settings (.cmb)"));
+      // Read organ settings (.cmb). Use measured window.
+      if (dlg) dlg->ResetRange(100, 1, 3, _("Reading organ settings (.cmb)"));
       // measure cmb read time
       wxStopWatch __sw_cmb;
       __sw_cmb.Start();
@@ -677,8 +676,8 @@ wxString GOOrganController::Load(
     cfg.ReadString(CMBSetting, WX_ORGAN, wxT("ODFHash"), false);
     cfg.ReadString(CMBSetting, WX_ORGAN, wxT("ArchiveID"), false);
     // Model progress sink already set earlier; set model percent window then call ReadOrganFile.
-    // Map entire model (ranks + rest) into 10..35% for now (hardcoded).
-    if (dlg) dlg->ResetRange(100, 10, 35, _("Building model"));
+    // Map entire model (ranks + rest) into measured window.
+    if (dlg) dlg->ResetRange(100, 3, 30, _("Building model"));
     wxStopWatch __sw_readorgan;
     __sw_readorgan.Start();
     ReadOrganFile(cfg, dlg);
@@ -724,7 +723,7 @@ wxString GOOrganController::Load(
 
         // Audio loading occupies the remaining portion (mapped to objects).
         // Each object contributes one unit; total units = object count.
-        if (dlg) dlg->ResetRange(objectDistributor.GetNObjects(), 40, 100, _("Loading audio data (cache/disk)"));
+        if (dlg) dlg->ResetRange(objectDistributor.GetNObjects(), 43, 100, _("Loading audio data (cache/disk)"));
         else dlg->Reset(objectDistributor.GetNObjects(), _("Loading audio data (cache/disk)"));
 
         wxStopWatch __sw_cache;
