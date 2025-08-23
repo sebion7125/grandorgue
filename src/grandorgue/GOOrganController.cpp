@@ -368,19 +368,22 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
     for (unsigned i = 0; i < NumberOfPanels; i++) {
       buffer.Printf(wxT("Panel%03d"), i + 1);
       m_panels.push_back(new GOGUIPanel(this));
+      // load the panel first so we can use its real display name in progress
+      m_panels[m_panels.size() - 1]->Load(cfg, buffer);
       // update progress dialog with current panel name/count if available,
       // otherwise fall back to log entry
       if (dlg) {
+        wxString panelName = m_panels[m_panels.size() - 1]->GetName();
         wxString msg = _("Loading panel: ");
-        msg += buffer;
+        msg += panelName;
         msg += wxString::Format(_(" (%u/%u)"), (unsigned)m_panels.size(), totalPanels);
         if (!dlg->Update(i + 1, msg))
           throw GOLoadAborted();
       } else {
-        wxLogMessage(wxString::Format("Progress: Loading panels (%u/%u)", (unsigned)m_panels.size(), totalPanels));
+        wxString __panelLog = wxString::Format("Progress: Loading panel \"%s\" (%u/%u)", m_panels[m_panels.size() - 1]->GetName().c_str(), (unsigned)m_panels.size(), totalPanels);
+        wxLogMessage("%s", __panelLog);
         wxLog::FlushActive();
       }
-      m_panels[i + 1]->Load(cfg, buffer);
     }
     
     __tim_panels_ms = __sw_panels.Time();
@@ -400,17 +403,20 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
     for (unsigned i = 0; i < NumberOfPanels; i++) {
       buffer.Printf(wxT("Panel%03d"), i + 1);
       m_panels.push_back(new GOGUIPanel(this));
+      // load panel first to get its name
+      m_panels[m_panels.size() - 1]->Load(cfg, buffer);
       if (dlg) {
+        wxString panelName = m_panels[m_panels.size() - 1]->GetName();
         wxString msg = _("Loading panel: ");
-        msg += buffer;
+        msg += panelName;
         msg += wxString::Format(_(" (%u/%u)"), (unsigned)m_panels.size(), totalPanels);
         if (!dlg->Update(i + 1, msg))
           throw GOLoadAborted();
       } else {
-        wxLogMessage(wxString::Format("Progress: Loading panels (%u/%u)", (unsigned)m_panels.size(), totalPanels));
+        wxString __panelLog = wxString::Format("Progress: Loading panel \"%s\" (%u/%u)", m_panels[m_panels.size() - 1]->GetName().c_str(), (unsigned)m_panels.size(), totalPanels);
+        wxLogMessage("%s", __panelLog);
         wxLog::FlushActive();
       }
-      m_panels[i + 1]->Load(cfg, buffer);
     }
 
     // store measured panel time into the member variable for final summary
@@ -723,8 +729,14 @@ wxString GOOrganController::Load(
 
         // Audio loading occupies the remaining portion (mapped to objects).
         // Each object contributes one unit; total units = object count.
-        if (dlg) dlg->ResetRange(objectDistributor.GetNObjects(), 43, 100, _("Loading audio data (cache/disk)"));
-        else dlg->Reset(objectDistributor.GetNObjects(), _("Loading audio data (cache/disk)"));
+        // Defensive: callers may report positions in range [0..N], ensure the
+        // progress dialog uses a unit count that prevents off-by-one producing
+        // intermediate values > 100% in some environments.
+        unsigned __objUnits = objectDistributor.GetNObjects() ? objectDistributor.GetNObjects() : 1;
+        // Use the reported object count directly here; GOProgressDialog now maps
+        // value/units defensively. For non-GUI (no dlg) use the same units.
+        if (dlg) dlg->ResetRange(__objUnits, 43, 100, _("Loading audio data (cache/disk)"));
+        else dlg->Reset(__objUnits, _("Loading audio data (cache/disk)"));
 
         wxStopWatch __sw_cache;
         __sw_cache.Start();
