@@ -131,25 +131,65 @@ bool GOProgressDialog::Update(unsigned value, const wxString &msg) {
   m_last = wxGetUTCTime();
 
   int newValue = 0;
+  double pctForDisplay = 0.0; // percentage in 0..100 for showing on the dialog
+
   if (m_usePercentRange) {
-    // Map value in [0..m_segmentMaxUnits] to percent range [m_rangeStartPct..m_rangeEndPct]
+    // Map value to percent range [m_rangeStartPct..m_rangeEndPct].
+    // Two supported caller conventions:
+    //  - percent-mode: callers pass values in 0..100 (percent)
+    //  - units-mode: callers pass values in 0..m_segmentMaxUnits (unit count/pos)
+    // Use a strict detection rule to avoid misinterpreting unit positions as percents:
+    //   If m_segmentMaxUnits == 100 => percent-mode; otherwise treat as units-mode.
     double frac = 0.0;
-    if (m_segmentMaxUnits > 0)
-      frac = (double)std::min<unsigned>(m_value, (unsigned)m_segmentMaxUnits) / (double)m_segmentMaxUnits;
+
+    if (m_segmentMaxUnits <= 1) {
+      // No granular units; treat any non-zero value as completion of the segment.
+      frac = (m_value > 0) ? 1.0 : 0.0;
+    } else {
+      if ((unsigned)m_segmentMaxUnits == 100) {
+        // Explicit percent-mode
+        frac = (double)m_value / 100.0;
+      } else {
+        // Units-mode: interpret value as position in [0..m_segmentMaxUnits]
+        unsigned denom = (unsigned)m_segmentMaxUnits;
+        unsigned numer = std::min<unsigned>(m_value, denom);
+        frac = (double)numer / (double)denom;
+      }
+    }
+
+    // Clamp fraction to [0..1]
+    if (frac < 0.0)
+      frac = 0.0;
+    if (frac > 1.0)
+      frac = 1.0;
+
     double pct = m_rangeStartPct + frac * (m_rangeEndPct - m_rangeStartPct);
-    // Clamp pct defensively to [0..100] to avoid overflow from misconfigured ranges
-    if (pct < 0.0) pct = 0.0;
-    if (pct > 100.0) pct = 100.0;
+
+    // Clamp pct defensively to [m_rangeStartPct..m_rangeEndPct] and overall [0..100]
+    if (pct < (double)m_rangeStartPct)
+      pct = (double)m_rangeStartPct;
+    if (pct > (double)m_rangeEndPct)
+      pct = (double)m_rangeEndPct;
+    if (pct < 0.0)
+      pct = 0.0;
+    if (pct > 100.0)
+      pct = 100.0;
+
+    pctForDisplay = pct;
     newValue = (int)((DLG_MAX_VALUE - 1) * (pct / 100.0));
   } else {
     // legacy cumulative mapping
-    if (m_max == 0)
+    if (m_max == 0) {
       newValue = 0;
-    else {
+      pctForDisplay = 0.0;
+    } else {
       double frac = (double)(m_value + m_const) / (double)m_max;
-      if (frac < 0.0) frac = 0.0;
-      if (frac > 1.0) frac = 1.0;
+      if (frac < 0.0)
+        frac = 0.0;
+      if (frac > 1.0)
+        frac = 1.0;
       newValue = (int)((DLG_MAX_VALUE - 1) * frac);
+      pctForDisplay = frac * 100.0;
     }
   }
 
@@ -163,8 +203,12 @@ bool GOProgressDialog::Update(unsigned value, const wxString &msg) {
     newValue = (int)m_lastReportedValue;
 
   // Debug log suppressed to avoid flooding logs with progress updates.
+  // Append numeric percentage to the dialog message for clarity.
+  wxString displayMsg = msg;
+  int pctInt = (int)(pctForDisplay + 0.5);
+  displayMsg += wxString::Format(" (%d%%)", pctInt);
 
-  if (!m_dlg->Update(newValue, msg))
+  if (!m_dlg->Update(newValue, displayMsg))
     return false;
 
   // record last reported value
