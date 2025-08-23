@@ -113,7 +113,7 @@ private:
   // if modified then sets m_IsOrganModified
   void OnIsModifiedChanged(bool modified);
 
-  void ReadOrganFile(GOConfigReader &cfg);
+  void ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg = nullptr);
   GOHashType GenerateCacheHash();
   wxString GenerateSettingFileName();
   wxString GenerateCacheFileName();

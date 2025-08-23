@@ -84,6 +84,8 @@
 #include "go_path.h"
 #include "GOMemoryPool.h"
 
+#define GUI_GAP_TRACER 1
+
 static const wxString WX_ORGAN = wxT("Organ");
 static const wxString WX_GRANDORGUE_VERSION = wxT("GrandOrgueVersion");
 
@@ -211,7 +213,9 @@ GOHashType GOOrganController::GenerateCacheHash() {
   return hash.getHash();
 }
 
-void GOOrganController::ReadOrganFile(GOConfigReader &cfg) {
+class GOLoadAborted : public std::exception {};
+ 
+void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg) {
   /* load church info */
   cfg.ReadString(
     ODFSetting, WX_ORGAN, wxT("HauptwerkOrganFileFormatVersion"), false);
@@ -351,15 +355,53 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg) {
 
   m_panels.resize(0);
   m_panels.push_back(new GOGUIPanel(this));
+
+#ifdef GUI_GAP_TRACER
+  {
+    wxStopWatch __go_panelsload_sw;
+    m_panels[0]->Load(cfg, wxT(""));
+    wxString buffer;
+    unsigned totalPanels = NumberOfPanels + 1;
+    for (unsigned i = 0; i < NumberOfPanels; i++) {
+      buffer.Printf(wxT("Panel%03d"), i + 1);
+      m_panels.push_back(new GOGUIPanel(this));
+      // update progress dialog with current panel name/count if available,
+      // otherwise fall back to log entry
+      if (dlg) {
+        wxString msg = _("Loading panel: ");
+        msg += buffer;
+        msg += wxString::Format(_(" (%u/%u)"), (unsigned)m_panels.size(), totalPanels);
+        if (!dlg->Update(0, msg))
+          throw GOLoadAborted();
+      } else {
+        wxLogMessage(wxString::Format("Progress: Loading panels (%u/%u)", (unsigned)m_panels.size(), totalPanels));
+        wxLog::FlushActive();
+      }
+      m_panels[i + 1]->Load(cfg, buffer);
+    }
+    wxLogMessage(wxString::Format("GUI.Panels.Load total_ms=%ld panels=%u", __go_panelsload_sw.Time(), (unsigned)m_panels.size()));
+    wxLog::FlushActive();
+  }
+#else
   m_panels[0]->Load(cfg, wxT(""));
-
   wxString buffer;
-
+  unsigned totalPanels = NumberOfPanels + 1;
   for (unsigned i = 0; i < NumberOfPanels; i++) {
     buffer.Printf(wxT("Panel%03d"), i + 1);
     m_panels.push_back(new GOGUIPanel(this));
+    if (dlg) {
+      wxString msg = _("Loading panel: ");
+      msg += buffer;
+      msg += wxString::Format(_(" (%u/%u)"), (unsigned)m_panels.size(), totalPanels);
+      if (!dlg->Update(0, msg))
+        throw GOLoadAborted();
+    } else {
+      wxLogMessage(wxString::Format("Progress: Loading panels (%u/%u)", (unsigned)m_panels.size(), totalPanels));
+      wxLog::FlushActive();
+    }
     m_panels[i + 1]->Load(cfg, buffer);
   }
+#endif
 
   m_StopWindowSizeKeeper.Load(cfg, wxT("Stops"));
 
@@ -420,8 +462,7 @@ wxString GOOrganController::GenerateCacheFileName() {
     + GOStdFileName::composeCacheFileName(GetOrganHash(), m_config.Preset());
 }
 
-class GOLoadAborted : public std::exception {};
-
+ 
 wxString GOOrganController::Load(
   GOProgressDialog *dlg,
   const GOOrgan &organ,
@@ -603,7 +644,7 @@ wxString GOOrganController::Load(
     cfg.ReadString(CMBSetting, WX_ORGAN, wxT("ODFHash"), false);
     cfg.ReadString(CMBSetting, WX_ORGAN, wxT("ArchiveID"), false);
     // Model progress sink already set earlier; just call ReadOrganFile.
-    ReadOrganFile(cfg);
+    ReadOrganFile(cfg, dlg);
     SetProgressSink({});
     if (m_config.ODFCheck())
       ini.ReportUnused();
@@ -663,9 +704,7 @@ wxString GOOrganController::Load(
               wxLogWarning(_("Cache file had bad magic bypassing cache."));
             }
             hash1 = GenerateCacheHash();
-            if (
-              !reader.Read(&hash2, sizeof(hash2))
-              || memcmp(&hash1, &hash2, sizeof(hash1))) {
+            if (!reader.Read(&hash2, sizeof(hash2)) || memcmp(&hash1, &hash2, sizeof(hash1))) {
               cache_ok = false;
               reader.FreeCacheFile();
               wxLogWarning(_("Cache file had diffent hash bypassing cache."));
@@ -684,47 +723,47 @@ wxString GOOrganController::Load(
 
             // Logpoint immediately before cache deserialization starts
             wxLogMessage(wxString::Format("Timing: BeforeCacheDeserialization objects=%u", objectDistributor.GetNObjects()));
-​
+
             // Aggregate timing by title (top-N reporting)
             struct __Agg { uint32_t count = 0; long long total_ms = 0; };
             std::unordered_map<std::string, __Agg> __go_byTitle;
-​
+
             while ((obj = objectDistributor.FetchNext())) {
               wxStopWatch __go_obj_sw;
               __go_obj_sw.Start();
-​
+
               if (!obj->LoadFromCacheWithoutExc(m_pool, reader)) {
                 wxLogWarning(_("Cache load failure: %s"), obj->GetLoadError());
                 break;
               }
-​
+
               long long __ms = __go_obj_sw.Time();
               __go_cache_total_ms += __ms;
               __go_cache_objects++;
-​
+
               // collect by-title aggregates
               std::string __title = std::string(obj->GetLoadTitle().utf8_str());
               auto &ent = __go_byTitle[__title];
               ent.count++;
               ent.total_ms += __ms;
-​
+
               if (!dlg->Update(objectDistributor.GetPos(), obj->GetLoadTitle()))
                 throw GOLoadAborted(); // Skip the rest of the loading code
             }
-​
+
             if (!obj)
               m_Cacheable = true;
             else
               // obj points to an object with a load error. We will try to load
               // it from the file later
               cache_ok = false;
-​
+
             if (__go_cache_objects > 0) {
               long long __go_cache_avg_ms = __go_cache_total_ms / __go_cache_objects;
               wxLogMessage(wxString::Format(
                 "Timing: Cache load summary total_objects=%lld total_ms=%lld avg_ms=%lld",
                 __go_cache_objects, __go_cache_total_ms, __go_cache_avg_ms));
-​
+
               // compute top 10 by total_ms
               std::vector<std::pair<std::string, __Agg>> __vec;
               __vec.reserve(__go_byTitle.size());
