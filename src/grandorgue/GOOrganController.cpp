@@ -17,6 +17,8 @@
 #include <wx/stopwatch.h>
 #include <map>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "archive/GOArchive.h"
 #include "archive/GOArchiveFile.h"
@@ -307,8 +309,18 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg) {
   m_panelcreators.push_back(new GOGUIMasterPanel(this));
   m_panelcreators.push_back(new GOGUIRecorderPanel(this));
 
+#ifdef GUI_GAP_TRACER
+  {
+    wxStopWatch __go_elcre_sw;
+    for (unsigned i = 0; i < m_elementcreators.size(); i++)
+      m_elementcreators[i]->Load(cfg);
+    wxLogMessage(wxString::Format("GUI.ElementCreators.Load total_ms=%ld creators=%u", __go_elcre_sw.Time(), (unsigned)m_elementcreators.size()));
+    wxLog::FlushActive();
+  }
+#else
   for (unsigned i = 0; i < m_elementcreators.size(); i++)
     m_elementcreators[i]->Load(cfg);
+#endif
 
   p_OnStateButton = GetButtonControl(GOSetter::KEY_ON_STATE);
 
@@ -351,11 +363,31 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg) {
 
   m_StopWindowSizeKeeper.Load(cfg, wxT("Stops"));
 
+#ifdef GUI_GAP_TRACER
+  {
+    wxStopWatch __go_createpanels_sw;
+    for (unsigned i = 0; i < m_panelcreators.size(); i++)
+      m_panelcreators[i]->CreatePanels(cfg);
+    wxLogMessage(wxString::Format("GUI.CreatePanels total_ms=%ld creators=%u", __go_createpanels_sw.Time(), (unsigned)m_panelcreators.size()));
+    wxLog::FlushActive();
+  }
+#else
   for (unsigned i = 0; i < m_panelcreators.size(); i++)
     m_panelcreators[i]->CreatePanels(cfg);
+#endif
 
+#ifdef GUI_GAP_TRACER
+  {
+    wxStopWatch __go_panelslayout_sw;
+    for (unsigned i = 0; i < m_panels.size(); i++)
+      m_panels[i]->Layout();
+    wxLogMessage(wxString::Format("GUI.Panels.Layout total_ms=%ld panels=%u", __go_panelslayout_sw.Time(), (unsigned)m_panels.size()));
+    wxLog::FlushActive();
+  }
+#else
   for (unsigned i = 0; i < m_panels.size(); i++)
     m_panels[i]->Layout();
+#endif
 
   const wxString &organName = GetOrganName();
 
@@ -652,35 +684,64 @@ wxString GOOrganController::Load(
 
             // Logpoint immediately before cache deserialization starts
             wxLogMessage(wxString::Format("Timing: BeforeCacheDeserialization objects=%u", objectDistributor.GetNObjects()));
-
+​
+            // Aggregate timing by title (top-N reporting)
+            struct __Agg { uint32_t count = 0; long long total_ms = 0; };
+            std::unordered_map<std::string, __Agg> __go_byTitle;
+​
             while ((obj = objectDistributor.FetchNext())) {
               wxStopWatch __go_obj_sw;
               __go_obj_sw.Start();
-
+​
               if (!obj->LoadFromCacheWithoutExc(m_pool, reader)) {
                 wxLogWarning(_("Cache load failure: %s"), obj->GetLoadError());
                 break;
               }
-
-              __go_cache_total_ms += __go_obj_sw.Time();
+​
+              long long __ms = __go_obj_sw.Time();
+              __go_cache_total_ms += __ms;
               __go_cache_objects++;
-
+​
+              // collect by-title aggregates
+              std::string __title = std::string(obj->GetLoadTitle().utf8_str());
+              auto &ent = __go_byTitle[__title];
+              ent.count++;
+              ent.total_ms += __ms;
+​
               if (!dlg->Update(objectDistributor.GetPos(), obj->GetLoadTitle()))
                 throw GOLoadAborted(); // Skip the rest of the loading code
             }
-
+​
             if (!obj)
               m_Cacheable = true;
             else
               // obj points to an object with a load error. We will try to load
               // it from the file later
               cache_ok = false;
-
+​
             if (__go_cache_objects > 0) {
               long long __go_cache_avg_ms = __go_cache_total_ms / __go_cache_objects;
               wxLogMessage(wxString::Format(
                 "Timing: Cache load summary total_objects=%lld total_ms=%lld avg_ms=%lld",
                 __go_cache_objects, __go_cache_total_ms, __go_cache_avg_ms));
+​
+              // compute top 10 by total_ms
+              std::vector<std::pair<std::string, __Agg>> __vec;
+              __vec.reserve(__go_byTitle.size());
+              for (auto &p : __go_byTitle)
+                __vec.emplace_back(p.first, p.second);
+              std::sort(__vec.begin(), __vec.end(), [](auto &a, auto &b) {
+                return a.second.total_ms > b.second.total_ms;
+              });
+              int __topN = std::min<int>(10, (int)__vec.size());
+              for (int i = 0; i < __topN; ++i) {
+                auto &it = __vec[i];
+                double avg = it.second.count ? (double)it.second.total_ms / it.second.count : 0.0;
+                wxLogMessage(wxString::Format(
+                  "Timing: Cache.byTitle[%d] title=\"%s\" count=%u total_ms=%lld avg_ms=%.2f",
+                  i + 1, it.first.c_str(), it.second.count, it.second.total_ms, avg));
+              }
+              wxLog::FlushActive();
             }
           }
 
