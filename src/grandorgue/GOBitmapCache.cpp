@@ -17,6 +17,13 @@
 #include "GOBuffer.h"
 #include "GOLog.h"
 #include "GOOrganController.h"
+#include "go_defs.h"
+#ifndef LOG_TIMING
+# define LOG_TIMING(...)
+#endif
+#ifndef LOG_GUI_GAP
+# define LOG_GUI_GAP(...)
+#endif
 #define GUI_BITMAP_TIMING 1
 #include "Images.h"
 
@@ -219,22 +226,23 @@ GOBitmap GOBitmapCache::GetBitmap(wxString filename, wxString maskName) {
   wxStopWatch swBmp;
 #endif
 
-  if (!loadFile(image, filename))
-    throw wxString::Format(
-      _("Failed to open the graphic '%s'"), filename.c_str());
+  if (!loadFile(image, filename)) {
+    wxString __err = _("Failed to open the graphic '") + filename + _("'");
+    throw __err;
+  }
 
   if (maskName != wxEmptyString) {
-    if (!loadFile(maskimage, maskName))
-      throw wxString::Format(
-        _("Failed to open the graphic '%s'"), maskName.c_str());
+    if (!loadFile(maskimage, maskName)) {
+      wxString __err = _("Failed to open the graphic '") + maskName + _("'");
+      throw __err;
+    }
 
-    if (
+      if (
       image.GetWidth() != maskimage.GetWidth()
-      || image.GetHeight() != maskimage.GetHeight())
-      throw wxString::Format(
-        _("bitmap size of '%s' does not match mask '%s'"),
-        filename.c_str(),
-        maskName.c_str());
+      || image.GetHeight() != maskimage.GetHeight()) {
+        wxString __err = _("bitmap size of '") + filename + _("' does not match mask '") + maskName + _("'");
+        throw __err;
+      }
 
     image.SetMaskFromImage(maskimage, 0xFF, 0xFF, 0xFF);
   }
@@ -249,8 +257,7 @@ GOBitmap GOBitmapCache::GetBitmap(wxString filename, wxString maskName) {
   long long ms = swBmp.Time();
   // Log only relatively slow decodes to avoid spamming the log
   if (ms > 120) {
-    wxLogMessage(wxString::Format("GUI.Bitmap.Load key=\"%s\" ms=%lld", filename.c_str(), ms));
-    wxLog::FlushActive();
+    LOG_GUI_GAP(wxString::Format("GUI.Bitmap.Load key=\"%s\" ms=%lld", filename.c_str(), ms));
   }
 #endif
 

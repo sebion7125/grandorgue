@@ -11,6 +11,14 @@
 #include <wx/log.h>
 #include <wx/stopwatch.h>
 
+#include "go_defs.h"
+#ifndef LOG_TIMING
+# define LOG_TIMING(...) do{}while(0)
+#endif
+#ifndef LOG_GUI_GAP
+# define LOG_GUI_GAP(...) do{}while(0)
+#endif
+
 #include "combinations/control/GOGeneralButtonControl.h"
 #include "config/GOConfig.h"
 #include "config/GOConfigReader.h"
@@ -84,7 +92,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
   __sw_model_total.Start();
   __go_model_sw.Start();
   reportPhase(0, _("Building organ model and GUI resources"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'start' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'start' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
   m_OrganName = cfg.ReadStringTrim(ODFSetting, WX_ORGAN, wxT("ChurchName"));
   m_DivisionalsStoreIntermanualCouplers = cfg.ReadBoolean(
@@ -103,13 +111,13 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
 
   m_RootPipeConfigNode.Load(cfg, WX_ORGAN, wxEmptyString);
   reportPhase(5, _("Building: pipe config tree"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'pipe config tree' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'pipe config tree' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
   m_windchests.resize(0);
   for (unsigned i = 0; i < NumberOfWindchestGroups; i++)
     m_windchests.push_back(new GOWindchest(*this));
   reportPhase(10, _("Building: windchests"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'windchests' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'windchests' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 
   m_ODFManualCount
@@ -151,7 +159,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
     }
   }
   reportPhase(20, _("Building: enclosures"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'enclosures' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'enclosures' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 
   // Switches must be loaded before manuals because manuals reference to
@@ -180,7 +188,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
     }
   }
   reportPhase(30, _("Building: switches"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'switches' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'switches' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 
   unsigned NumberOfTremulants
@@ -207,7 +215,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
     }
   }
   reportPhase(40, _("Building: tremulants"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'tremulants' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'tremulants' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 
   unsigned wcLastPct = 45;
@@ -228,7 +236,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
     }
   }
   reportPhase(50, _("Building: windchest groups"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'windchest groups' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'windchest groups' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 
   m_ODFRankCount = cfg.ReadInteger(
@@ -236,7 +244,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
   wxStopWatch __sw_ranks;
   if (m_ODFRankCount > 0) {
     reportPhase(50, _("Building: ranks"));
-    wxLogMessage(wxString::Format("Timing: ModelPhase 'ranks-start' %ld ms", __go_model_sw.Time()));
+    LOG_TIMING(wxString::Format("Timing: ModelPhase 'ranks-start' %ld ms", __go_model_sw.Time()));
     __sw_ranks.Start();
     __go_model_sw.Start();
   }
@@ -260,7 +268,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
     }
   }
   reportPhase(70, _("Building: ranks"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'ranks-complete' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'ranks-complete' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 
   // Switches must be loaded before manuals because manuals reference to
@@ -282,7 +290,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
     }
   }
   reportPhase(80, _("Building: manuals"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'manuals' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'manuals' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 
   unsigned min_key = 0xff, max_key = 0;
@@ -303,7 +311,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
       min_key,
       max_key - min_key);
   reportPhase(85, _("Building: floating manuals"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'floating manuals' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'floating manuals' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 
   unsigned NumberOfReversiblePistons = cfg.ReadInteger(
@@ -315,7 +323,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
       cfg, wxString::Format(wxT("ReversiblePiston%03d"), i + 1));
   }
   reportPhase(92, _("Building: pistons"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'pistons' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'pistons' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 
   unsigned NumberOfDivisionalCouplers = cfg.ReadInteger(
@@ -327,7 +335,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
       cfg, wxString::Format(wxT("DivisionalCoupler%03d"), i + 1));
   }
   reportPhase(96, _("Building: divisional couplers"));
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'divisional couplers' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'divisional couplers' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 
   for (unsigned i = 0; i < m_enclosures.size(); i++)
@@ -358,7 +366,7 @@ void GOOrganModel::Load(GOConfigReader &cfg) {
   reportPhase(100, _("Building organ model and GUI resources"));
   m_tim_ranks_ms = __sw_ranks.Time();
   m_tim_rest_ms = __sw_model_total.Time() - m_tim_ranks_ms;
-  wxLogMessage(wxString::Format("Timing: ModelPhase 'complete' %ld ms", __go_model_sw.Time()));
+  LOG_TIMING(wxString::Format("Timing: ModelPhase 'complete' %ld ms", __go_model_sw.Time()));
   __go_model_sw.Start();
 }
 
