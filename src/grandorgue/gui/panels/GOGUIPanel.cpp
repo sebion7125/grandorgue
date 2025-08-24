@@ -6,10 +6,8 @@
  */
 
 #include "GOGUIPanel.h"
-
+ 
 #include <wx/image.h>
-#include <wx/stopwatch.h>
-#include <wx/log.h>
 
 #include "combinations/GOSetter.h"
 #include "combinations/control/GODivisionalButtonControl.h"
@@ -136,10 +134,6 @@ void GOGUIPanel::LoadManualButton(
 }
 
 void GOGUIPanel::Load(GOConfigReader &cfg, const wxString &group) {
-  wxStopWatch sw_panel;
-  // Note: GOGUIPanel is not a wxWindow; freeze/auto-layout calls belong to the
-  // widget (GOGUIPanelWidget). To keep this change safe and avoid API errors
-  // we only measure timing here and leave layout control to the widget.
   wxString cfgGroup = group;
   wxString panel_group;
   wxString panel_prefix;
@@ -730,14 +724,6 @@ void GOGUIPanel::Load(GOConfigReader &cfg, const wxString &group) {
       LoadControl(control, cfg, buffer);
     }
   }
-  // restore / final logging
-  wxLogMessage(wxString::Format(
-    "GUI.Panel.Load name=\"%s\" group=\"%s\" controls=%u total_ms=%ld",
-    m_Name.c_str(),
-    m_GroupName.c_str(),
-    (unsigned)m_controls.size(),
-    static_cast<long>(sw_panel.Time())));
-  wxLog::FlushActive();
 }
 
 // Create a lightweight snapshot of the panel config that can be stored on the heap.
@@ -760,20 +746,12 @@ std::shared_ptr<GOGUIPanel::LoadSnapshot> GOGUIPanel::CreateLoadSnapshot(
 void GOGUIPanel::LoadFromSnapshot(std::shared_ptr<LoadSnapshot> snap) {
   // Minimal, safe deferred handler: set identifying fields and perform lightweight actions.
   // Full reconstruction of controls from snapshot is a follow-up task.
-  wxStopWatch sw;
   if (!snap)
     return;
   // Use snapshot values to set basic metadata so logs remain useful.
   if (!snap->group.IsEmpty())
     m_GroupName = snap->group;
   // Name may already be set by synchronous Load, keep it if present.
-  wxLogMessage(wxString::Format(
-    "GUI.Panel.Load deferred name=\"%s\" group=\"%s\" controls=%u total_ms=%ld deferred=true",
-    m_Name.c_str(),
-    m_GroupName.c_str(),
-    (unsigned)m_controls.size(),
-    static_cast<long>(sw.Time())));
-  wxLog::FlushActive();
 }
 
 GOGUIControl *GOGUIPanel::CreateGUIElement(
