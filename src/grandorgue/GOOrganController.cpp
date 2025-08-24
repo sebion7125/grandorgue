@@ -910,45 +910,12 @@ wxString GOOrganController::Load(
             if (obj)
               thisWorker.LoadObjectNoExc(obj);
 
-            // Time-based estimation variables for direct loads
-            unsigned __go_load_objects = 0;
-            long long __go_load_total_ms = 0;
-
             while (true) {
-              wxStopWatch __go_obj_sw2;
-              __go_obj_sw2.Start();
               if (!thisWorker.LoadNextObject(obj))
                 break;
-              long long __ms2 = __go_obj_sw2.Time();
-              __go_load_total_ms += __ms2;
-              __go_load_objects++;
-
-              // compute synthetic unit based on elapsed time
-              unsigned __processed = __go_load_objects;
-              unsigned __total = __objUnits;
-              unsigned __syntheticUnit = __processed; // fallback
-              if (__processed > 0 && __total > 0) {
-                double avg_ms = (double)__go_load_total_ms / (double)__processed;
-                unsigned long long remaining = (__total > __processed) ? (__total - __processed) : 0;
-                double rem_est_ms = avg_ms * (double)remaining;
-                double frac_time = 0.0;
-                double denom = (double)__go_load_total_ms + rem_est_ms;
-                if (denom > 0.0)
-                  frac_time = (double)__go_load_total_ms / denom;
-                else
-                  frac_time = (double)__processed / (double)__total;
-                if (frac_time < 0.0) frac_time = 0.0;
-                if (frac_time > 1.0) frac_time = 1.0;
-                long long rounded = std::llround(frac_time * (double)__total);
-                if (rounded < 1 && __processed > 0)
-                  rounded = 1;
-                if ((unsigned)rounded > __total)
-                  rounded = __total;
-                __syntheticUnit = (unsigned)rounded;
-              }
 
               // show the progress and process possible Cancel
-              if (!dlg->Update(__syntheticUnit, obj->GetLoadTitle()))
+              if (!dlg->Update(objectDistributor.GetPos(), obj->GetLoadTitle()))
                 ThrowGOLoadAbortedPartial(__func__); // skip the rest loading code
             }
 
