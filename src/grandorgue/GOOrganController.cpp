@@ -15,6 +15,7 @@
 #include <wx/txtstrm.h>
 #include <wx/wfstream.h>
 #include <wx/stopwatch.h>
+#include <typeinfo>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -74,6 +75,15 @@
 
 #include "go_defs.h"
 
+#ifndef LOG_TIMING
+// Fallbacks: if the generated go_defs.h (from CMake) does not define these
+// macros yet (e.g. configure hasn't been rerun), provide safe no-op defaults.
+# define LOG_TIMING(...) do{}while(0)
+#endif
+#ifndef LOG_GUI_GAP
+# define LOG_GUI_GAP(...) do{}while(0)
+#endif
+
 #include "GOAudioRecorder.h"
 #include "GOBuffer.h"
 #include "GODocument.h"
@@ -84,7 +94,7 @@
 #include "go_path.h"
 #include "GOMemoryPool.h"
 
-#define GUI_GAP_TRACER 1
+//#define GUI_GAP_TRACER 0
 
 static const wxString WX_ORGAN = wxT("Organ");
 static const wxString WX_GRANDORGUE_VERSION = wxT("GrandOrgueVersion");
@@ -213,8 +223,16 @@ GOHashType GOOrganController::GenerateCacheHash() {
   return hash.getHash();
 }
 
-class GOLoadAborted : public std::exception {};
- 
+#include "loader/GOLoadExceptions.h"
+
+// Helper for diagnostic logging before throwing so we can trace where
+// an early abort originates during load.
+static inline void ThrowGOLoadAborted(const char *where) {
+  /*wxLogMessage("GOLoadAborted thrown at: %s", where);
+  wxLog::FlushActive();*/  // don't log exceptions anymore. this was just a debug helper
+  ThrowGOLoadAbortedEarly(__func__);
+}
+
 void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg) {
   /* load church info */
   cfg.ReadString(
@@ -318,7 +336,7 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
     wxStopWatch __go_elcre_sw;
     for (unsigned i = 0; i < m_elementcreators.size(); i++)
       m_elementcreators[i]->Load(cfg);
-    { wxString __log = wxString::Format("GUI.ElementCreators.Load total_ms=%ld creators=%u", __go_elcre_sw.Time(), (unsigned)m_elementcreators.size()); wxLogMessage("%s", __log); wxLog::FlushActive(); }
+    { wxString __log = wxString::Format("GUI.ElementCreators.Load total_ms=%ld creators=%u", __go_elcre_sw.Time(), (unsigned)m_elementcreators.size()); LOG_GUI_GAP("%s", __log); }
   }
 #else
   for (unsigned i = 0; i < m_elementcreators.size(); i++)
@@ -341,7 +359,7 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
     wxStopWatch __go_mainwnd_sw;
     __go_mainwnd_sw.Start();
     m_MainWindowData.Load(cfg);
-    { wxString __log = wxString::Format("Timing: MainWindowData.Load %ld ms", __go_mainwnd_sw.Time()); wxLogMessage("%s", __log); }
+    LOG_TIMING("Timing: MainWindowData.Load %ld ms", __go_mainwnd_sw.Time());
   }
 
   // Load dialog sizes (measured)
@@ -349,7 +367,7 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
     wxStopWatch __go_dialogsizes_sw;
     __go_dialogsizes_sw.Start();
     m_config.m_DialogSizes.Load(cfg, CMBSetting);
-    { wxString __log = wxString::Format("Timing: DialogSizes.Load %ld ms", __go_dialogsizes_sw.Time()); wxLogMessage("%s", __log); }
+    LOG_TIMING("Timing: DialogSizes.Load %ld ms", __go_dialogsizes_sw.Time());
   }
 
   m_panels.resize(0);
@@ -378,16 +396,16 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
         msg += panelName;
         msg += wxString::Format(_(" (%u/%u)"), (unsigned)m_panels.size(), totalPanels);
         if (!dlg->Update(i + 1, msg))
-          throw GOLoadAborted();
+          ThrowGOLoadAborted(__func__);
       } else {
         wxString __panelLog = wxString::Format("Progress: Loading panel \"%s\" (%u/%u)", m_panels[m_panels.size() - 1]->GetName().c_str(), (unsigned)m_panels.size(), totalPanels);
-        wxLogMessage("%s", __panelLog);
+        LOG_GUI_GAP("%s", __panelLog);
         wxLog::FlushActive();
       }
     }
     
     __tim_panels_ms = __sw_panels.Time();
-    { wxString __log = wxString::Format("GUI.Panels.Load total_ms=%ld panels=%u", __go_panelsload_sw.Time(), (unsigned)m_panels.size()); wxLogMessage("%s", __log); wxLog::FlushActive(); }
+    { wxString __log = wxString::Format("GUI.Panels.Load total_ms=%ld panels=%u", __go_panelsload_sw.Time(), (unsigned)m_panels.size()); LOG_GUI_GAP("%s", __log); }
   }
 #else
   {
@@ -411,18 +429,17 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
         msg += panelName;
         msg += wxString::Format(_(" (%u/%u)"), (unsigned)m_panels.size(), totalPanels);
         if (!dlg->Update(i + 1, msg))
-          throw GOLoadAborted();
+          ThrowGOLoadAborted(__func__);
       } else {
         wxString __panelLog = wxString::Format("Progress: Loading panel \"%s\" (%u/%u)", m_panels[m_panels.size() - 1]->GetName().c_str(), (unsigned)m_panels.size(), totalPanels);
-        wxLogMessage("%s", __panelLog);
+        LOG_GUI_GAP("%s", __panelLog);
         wxLog::FlushActive();
       }
     }
 
     // store measured panel time into the member variable for final summary
     __tim_panels_ms = __go_panelsload_sw.Time();
-    wxLogMessage(wxString::Format("GUI.Panels.Load total_ms=%ld panels=%u", __go_panelsload_sw.Time(), (unsigned)m_panels.size()));
-    wxLog::FlushActive();
+    LOG_TIMING(wxString::Format("GUI.Panels.Load total_ms=%ld panels=%u", __go_panelsload_sw.Time(), (unsigned)m_panels.size()));
   }
 #endif
 
@@ -433,7 +450,7 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
     wxStopWatch __go_createpanels_sw;
     for (unsigned i = 0; i < m_panelcreators.size(); i++)
       m_panelcreators[i]->CreatePanels(cfg);
-    { wxString __log = wxString::Format("GUI.CreatePanels total_ms=%ld creators=%u", __go_createpanels_sw.Time(), (unsigned)m_panelcreators.size()); wxLogMessage("%s", __log); wxLog::FlushActive(); }
+    { wxString __log = wxString::Format("GUI.CreatePanels total_ms=%ld creators=%u", __go_createpanels_sw.Time(), (unsigned)m_panelcreators.size()); LOG_GUI_GAP("%s", __log); }
   }
 #else
   for (unsigned i = 0; i < m_panelcreators.size(); i++)
@@ -445,7 +462,7 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
     wxStopWatch __go_panelslayout_sw;
     for (unsigned i = 0; i < m_panels.size(); i++)
       m_panels[i]->Layout();
-    { wxString __log = wxString::Format("GUI.Panels.Layout total_ms=%ld panels=%u", __go_panelslayout_sw.Time(), (unsigned)m_panels.size()); wxLogMessage("%s", __log); wxLog::FlushActive(); }
+    { wxString __log = wxString::Format("GUI.Panels.Layout total_ms=%ld panels=%u", __go_panelslayout_sw.Time(), (unsigned)m_panels.size()); LOG_GUI_GAP("%s", __log); }
   }
 #else
   for (unsigned i = 0; i < m_panels.size(); i++)
@@ -550,7 +567,11 @@ wxString GOOrganController::Load(
       // values appropriate for the current segment (e.g. 0..100 for percent,
       // or n objects for object lists).
       SetProgressSink([dlg](unsigned pc, const wxString &msg) {
-        dlg->Update(pc, msg);
+        // If the user cancelled via the dialog, Update returns false.
+        // Propagate a cooperative abort so the surrounding load logic can
+        // stop promptly and consistently.
+        if (!dlg->Update(pc, msg))
+          ThrowGOLoadAbortedEarly(__func__);
       });
       // Parsing is a percent-based phase (0..100). Use measured window.
       if (dlg) dlg->ResetRange(100, 0, 1, _("Parsing sample set definition file"));
@@ -564,7 +585,8 @@ wxString GOOrganController::Load(
         [dlg](unsigned pc, const wxString &msg) {
           // Forward percent directly (0..100). ResetRange above maps this
           // into the 0..3% window.
-          dlg->Update(pc, msg);
+          if (!dlg->Update(pc, msg))
+            ThrowGOLoadAbortedEarly(__func__);
         });
       __tim_parse_ms = __sw_parse.Time();
       if (!ok)
@@ -618,7 +640,8 @@ wxString GOOrganController::Load(
               // .cmb is small but treat it as percent-based and map into the
               // model percent window (3..19%). ResetRange will be set before
               // calling this block.
-              dlg->Update(pc, msg);
+              if (!dlg->Update(pc, msg))
+                ThrowGOLoadAborted(__func__);
             }))
           throw wxString::Format(_("Unable to read '%s'"), setting_file);
       } else {
@@ -629,7 +652,8 @@ wxString GOOrganController::Load(
             cmbFromArchive,
             _("Reading organ settings (.cmb)"),
             [dlg](unsigned pc, const wxString &msg) {
-              dlg->Update(pc, msg);
+              if (!dlg->Update(pc, msg))
+                ThrowGOLoadAborted(__func__);
             }))
           throw wxString::Format(_("Unable to read '%s'"), setting_file);
       }
@@ -701,7 +725,7 @@ wxString GOOrganController::Load(
 
         dummy.resize(1024 * 1024 * 50);
 #ifdef GO_PROFILE_ODFLOAD
-        wxLogMessage(wxString::Format("Timing: Parse/ODF processing: %ld ms", sw_phase.Time()));
+        LOG_TIMING(wxString::Format("Timing: Parse/ODF processing: %ld ms", sw_phase.Time()));
         sw_phase.Start();
 #endif
 
@@ -713,16 +737,16 @@ wxString GOOrganController::Load(
         ResolveReferences();
 
         // Time from end of model -> end of ResolveReferences
-        wxLogMessage(wxString::Format("Timing: Post-model -> ResolveReferences total %ld ms", __go_postmodel_sw.Time()));
+        LOG_TIMING(wxString::Format("Timing: Post-model -> ResolveReferences total %ld ms", __go_postmodel_sw.Time()));
 
 #ifdef GO_PROFILE_ODFLOAD
-        wxLogMessage(wxString::Format("Timing: ResolveReferences: %ld ms", sw_phase.Time()));
+        LOG_TIMING(wxString::Format("Timing: ResolveReferences: %ld ms", sw_phase.Time()));
         sw_phase.Start();
 #endif
 
         /* Figure out list of pipes to load */
 #ifdef GO_PROFILE_ODFLOAD
-        wxLogMessage("Timing: Preparing audio objects…");
+        LOG_TIMING("Timing: Preparing audio objects…");
 #endif
         dlg->Reset(1, _("Preparing audio objects"));
         GOCacheObjectDistributor objectDistributor(GetCacheObjects());
@@ -767,7 +791,7 @@ wxString GOOrganController::Load(
           }
 
           // Log time taken to reach cache-open+header stage (aggregated small log)
-          { wxString __log = wxString::Format("Timing: PreparingObjects->CacheOpenHeader %ld ms", __go_prep_to_cache_sw.Time()); wxLogMessage("%s", __log); }
+          { wxString __log = wxString::Format("Timing: PreparingObjects->CacheOpenHeader %ld ms", __go_prep_to_cache_sw.Time()); LOG_TIMING("%s", __log); }
 
           GOCacheObject *obj = nullptr;
 
@@ -777,7 +801,7 @@ wxString GOOrganController::Load(
             long long __go_cache_objects = 0;
 
             // Logpoint immediately before cache deserialization starts
-            { wxString __log = wxString::Format("Timing: BeforeCacheDeserialization objects=%u", objectDistributor.GetNObjects()); wxLogMessage("%s", __log); }
+            { wxString __log = wxString::Format("Timing: BeforeCacheDeserialization objects=%u", objectDistributor.GetNObjects()); LOG_TIMING("%s", __log); }
 
             // Aggregate timing by title (top-N reporting)
             struct __Agg { uint32_t count = 0; long long total_ms = 0; };
@@ -827,7 +851,7 @@ wxString GOOrganController::Load(
               }
 
               if (!dlg->Update(__syntheticUnit, obj->GetLoadTitle()))
-                throw GOLoadAborted(); // Skip the rest of the loading code
+                ThrowGOLoadAbortedPartial(__func__); // Skip the rest of the loading code
             }
 
             if (!obj)
@@ -841,7 +865,7 @@ wxString GOOrganController::Load(
               long long __go_cache_avg_ms = __go_cache_total_ms / __go_cache_objects;
               { wxString __log = wxString::Format(
                 "Timing: Cache load summary total_objects=%lld total_ms=%lld avg_ms=%lld",
-                __go_cache_objects, __go_cache_total_ms, __go_cache_avg_ms); wxLogMessage("%s", __log); }
+                __go_cache_objects, __go_cache_total_ms, __go_cache_avg_ms); LOG_TIMING("%s", __log); }
 
               // compute top 10 by total_ms
               std::vector<std::pair<std::string, __Agg>> __vec;
@@ -857,7 +881,7 @@ wxString GOOrganController::Load(
                 double avg = it.second.count ? (double)it.second.total_ms / it.second.count : 0.0;
                 { wxString __log = wxString::Format(
                   "Timing: Cache.byTitle[%d] title=\"%s\" count=%u total_ms=%lld avg_ms=%.2f",
-                  i + 1, it.first.c_str(), it.second.count, it.second.total_ms, avg); wxLogMessage("%s", __log); }
+                  i + 1, it.first.c_str(), it.second.count, it.second.total_ms, avg); LOG_TIMING("%s", __log); }
               }
               wxLog::FlushActive();
             }
@@ -925,15 +949,34 @@ wxString GOOrganController::Load(
 
               // show the progress and process possible Cancel
               if (!dlg->Update(__syntheticUnit, obj->GetLoadTitle()))
-                throw GOLoadAborted(); // skip the rest loading code
+                ThrowGOLoadAbortedPartial(__func__); // skip the rest loading code
             }
 
-            // rethrow exception if any occured in thisWorker.LoadNextObject
+          // rethrow exception if any occured in thisWorker.LoadNextObject
             bool wereExceptions = thisWorker.WereExceptions();
 
           for (unsigned i = 0; i < threads.size(); i++)
             wereExceptions |= threads[i]->CheckExceptions();
-          if (wereExceptions) {
+
+          // Detect cooperative aborts originating inside worker threads.
+          bool anyUserAbort = false;
+          for (unsigned i = 0; i < threads.size(); i++) {
+            if (threads[i]->WasUserAbort()) {
+              anyUserAbort = true;
+              break;
+            }
+          }
+
+          if (anyUserAbort) {
+            // User cancelled during worker activity; show partial-load warning
+            // and avoid updating the cache.
+            GOMessageBox(
+              _("Load aborted by the user - only parts of the organ are loaded."),
+              _("Load error"),
+              wxOK | wxICON_ERROR,
+              NULL);
+            m_Cacheable = false;
+          } else if (wereExceptions) {
             for (auto obj : GetCacheObjects()) {
               if (!obj->IsReady())
                 wxLogError(obj->GetLoadError());
@@ -962,16 +1005,43 @@ wxString GOOrganController::Load(
           _("Load error"),
           wxOK | wxICON_ERROR,
           NULL);
-      } catch (const GOLoadAborted &) {
+      } catch (const GOLoadAbortedPartial &) {
+        // User aborted during the audio/cache phase: show the standard
+        // partial-load warning but continue so the rest of the cleanup and
+        // possible partial initialization proceeds as before.
         GOMessageBox(
           _("Load aborted by the user - only parts of the organ are loaded."),
           _("Load error"),
           wxOK | wxICON_ERROR,
           NULL);
+      } catch (const GOLoadAbortedEarly &) {
+        // Early abort (pre-audio): treat as a controlled user cancel.
+        // Show the user message, close archives and return the sentinel so
+        // higher-level callers know this was a user cancel and should not log.
+        wxString userCancel = wxT("!");
+        GOMessageBox(
+          _("Load aborted by the user - loading cancelled."),
+          _("Load error"),
+          wxOK | wxICON_ERROR,
+          NULL);
+        m_FileStore.CloseArchives();
+        return userCancel;
       }
     }
   } catch (const wxString &error_) {
     errMsg = error_;
+  } catch (const GOLoadAbortedEarly &) {
+    // Early abort (pre-audio): treat as a controlled user cancel.
+    // Show the user message, close archives and return the sentinel so
+    // higher-level callers know this was a user cancel and should not log.
+    wxString userCancel = wxT("!");
+    GOMessageBox(
+      _("Load aborted by the user - loading cancelled."),
+      _("Load error"),
+      wxOK | wxICON_ERROR,
+      NULL);
+    m_FileStore.CloseArchives();
+    return userCancel;
   } catch (const std::exception &e) {
     errMsg = e.what();
   } catch (...) { // We must not allow unhandled exceptions here
@@ -989,10 +1059,10 @@ wxString GOOrganController::Load(
   double p_panels = (double)__tim_panels_ms * 100.0 / (double)totalMeasured;
   double p_cache = (double)__tim_cache_ms * 100.0 / (double)totalMeasured;
   { wxString __log = wxString::Format("Timing: Percentages parse=%.2f%% cmb=%.2f%% ranks=%.2f%% modelrest=%.2f%% panels=%.2f%% cache=%.2f%% total_ms=%lld",
-    p_parse, p_cmb, p_ranks, p_modelrest, p_panels, p_cache, totalMeasured); wxLogMessage("%s", __log); }
+    p_parse, p_cmb, p_ranks, p_modelrest, p_panels, p_cache, totalMeasured); LOG_TIMING("%s", __log); }
   // raw ms values as requested
   { wxString __log2 = wxString::Format("Timing: Measured parse=%lld cmb=%lld ranks=%lld modelrest=%lld panels=%lld cache=%lld ms",
-    __tim_parse_ms, __tim_cmb_ms, __tim_ranks_ms, __tim_modelrest_ms, __tim_panels_ms, __tim_cache_ms); wxLogMessage("%s", __log2); }
+    __tim_parse_ms, __tim_cmb_ms, __tim_ranks_ms, __tim_modelrest_ms, __tim_panels_ms, __tim_cache_ms); LOG_TIMING("%s", __log2); }
   wxLog::FlushActive();
 
   dummy.free();
