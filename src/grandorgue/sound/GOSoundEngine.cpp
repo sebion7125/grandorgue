@@ -31,7 +31,7 @@
 // needed for Debugging the new Release Model
 #include "model/GOSoundingPipe.h"
 #include "model/GORank.h"
-//#include <wx/log.h>
+#include <wx/log.h>
 #include "GO_DebugRelease.h"
 
 GOSoundEngine::GOSoundEngine()
@@ -702,10 +702,10 @@ void GOSoundEngine::CreateReleaseSampler(GOSoundSampler *handle) {
         releaseLength > 0
         && (releaseLength < gain_decay_length || gain_decay_length == 0))
         gain_decay_length = releaseLength;
-
-      /*if (gain_decay_length > 0)
+      
+      if (gain_decay_length > 0)
         new_sampler->fader.StartDecreasingVolume(
-          MsToSamples(gain_decay_length));*/
+          MsToSamples(gain_decay_length));         
 
       if (
         m_ReleaseAlignmentEnabled

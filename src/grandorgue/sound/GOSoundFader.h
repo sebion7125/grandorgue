@@ -68,7 +68,8 @@ private:
 
   // for sinus-fade
   unsigned m_FadeStartSample = 0;
-  unsigned m_FadeLengthSamples = 0;
+  unsigned m_FadeInLengthSamples = 0;
+  unsigned m_FadeOutLengthSamples = 0;
   float m_FadeStartVolume = 0.0f;
 
   // global progress
@@ -92,13 +93,13 @@ public:
    * @param nFrames number of frames for full decay
    */
   inline void StartDecreasingVolume(unsigned nFrames) {
-    m_CurrentFadeMode = GOCrossfadeMode::SinEqualPower;
+    
     m_DecreasingDeltaPerFrame = m_TargetVolume / nFrames;
 
-    if (m_CurrentFadeMode == GOCrossfadeMode::SinEqualPower) {
+    if (m_CurrentFadeMode != GOCrossfadeMode::Linear) {
       // Sinus fade-out: reset counter, remember length and start volume
       m_FadeStartSample = m_CurrentSampleCounter = 0;
-      m_FadeLengthSamples = nFrames;
+      m_FadeOutLengthSamples = nFrames;
       m_FadeStartVolume = m_LastTargetVolumePoint;
 
       // Not a linear transition -> nothing more to do
@@ -127,7 +128,7 @@ public:
     m_DecreasingDeltaPerFrame == 0.0f &&
     m_IncreasingDeltaPerFrame == 0.0f &&
     m_LastTargetVolumePoint <= 0.00001f &&
-    m_CurrentSampleCounter >= m_FadeLengthSamples
+    m_CurrentSampleCounter >= m_FadeOutLengthSamples
   ); }*/
 };
 
