@@ -4,7 +4,7 @@
 
 namespace GOAudioParams {
   inline std::atomic<uint8_t> g_crossfadeMode{
-    static_cast<uint8_t>(GOCrossfadeMode::SinEqualPower) // Default as before
+    static_cast<uint8_t>(GOCrossfadeMode::Linear) // Default as before
   };
   inline GOCrossfadeMode GetCrossfadeMode() {
     return static_cast<GOCrossfadeMode>(g_crossfadeMode.load(std::memory_order_relaxed));

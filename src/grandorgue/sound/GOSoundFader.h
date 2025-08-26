@@ -74,6 +74,16 @@ private:
 
   // global progress
   unsigned m_CurrentSampleCounter = 0;
+
+  // separate, independent envelopes
+  bool     m_InActive   = false;
+  unsigned m_InLen      = 0;
+  unsigned m_InPos      = 0;
+
+  bool     m_OutActive  = false;
+  unsigned m_OutLen     = 0;
+  unsigned m_OutPos     = 0;
+
 public:
   /**
    * Setup the fader for constant volume or for increasing from 0 to
@@ -93,25 +103,25 @@ public:
    * @param nFrames number of frames for full decay
    */
   inline void StartDecreasingVolume(unsigned nFrames) {
-    
-    m_DecreasingDeltaPerFrame = m_TargetVolume / nFrames;
-
+    // Non-linear modes: enable the Out envelope (new double-envelope logic)
     if (m_CurrentFadeMode != GOCrossfadeMode::Linear) {
-      // Sinus fade-out: reset counter, remember length and start volume
-      m_FadeStartSample = m_CurrentSampleCounter = 0;
-      m_FadeOutLengthSamples = nFrames;
-      m_FadeStartVolume = m_LastTargetVolumePoint;
-
-      // Not a linear transition -> nothing more to do
+      m_OutActive = true;
+      m_OutLen = (nFrames ? nFrames : 1);
+      m_OutPos = 0;
+      // marker for non-linear path
+      m_DecreasingDeltaPerFrame = 1.0f;
       return;
     }
 
+    // --- Legacy Linear behavior (keep exact semantics) ---
+    m_DecreasingDeltaPerFrame = (nFrames ? (m_TargetVolume / nFrames) : m_TargetVolume);
+
     if (m_IncreasingDeltaPerFrame > 0.0f) {
-      // Interrupt an ongoing fade-in
+      // Interrupt an ongoing fade-in (legacy overlap formula)
       assert(m_LastTargetVolumePoint < m_TargetVolume);
       m_TargetVolume = (m_TargetVolume - m_LastTargetVolumePoint)
-          * m_IncreasingDeltaPerFrame
-          / (m_IncreasingDeltaPerFrame + m_DecreasingDeltaPerFrame)
+        * m_IncreasingDeltaPerFrame
+        / (m_IncreasingDeltaPerFrame + m_DecreasingDeltaPerFrame)
         + m_LastTargetVolumePoint;
     }
   }
@@ -122,7 +132,20 @@ public:
   void Process(unsigned nFrames, float *buffer, float externalVolume);
   void ProcessNonLinearFade(unsigned nFrames, float *buffer, float externalVolume);
 
-  bool IsSilent() const { return (m_LastTargetVolumePoint <= 0.0f); }
+  bool IsSilent() const {
+    // Linear: legacy-compatible — silent when internal last target volume reached 0.
+    if (m_CurrentFadeMode == GOCrossfadeMode::Linear) {
+      return (m_LastTargetVolumePoint <= 0.0f);
+    }
+
+    // Non-linear: if an explicit Out envelope WAS active, it's silent only when it has been finished.
+    //if (m_OutActive)
+    if(m_OutLen > 0)
+    return (m_OutPos >= m_OutLen);
+
+    // No Out envelope active => not silent (stream will run to EOF)
+    return false;
+  }
   /*bool IsSilent() const {
   return (
     m_DecreasingDeltaPerFrame == 0.0f &&
