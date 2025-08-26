@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <wx/log.h>
+#include <wx/string.h>
 
 
 // backup old version of setup:
@@ -33,8 +35,9 @@
 void GOSoundFader::Setup(
   float targetVolume, float velocityVolume, unsigned nFramesToIncreaseIn) {
 
-  m_CurrentFadeMode = GOCrossfadeMode::SinEqualPower;
-  
+   // Choose curve based on runtime crossfade mode; keep linear fast-path for legacy
+   using namespace GOAudioParams;
+   m_CurrentFadeMode = GetCrossfadeMode(); 
   /*FILE* f = fopen("debug.txt", "a");
 fprintf(f, "[FADER] Setup: target=%f, velocity=%f, nFrames=%u\n",
   targetVolume, velocityVolume, nFramesToIncreaseIn);
@@ -51,12 +54,14 @@ fclose(f);*/
     // Immediately set to target volume
     m_LastTargetVolumePoint = targetVolume;
     m_IncreasingDeltaPerFrame = 0.0f;
-    m_FadeLengthSamples = 0;
+    m_FadeInLengthSamples = 0;
+    m_FadeOutLengthSamples = 0;
     m_FadeStartSample = 0;
     m_FadeStartVolume = targetVolume;
   } else {
     m_LastTargetVolumePoint = 0.0f;
-    m_FadeLengthSamples = nFramesToIncreaseIn;
+    m_FadeInLengthSamples = nFramesToIncreaseIn;
+    m_FadeOutLengthSamples = 0;
     m_FadeStartSample = 0;
 
     if (m_CurrentFadeMode == GOCrossfadeMode::SinEqualPower) {
@@ -113,13 +118,19 @@ void GOSoundFader::Process(
     } else {
       // we reach m_TargetVolume inside this nFrames period
 
-      // stop increasing
-      m_IncreasingDeltaPerFrame = 0.0f;
+      // former stop increasing here yielded division by zero
+      //m_IncreasingDeltaPerFrame = 0.0f;
+      //wxLogInfo("Division by zero would have happened in GO Release");
 
       // calculate how many frames left after increasing
       framesLeftAfterIncreasing = nFrames
         - unsigned((m_TargetVolume - m_LastTargetVolumePoint)
                    / m_IncreasingDeltaPerFrame);
+      
+      wxLogInfo("Division by zero yielded %d", framesLeftAfterIncreasing);
+
+      // stop increasing
+      m_IncreasingDeltaPerFrame = 0.0f;
 
       m_LastTargetVolumePoint = m_TargetVolume;
     }
@@ -210,14 +221,27 @@ void GOSoundFader::ProcessNonLinearFade(unsigned nFrames, float* buffer, float e
 
   float volume = 0.0f;
 
+  float FadeInDelta = 0.0f, FadeOutDelta = 0.0f;
+  if(m_IncreasingDeltaPerFrame>0)
+    FadeInDelta = 1.f / m_FadeInLengthSamples;
+  if(m_DecreasingDeltaPerFrame>0)
+    FadeOutDelta = 1.f / m_FadeOutLengthSamples;
+
   for (unsigned i = 0; i < nFrames; ++i, buffer += 2, ++m_CurrentSampleCounter) {
     // interpolate current external volume
     float currentExternal = startExternalVolume + i * externalDelta;
     float baseVolume = m_TargetVolume * currentExternal;
 
-    // fade position x in [0,1]
-    float x = m_FadeLengthSamples ? float(m_CurrentSampleCounter) / float(m_FadeLengthSamples) : 1.0f;
-    if (x > 1.0f) x = 1.0f;
+    // fade in position x in [0,1] as x_in and x_out for simultanous fade in/out
+    float x_in, x_out;
+    if(m_IncreasingDeltaPerFrame >= 0)  {
+      x_in = m_FadeInLengthSamples ? float(m_CurrentSampleCounter) * FadeInDelta : 1.0f;
+      if (x_in > 1.0f) x_in = 1.0f;
+    }
+    if(m_DecreasingDeltaPerFrame >= 0)  {
+      x_out = m_FadeOutLengthSamples ? float(m_CurrentSampleCounter) * FadeOutDelta : 1.0f;
+      if (x_out > 1.0f) x_out = 1.0f;
+    }
 
     float fadeFactor = 1.0f;
 
@@ -225,20 +249,21 @@ void GOSoundFader::ProcessNonLinearFade(unsigned nFrames, float* buffer, float e
     using namespace GOAudioParams;
     const auto mode = GetCrossfadeMode();
 
+    fadeFactor = 1.0f;
     
-    // Use go_crossfade_eval for non-linear curves.
-    const auto g = go_crossfade_eval(mode, x);
     if (m_IncreasingDeltaPerFrame > 0.0f) {
+      // Use go_crossfade_eval for non-linear curves.
+      const auto g = go_crossfade_eval(mode, x_in);
       // increasing from 0 -> target: use b (second weight)
-      fadeFactor = g.b;
-    } else if (m_DecreasingDeltaPerFrame > 0.0f) {
-      // decreasing to 0: use a (first weight)
-      fadeFactor = g.a;
-    } else {
-      fadeFactor = 1.0f;
+      fadeFactor *= g.b;
     }
+    if (m_DecreasingDeltaPerFrame > 0.0f) {
+      const auto g = go_crossfade_eval(mode, x_out);
+      // decreasing to 0: use a (first weight)
+      fadeFactor *= g.a;
+    }
+      
     
-
     volume = baseVolume * fadeFactor;
     buffer[0] *= volume;
     buffer[1] *= volume;
@@ -247,13 +272,15 @@ void GOSoundFader::ProcessNonLinearFade(unsigned nFrames, float* buffer, float e
   m_LastTargetVolumePoint = volume;
 
   // finalize fade
-  if (m_CurrentSampleCounter >= m_FadeLengthSamples) {
-    if (m_IncreasingDeltaPerFrame > 0.0f) {
+  if ((m_CurrentSampleCounter >= m_FadeInLengthSamples) && ((m_IncreasingDeltaPerFrame > 0.0f))) 
+  {
       m_LastTargetVolumePoint = m_TargetVolume;
       m_IncreasingDeltaPerFrame = 0.0f;
-    } else if (m_DecreasingDeltaPerFrame > 0.0f) {
+  } 
+  if ((m_CurrentSampleCounter >= m_FadeOutLengthSamples) && (m_DecreasingDeltaPerFrame > 0.0f))
+  {
       m_LastTargetVolumePoint = 0.0f;
       m_DecreasingDeltaPerFrame = 0.0f;
-    }
   }
+  
 }
