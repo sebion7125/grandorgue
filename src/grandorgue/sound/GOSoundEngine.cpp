@@ -8,6 +8,7 @@
 #include "GOSoundEngine.h"
 
 #include <algorithm>
+#include <vector>
 
 #include "model/GORank.h"
 #include "model/GOPipe.h"
@@ -27,6 +28,7 @@
 #include "GOSoundSampler.h"
 #include "GO_Attack_Parameters.h"
 #include "GOCrossfadeParam.h"
+#include "fast_crossfade.h"
 
 // needed for Debugging the new Release Model
 #include "model/GOSoundingPipe.h"
@@ -214,6 +216,11 @@ void GOSoundEngine::Setup(
       new GOSoundWindchestTask(*this, organController->GetWindchest(i)));
   m_TouchTask = std::unique_ptr<GOSoundTouchTask>(
     new GOSoundTouchTask(organController->GetMemoryPool()));
+  {
+    using namespace GOAudioParams;
+    std::vector<unsigned> _xfade_buckets = {32,64,128,256,512,1024,2048};
+    FastCrossfadeCache::PrecomputeForMode(GetCrossfadeMode(), _xfade_buckets);
+  }
   m_HasBeenSetup.store(true);
   Reset();
 }

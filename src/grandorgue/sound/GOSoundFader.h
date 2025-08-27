@@ -12,6 +12,7 @@
 #include <cmath>
 #include "GOCrossfadeMode.h"
 #include "GOCrossfadeParam.h"
+#include "fast_crossfade.h"
 
 /**
  * This class is responsible for smoothly changing a volume of samples.
@@ -83,6 +84,14 @@ private:
   bool     m_OutActive  = false;
   unsigned m_OutLen     = 0;
   unsigned m_OutPos     = 0;
+
+  // fast_crossfade steppers (per-fader instances; cheap)
+  GOAudioParams::CFLinear   m_InLin, m_OutLin;
+  GOAudioParams::CFSinEP    m_InSin, m_OutSin;
+  GOAudioParams::CFSin2     m_InSin2, m_OutSin2;
+  GOAudioParams::CFX2       m_InX2, m_OutX2;
+  GOAudioParams::CFSqrtEP   m_InSqrt, m_OutSqrt;
+  GOCrossfadeMode           m_ModeCached = GOCrossfadeMode::Linear;
 
 public:
   /**
