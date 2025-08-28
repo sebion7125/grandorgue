@@ -18,6 +18,17 @@
  // minimal dependency to the project's enum header
 #include "GOCrossfadeMode.h"
 
+// Debug dump switch: uncomment to enable writing template/reference/summary files
+// next to the working directory. Enable only for debugging.
+#define GO_FAST_XFADE_DUMP 1
+
+// Optional includes used by the debug dump (harmless when the macro is commented)
+#include <fstream>
+#include <sstream>
+#include <chrono>
+#include <iomanip>
+#include <ctime>
+
 namespace GOAudioParams {
 static constexpr float kFastCrossfadeHalfPi = 1.57079632679489661923f;
 
@@ -56,6 +67,8 @@ struct CFLinear {
   }
 
   inline void next(float &a, float &b) {
+    if (len == 0) { a = 1.0f; b = 0.0f; return; }
+    if (pos >= (len - 1)) { a = 0.0f; b = 1.0f; return; }
     a = 1.0f - t;
     b = t;
     t += dt;
@@ -77,6 +90,8 @@ struct CFX2 {
   }
 
   inline void next(float &a, float &b) {
+    if (len == 0) { a = 1.0f; b = 0.0f; return; }
+    if (pos >= (len - 1)) { a = 0.0f; b = 1.0f; return; }
     const float tt = t * t;
     a = 1.0f - tt;
     b = tt;
@@ -100,16 +115,19 @@ struct CFSinEP {
     const float d = (len > 1) ? (kFastCrossfadeHalfPi / float(len - 1)) : 0.f;
     sd = static_cast<float>(std::sin(d));
     cd = static_cast<float>(std::cos(d));
-    // advance recurrence to startPos
-    s = 0.f; c = 1.f;
-    for (unsigned i = 0; i < startPos; ++i) {
-      const float s0 = s, c0 = c;
-      s = s0 * cd + c0 * sd;
-      c = c0 * cd - s0 * sd;
+    // direct initialization at absolute position (no O(startPos) loop)
+    if (len > 1) {
+      const float theta = d * float(startPos);
+      s = static_cast<float>(std::sin(theta));
+      c = static_cast<float>(std::cos(theta));
+    } else {
+      s = 0.f; c = 1.f;
     }
   }
 
   inline void next(float &a, float &b) {
+    if (len == 0) { a = 1.0f; b = 0.0f; return; }
+    if (pos >= (len - 1)) { a = 0.0f; b = 1.0f; return; }
     a = c;
     b = s;
     const float s0 = s, c0 = c;
@@ -134,15 +152,19 @@ struct CFSin2 {
     const float d = (len > 1) ? (kFastCrossfadeHalfPi / float(len - 1)) : 0.f;
     sd = static_cast<float>(std::sin(d));
     cd = static_cast<float>(std::cos(d));
-    s = 0.f; c = 1.f;
-    for (unsigned i = 0; i < startPos; ++i) {
-      const float s0 = s, c0 = c;
-      s = s0 * cd + c0 * sd;
-      c = c0 * cd - s0 * sd;
+    // direct initialization at absolute position (no O(startPos) loop)
+    if (len > 1) {
+      const float theta = d * float(startPos);
+      s = static_cast<float>(std::sin(theta));
+      c = static_cast<float>(std::cos(theta));
+    } else {
+      s = 0.f; c = 1.f;
     }
   }
 
   inline void next(float &a, float &b) {
+    if (len == 0) { a = 1.0f; b = 0.0f; return; }
+    if (pos >= (len - 1)) { a = 0.0f; b = 1.0f; return; }
     const float aa = c * c;
     const float bb = s * s;
     a = aa;
@@ -174,6 +196,8 @@ struct CFSqrtEP {
   }
 
   inline void next(float &a, float &b) {
+    if (len == 0) { a = 1.0f; b = 0.0f; return; }
+    if (pos >= (len - 1)) { a = 0.0f; b = 1.0f; return; }
     int i = int(idx);
     if (i < 0) i = 0;
     if (i > lutSize) i = lutSize;
@@ -211,8 +235,8 @@ inline uint64_t make_key(GOCrossfadeMode m, unsigned len) {
 
 class FastCrossfadeCache {
 private:
-  static std::unordered_map<uint64_t, std::shared_ptr<FastXfadeTemplate>> s_cache;
-  static std::mutex s_mutex;
+  inline static std::unordered_map<uint64_t, std::shared_ptr<FastXfadeTemplate>> s_cache{};
+  inline static std::mutex s_mutex{};
 
   static void build_template_locked(GOCrossfadeMode mode, unsigned len) {
     uint64_t k = make_key(mode, len);
@@ -252,7 +276,82 @@ public:
 
   // Precompute common lengths for a mode (call at startup or on mode change)
   static void PrecomputeForMode(GOCrossfadeMode mode, const std::vector<unsigned>& lengths) {
-    for (unsigned L : lengths) EnsureTemplate(mode, L);
+    for (unsigned L : lengths) {
+      EnsureTemplate(mode, L);
+
+#ifdef GO_FAST_XFADE_DUMP
+      // Dump template, reference and summary for offline inspection.
+      auto tpl = GetTemplate(mode, L);
+      if (tpl) {
+        // Build a simple base filename using mode and length
+        std::ostringstream base;
+        base << "xfade_" << static_cast<int>(mode) << "_len" << L;
+
+        // Timestamp for reproducibility
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+        char timebuf[64];
+        std::strftime(timebuf, sizeof(timebuf), "%Y%m%d-%H%M%S", std::localtime(&now_c));
+
+        // Template file (actual cached a/b)
+        {
+          std::string fn = base.str() + "_template_" + timebuf + ".txt";
+          std::ofstream ofs(fn);
+          if (ofs) {
+            ofs << "# mode=" << static_cast<int>(mode) << " len=" << L << " timestamp=" << timebuf << "\n";
+            ofs << "# i a b\n";
+            for (unsigned i = 0; i < tpl->len; ++i) {
+              ofs << i << " " << std::setprecision(9) << tpl->a[i] << " " << tpl->b[i] << "\n";
+            }
+            ofs.close();
+          }
+        }
+
+        // Reference file (exact evaluator)
+        {
+          std::string fn = base.str() + "_reference_" + timebuf + ".txt";
+          std::ofstream ofs(fn);
+          if (ofs) {
+            ofs << "# mode=" << static_cast<int>(mode) << " len=" << L << " timestamp=" << timebuf << "\n";
+            ofs << "# i t a_ref b_ref\n";
+            for (unsigned i = 0; i < tpl->len; ++i) {
+              const float t = (tpl->len > 1) ? float(i) / float(tpl->len - 1) : 0.0f;
+              const auto g = go_crossfade_eval(mode, t);
+              ofs << i << " " << std::setprecision(9) << t << " " << g.a << " " << g.b << "\n";
+            }
+            ofs.close();
+          }
+        }
+
+        // Summary file (max/mean abs diffs)
+        {
+          std::string fn = base.str() + "_summary_" + timebuf + ".txt";
+          std::ofstream ofs(fn);
+          if (ofs) {
+            double max_da = 0.0, max_db = 0.0;
+            double sum_da = 0.0, sum_db = 0.0;
+            for (unsigned i = 0; i < tpl->len; ++i) {
+              const float t = (tpl->len > 1) ? float(i) / float(tpl->len - 1) : 0.0f;
+              const auto g = go_crossfade_eval(mode, t);
+              const double da = std::abs(double(tpl->a[i]) - double(g.a));
+              const double db = std::abs(double(tpl->b[i]) - double(g.b));
+              if (da > max_da) max_da = da;
+              if (db > max_db) max_db = db;
+              sum_da += da;
+              sum_db += db;
+            }
+            const double mean_da = (tpl->len > 0) ? (sum_da / double(tpl->len)) : 0.0;
+            const double mean_db = (tpl->len > 0) ? (sum_db / double(tpl->len)) : 0.0;
+            ofs << "mode=" << static_cast<int>(mode) << " len=" << L << " timestamp=" << timebuf << "\n";
+            ofs << "max_abs_diff_a=" << std::setprecision(9) << max_da << " max_abs_diff_b=" << max_db << "\n";
+            ofs << "mean_abs_diff_a=" << std::setprecision(9) << mean_da << " mean_abs_diff_b=" << mean_db << "\n";
+            ofs.close();
+          }
+        }
+      }
+#endif
+
+    }
   }
 
   static std::shared_ptr<FastXfadeTemplate> GetTemplate(GOCrossfadeMode mode, unsigned len) {
@@ -263,9 +362,5 @@ public:
     return it->second;
   }
 };
-
-// static members
-std::unordered_map<uint64_t, std::shared_ptr<FastXfadeTemplate>> FastCrossfadeCache::s_cache;
-std::mutex FastCrossfadeCache::s_mutex;
 
 } // namespace GOAudioParams

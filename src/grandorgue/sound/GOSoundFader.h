@@ -8,6 +8,20 @@
 #ifndef GOSOUNDFADER_H_
 #define GOSOUNDFADER_H_
 
+ // Enable runtime trace dump for fast crossfade diagnosis.
+ // Produces a short trace file when a non-linear crossfade block is first processed.
+ // Comment out to disable.
+ // #define GO_FAST_XFADE_RUNTIME_DUMP 1
+ // Use precomputed templates for runtime gains (exact, cache-backed).
+ // Comment out to fallback to steppers only.
+ #define GO_XFADE_USE_TEMPLATES 1
+
+ // Enable reference evaluator in the hotloop (bypasses steppers) to validate mapping.
+ // Comment out to re-enable stepper-based evaluation.
+ #define GO_XFADE_RUNTIME_USE_REF 1
+ // Verify Template vs Reference per Block (cheap precheck, auto-fallback on mismatch)
+ // #define GO_XFADE_VERIFY_REF 1
+
 #include <assert.h>
 #include <cmath>
 #include "GOCrossfadeMode.h"
@@ -91,7 +105,14 @@ private:
   GOAudioParams::CFSin2     m_InSin2, m_OutSin2;
   GOAudioParams::CFX2       m_InX2, m_OutX2;
   GOAudioParams::CFSqrtEP   m_InSqrt, m_OutSqrt;
+
+  // Optional precomputed templates (safe, exact, cache-backed)
+  std::shared_ptr<GOAudioParams::FastXfadeTemplate> m_TplIn;
+  std::shared_ptr<GOAudioParams::FastXfadeTemplate> m_TplOut;
+
   GOCrossfadeMode           m_ModeCached = GOCrossfadeMode::Linear;
+  // runtime dump guard: set true after a single runtime trace has been emitted
+  bool                      m_RuntimeDumpDone = false;
 
 public:
   /**
@@ -112,13 +133,20 @@ public:
    * @param nFrames number of frames for full decay
    */
   inline void StartDecreasingVolume(unsigned nFrames) {
-    // Non-linear modes: enable the Out envelope (new double-envelope logic)
-    if (m_CurrentFadeMode != GOCrossfadeMode::Linear) {
+    // Use current runtime crossfade mode (don't rely on a per-fader cached copy).
+    using namespace GOAudioParams;
+    const auto mode = GetCrossfadeMode();
+    if (mode != GOCrossfadeMode::Linear) {
       m_OutActive = true;
       m_OutLen = (nFrames ? nFrames : 1);
       m_OutPos = 0;
       // marker for non-linear path
       m_DecreasingDeltaPerFrame = 1.0f;
+#ifdef GO_XFADE_USE_TEMPLATES
+      m_ModeCached = mode;
+      FastCrossfadeCache::EnsureTemplate(mode, m_OutLen);
+      m_TplOut = FastCrossfadeCache::GetTemplate(mode, m_OutLen);
+#endif
       return;
     }
 
@@ -142,18 +170,14 @@ public:
   void ProcessNonLinearFade(unsigned nFrames, float *buffer, float externalVolume);
 
   bool IsSilent() const {
-    // Linear: legacy-compatible — silent when internal last target volume reached 0.
-    if (m_CurrentFadeMode == GOCrossfadeMode::Linear) {
-      return (m_LastTargetVolumePoint <= 0.0f);
-    }
+    // If an Out envelope is present, consider the sampler silent when the
+    // envelope position has reached its length (mode-agnostic).
+    if (m_OutLen > 0)
+      return (m_OutPos >= m_OutLen);
 
-    // Non-linear: if an explicit Out envelope WAS active, it's silent only when it has been finished.
-    //if (m_OutActive)
-    if(m_OutLen > 0)
-    return (m_OutPos >= m_OutLen);
-
-    // No Out envelope active => not silent (stream will run to EOF)
-    return false;
+    // Fallback to legacy behavior: if no Out-envelope is present, use the
+    // last target-volume check (compatible with linear path).
+    return (m_LastTargetVolumePoint <= 0.0f);
   }
   /*bool IsSilent() const {
   return (
