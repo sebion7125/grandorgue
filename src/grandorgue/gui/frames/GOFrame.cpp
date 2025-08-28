@@ -23,6 +23,7 @@
 #include <wx/toolbar.h>
 
 #include <algorithm>
+#include <thread>
 
 #include "archive/GOArchiveManager.h"
 #include "combinations/GOSetter.h"
@@ -46,6 +47,7 @@
 #include "midi/events/GOMidiEvent.h"
 #include "sound/GOSound.h"
 #include "sound/GOCrossfadeParam.h"
+#include "sound/fast_crossfade.h"
 #include "temperaments/GOTemperament.h"
 #include "threading/GOMutexLocker.h"
 
@@ -1325,6 +1327,16 @@ void GOFrame::OnSetCrossfade(wxCommandEvent &e) {
     case ID_Crossfade_Custom:  m = GOCrossfadeMode::Custom; break;
   }
   SetCrossfadeMode(m);
+
+  // Asynchronously precompute templates for the selected crossfade mode.
+  // Runs off the audio thread to avoid any heavy work during UI handling.
+  {
+    // Common bucket sizes to precompute (kept small to moderate memory use).
+    std::vector<unsigned> buckets = {32, 64, 128, 256, 512, 1024, 2048};
+    std::thread([m, buckets]() {
+      GOAudioParams::FastCrossfadeCache::PrecomputeForMode(m, buckets);
+    }).detach();
+  }
 }
 
 void GOFrame::OnOrganSettings(wxCommandEvent &event) {

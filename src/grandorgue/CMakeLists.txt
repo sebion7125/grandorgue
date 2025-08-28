@@ -218,6 +218,7 @@ sound/GOSoundAudioSection.cpp
 sound/GOSoundDevInfo.cpp
 sound/GOSoundEngine.cpp
 sound/GOSoundFader.cpp
+sound/fast_crossfade.cpp
 sound/GOSoundProvider.cpp
 sound/GOSoundProviderSynthedTrem.cpp
 sound/GOSoundProviderWave.cpp
