@@ -885,10 +885,10 @@ void GOSoundFader::ProcessNonLinearFade(unsigned n, float* buf, float external) 
     }
   }
 
-  // advance positions (one-shot bulk update)
-  if (in_on)  { m_InPos  += n; if (m_InPos  >= m_InLen)  m_InActive  = false; }
-  if (out_on) { m_OutPos += n; if (m_OutPos >= m_OutLen) m_OutActive = false; }
-
   m_LastExternalVolumePoint = endExt;
   m_LastTargetVolumePoint   = lastVol;
+
+  // advance positions (one-shot bulk update)
+  if (in_on)  { m_InPos  += n; if (m_InPos  >= m_InLen)  m_InActive  = false; }
+  if (out_on) { m_OutPos += n; if (m_OutPos >= m_OutLen) { m_OutActive = false; m_LastTargetVolumePoint = 0.0f;}}  
 }

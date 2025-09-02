@@ -18,7 +18,7 @@
 
  // Enable reference evaluator in the hotloop (bypasses steppers) to validate mapping.
  // Comment out to re-enable stepper-based evaluation.
- #define GO_XFADE_RUNTIME_USE_REF 1
+ // #define GO_XFADE_RUNTIME_USE_REF 1
  // Verify Template vs Reference per Block (cheap precheck, auto-fallback on mismatch)
  // #define GO_XFADE_VERIFY_REF 1
 
@@ -27,6 +27,11 @@
 #include "GOCrossfadeMode.h"
 #include "GOCrossfadeParam.h"
 #include "fast_crossfade.h"
+
+// log stuff:
+#include <wx/log.h>
+#include <wx/memory.h>
+#include <wx/string.h>
 
 /**
  * This class is responsible for smoothly changing a volume of samples.
@@ -133,10 +138,17 @@ public:
    * @param nFrames number of frames for full decay
    */
   inline void StartDecreasingVolume(unsigned nFrames) {
+    // REMOVE ME: I'm just a debugging helper
+    if(IsSilent())
+    {    return; wxLogInfo("This Sample is already silent!"); }
+
     // Use current runtime crossfade mode (don't rely on a per-fader cached copy).
     using namespace GOAudioParams;
     const auto mode = GetCrossfadeMode();
     if (mode != GOCrossfadeMode::Linear) {
+      if(m_OutActive && ((m_OutLen-m_OutPos)<nFrames))
+        return;   // ignore Fade Out when shorter fade is already active
+
       m_OutActive = true;
       m_OutLen = (nFrames ? nFrames : 1);
       m_OutPos = 0;
