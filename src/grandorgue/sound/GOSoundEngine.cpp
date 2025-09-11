@@ -260,16 +260,31 @@ bool GOSoundEngine::ProcessSampler(
     if (!sampler->stream.ReadBlock(temp, n_frames))
       sampler->p_SoundProvider = NULL;
 
-    sampler->fader.Process(n_frames, temp, volume);
-    if (sampler->toneBalanceFilterState.IsToApply())
-      sampler->toneBalanceFilterState.ProcessBuffer(n_frames, temp);
+    // Fused-Fade-Accumulate (compile-time or runtime switchable)
+#ifndef GO_ENABLE_FUSED_FADE_ACCUMULATE
+#define GO_ENABLE_FUSED_FADE_ACCUMULATE 0
+#endif
+    {
+      const bool fuse = GO_ENABLE_FUSED_FADE_ACCUMULATE
+                        || GOAudioParams::GetFuseFadeAndAccumulate();
 
-    /* Add these samples to the current output buffer shifting
-     * right by the necessary amount to bring the sample gain back
-     * to unity (this value is computed in GOPipe.cpp)
-     */
-    for (unsigned i = 0; i < n_frames * 2; i++)
-      output_buffer[i] += temp[i];
+      if (fuse && !sampler->toneBalanceFilterState.IsToApply()) {
+        // 2) Fader skaliert + akkumuliert direkt in output_buffer
+        sampler->fader.ProcessAndAccumulate(n_frames, temp, output_buffer, volume);
+      } else {
+        // Legacy-Pfad (keine Fusion oder ToneBalance aktiv)
+        sampler->fader.Process(n_frames, temp, volume);
+        if (sampler->toneBalanceFilterState.IsToApply())
+          sampler->toneBalanceFilterState.ProcessBuffer(n_frames, temp);
+
+        /* Add these samples to the current output buffer shifting
+         * right by the necessary amount to bring the sample gain back
+         * to unity (this value is computed in GOPipe.cpp)
+         */
+        for (unsigned i = 0; i < n_frames * 2; i++)
+          output_buffer[i] += temp[i];
+      }
+    }
 
     if (
       (sampler->stop && sampler->stop <= m_CurrentTime)
