@@ -10,6 +10,7 @@
 #include "GOCrossfadeParam.h"
 
 #include <algorithm>
+#include <vector>
 #include <cstdio>
 #include <wx/log.h>
 #include <wx/memory.h>
@@ -209,9 +210,614 @@ void GOSoundFader::Process(
     }
   }
 }
-
+ 
  // non-linear fade processing
+void GOSoundFader::ProcessAndAccumulate(
+    unsigned nFrames, const float* in, float* out, float externalVolume) {
+  // Non-linear: delegiere an nichtlinearen Akkumulator
+  if (GOAudioParams::GetCrossfadeMode() != GOCrossfadeMode::Linear) {
+    ProcessNonLinearFadeAndAccumulate(nFrames, in, out, externalVolume);
+    return;
+  }
+
+  // ==== ab hier: identische „Kopf“-Logik wie in Process(...) ====
+  float startTargetVolumePoint = m_LastTargetVolumePoint;
+  unsigned framesLeftAfterIncreasing = nFrames;
+
+  // increasing section
+  if (m_IncreasingDeltaPerFrame > 0.0f) {
+    float newTargetVolumePoint =
+        m_LastTargetVolumePoint + m_IncreasingDeltaPerFrame * nFrames;
+
+    if (newTargetVolumePoint < m_TargetVolume) {
+      framesLeftAfterIncreasing = 0;
+      m_LastTargetVolumePoint   = newTargetVolumePoint;
+    } else {
+      framesLeftAfterIncreasing = nFrames
+        - unsigned((m_TargetVolume - m_LastTargetVolumePoint)
+                   / m_IncreasingDeltaPerFrame);
+      m_IncreasingDeltaPerFrame = 0.0f;
+      m_LastTargetVolumePoint   = m_TargetVolume;
+    }
+  }
+
+  // decreasing section
+  if (framesLeftAfterIncreasing && m_DecreasingDeltaPerFrame > 0.0f) {
+    float newTargetVolumePoint =
+        m_LastTargetVolumePoint - m_DecreasingDeltaPerFrame * framesLeftAfterIncreasing;
+    if (newTargetVolumePoint > 0.0f) {
+      m_LastTargetVolumePoint = newTargetVolumePoint;
+    } else {
+      m_DecreasingDeltaPerFrame = 0.0f;
+      m_LastTargetVolumePoint   = 0.0f;
+    }
+  }
+
+  // External volume
+  float targetExternalVolume = m_VelocityVolume * externalVolume;
+  if (m_LastExternalVolumePoint < 0.0f)
+    m_LastExternalVolumePoint = targetExternalVolume;
+
+  float startExternalVolumePoint = m_LastExternalVolumePoint;
+  if (targetExternalVolume != startExternalVolumePoint) {
+    const float k = float(std::min(nFrames, EXTERNAL_VOLUME_CHANGE_FRAMES))
+                  / float(EXTERNAL_VOLUME_CHANGE_FRAMES);
+    m_LastExternalVolumePoint += (targetExternalVolume - startExternalVolumePoint) * k;
+  }
+
+  float frameTotalVolume = startTargetVolumePoint * startExternalVolumePoint;
+
+  // ==== ab hier: der Unterschied – wir akkumulieren in 'out' ====
+  if ((m_LastTargetVolumePoint == startTargetVolumePoint)
+      && (m_LastExternalVolumePoint == startExternalVolumePoint)) {
+    // Konstante Lautstärke
+    float g = frameTotalVolume;
+    const float* src = in;
+    float*       dst = out;
+    for (unsigned i = 0; i < nFrames; ++i) {
+      dst[0] += src[0] * g;
+      dst[1] += src[1] * g;
+      src += 2; dst += 2;
+    }
+  } else {
+    // Ramp von frameTotalVolume → m_LastTargetVolumePoint * m_LastExternalVolumePoint
+    const float g1 = m_LastTargetVolumePoint * m_LastExternalVolumePoint;
+    const float dg = (g1 - frameTotalVolume) / nFrames;
+
+    float g = frameTotalVolume;
+    const float* src = in;
+    float*       dst = out;
+    for (unsigned i = 0; i < nFrames; ++i) {
+      dst[0] += src[0] * g;
+      dst[1] += src[1] * g;
+      src += 2; dst += 2;
+      g += dg;
+    }
+  }
+}
+
+void GOSoundFader::ProcessNonLinearFadeAndAccumulate(
+    unsigned nFrames, const float* in, float* out, float externalVolume) {
+  // Diese Funktion spiegelt die Logik von ProcessNonLinearFade(...),
+  // wendet die berechnete Gain-Hüllkurve jedoch nicht in-place,
+  // sondern als Akkumulation auf 'out' an.
+  if (nFrames == 0)
+    return;
+
+  // update external envelope smoothly
+  float targetExt = m_VelocityVolume * externalVolume;
+  if (m_LastExternalVolumePoint < 0.0f) m_LastExternalVolumePoint = targetExt;
+  float startExt = m_LastExternalVolumePoint;
+  if (targetExt != startExt) {
+    const float k = float(std::min(nFrames, EXTERNAL_VOLUME_CHANGE_FRAMES)) / float(EXTERNAL_VOLUME_CHANGE_FRAMES);
+    m_LastExternalVolumePoint += (targetExt - startExt) * k;
+  }
+  float endExt = m_LastExternalVolumePoint;
+  const float dExt = (endExt - startExt) / nFrames;
+
+  using namespace GOAudioParams;
+
+  // detect mode change and (re-)init steppers if necessary
+  const auto currentMode = GetCrossfadeMode();
+  if (currentMode != m_ModeCached) {
+    m_ModeCached = currentMode;
+    if (m_InLen > 0) {
+      m_InLin.init(m_InLen, m_InPos);
+      m_InX2.init(m_InLen, m_InPos);
+      m_InSin.init(m_InLen, m_InPos);
+      m_InSin2.init(m_InLen, m_InPos);
+      m_InSqrt.init(m_InLen, m_InPos);
+    }
+    if (m_OutLen > 0) {
+      m_OutLin.init(m_OutLen, m_OutPos);
+      m_OutX2.init(m_OutLen, m_OutPos);
+      m_OutSin.init(m_OutLen, m_OutPos);
+      m_OutSin2.init(m_OutLen, m_OutPos);
+      m_OutSqrt.init(m_OutLen, m_OutPos);
+    }
+#ifdef GO_XFADE_USE_TEMPLATES
+    // (Re)bind templates when mode changes
+    if (m_InLen > 0) {
+      GOAudioParams::FastCrossfadeCache::EnsureTemplate(m_ModeCached, m_InLen);
+      m_TplIn = GOAudioParams::FastCrossfadeCache::GetTemplate(m_ModeCached, m_InLen);
+    } else {
+      m_TplIn.reset();
+    }
+    if (m_OutLen > 0) {
+      GOAudioParams::FastCrossfadeCache::EnsureTemplate(m_ModeCached, m_OutLen);
+      m_TplOut = GOAudioParams::FastCrossfadeCache::GetTemplate(m_ModeCached, m_OutLen);
+    } else {
+      m_TplOut.reset();
+    }
+#endif
+  }
+
+  const auto mode = m_ModeCached;
+  const bool in_on  = (m_InActive  && m_InLen  > 0);
+  const bool out_on = (m_OutActive && m_OutLen > 0);
+
+#ifdef GO_XFADE_USE_TEMPLATES
+  // Ensure templates also bound if lengths changed mid-stream
+  if (in_on && (!m_TplIn || m_TplIn->len != m_InLen)) {
+    GOAudioParams::FastCrossfadeCache::EnsureTemplate(mode, m_InLen);
+    m_TplIn = GOAudioParams::FastCrossfadeCache::GetTemplate(mode, m_InLen);
+  }
+  if (out_on && (!m_TplOut || m_TplOut->len != m_OutLen)) {
+    GOAudioParams::FastCrossfadeCache::EnsureTemplate(mode, m_OutLen);
+    m_TplOut = GOAudioParams::FastCrossfadeCache::GetTemplate(mode, m_OutLen);
+  }
+#endif
+
+  float lastVol = 0.0f;
+  const float* src = in;
+  float*       dst = out;
+
+#ifdef GO_XFADE_USE_TEMPLATES
+  // Template-driven exact evaluation (fast, branch-minimal)
+  if ((in_on && m_TplIn) || (out_on && m_TplOut)) {
+    float lastVol = 0.0f;
+    const unsigned inLen  = in_on  && m_TplIn  ? m_TplIn->len  : 0;
+    const unsigned outLen = out_on && m_TplOut ? m_TplOut->len : 0;
+
+#ifdef GO_XFADE_VERIFY_REF
+    bool useRef = false;
+    {
+      const unsigned preN = std::min<unsigned>(nFrames, 64u);
+      float maxDiffIn = 0.f, maxDiffOut = 0.f;
+      for (unsigned i = 0; i < preN; ++i) {
+        if (in_on && m_TplIn && inLen > 0) {
+          const unsigned idxIn = std::min(m_InPos + i, inLen - 1);
+          const float tIn = (inLen > 1) ? float(idxIn) / float(inLen - 1) : 1.0f;
+          const auto gref = go_crossfade_eval(mode, tIn);
+          const float diff = std::fabs(m_TplIn->b[idxIn] - gref.b);
+          if (diff > maxDiffIn) maxDiffIn = diff;
+        }
+        if (out_on && m_TplOut && outLen > 0) {
+          const unsigned idxOut = std::min(m_OutPos + i, outLen - 1);
+          const float tOut = (outLen > 1) ? float(idxOut) / float(outLen - 1) : 1.0f;
+          const auto gref = go_crossfade_eval(mode, tOut);
+          const float diff = std::fabs(m_TplOut->a[idxOut] - gref.a);
+          if (diff > maxDiffOut) maxDiffOut = diff;
+        }
+      }
+      constexpr float kEps = 1e-6f;
+      if (maxDiffIn > kEps || maxDiffOut > kEps) {
+        useRef = true; // auto-fallback to exact reference for this block
+      }
+    }
+#else
+    bool useRef = false;
+#endif
+
+    for (unsigned i = 0; i < nFrames; ++i) {
+      const float extNow = startExt + i * dExt;
+      const float base   = m_TargetVolume * extNow;
+
+      float bi = 0.0f, ao = 1.0f;
+      if (in_on) {
+        if (useRef) {
+          if (m_InLen > 1) {
+            const float t = float(m_InPos + i) / float(m_InLen - 1);
+            bi = go_crossfade_eval(mode, t).b;
+          } else {
+            bi = 1.0f;
+          }
+        } else if (m_TplIn) {
+          const unsigned idx = std::min(m_InPos + i, inLen ? inLen - 1 : 0);
+          bi = m_TplIn->b[idx];
+        } else {
+          bi = 1.0f;
+        }
+      }
+      if (out_on) {
+        if (useRef) {
+          if (m_OutLen > 1) {
+            const float t = float(m_OutPos + i) / float(m_OutLen - 1);
+            ao = go_crossfade_eval(mode, t).a;
+          } else {
+            ao = 0.0f;
+          }
+        } else if (m_TplOut) {
+          const unsigned idx = std::min(m_OutPos + i, outLen ? outLen - 1 : 0);
+          ao = m_TplOut->a[idx];
+        } else {
+          ao = 1.0f;
+        }
+      }
+
+      float vol = base * ((in_on ? bi : 1.0f) * (out_on ? ao : 1.0f));
+      vol = sanitize_vol(vol, lastVol);
+      dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+      src += 2; dst += 2;
+      lastVol = vol;
+    }
+
+    if (in_on)  { m_InPos  += nFrames; if (m_InPos  >= m_InLen)  m_InActive  = false; }
+    if (out_on) { m_OutPos += nFrames; if (m_OutPos >= m_OutLen) m_OutActive = false; }
+    m_LastExternalVolumePoint = endExt;
+    m_LastTargetVolumePoint   = lastVol;
+    return;
+  }
+#endif
+
+  if (in_on && out_on) {
+    switch (mode) {
+      case GOCrossfadeMode::Linear: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float extNow = startExt + i * dExt;
+          const float base = m_TargetVolume * extNow;
+          float ai, bi, ao, bo;
+          m_InLin.next(ai, bi);
+          m_OutLin.next(ao, bo);
+          float vol = base * (bi * ao);
+          vol = sanitize_vol(vol, lastVol);
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::SinEqualPower: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float extNow = startExt + i * dExt;
+          const float base = m_TargetVolume * extNow;
+          float ai, bi, ao, bo;
+          m_InSin.next(ai, bi);
+          m_OutSin.next(ao, bo);
+          float vol = base * (bi * ao);
+          vol = sanitize_vol(vol, lastVol);
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::Sin2: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float extNow = startExt + i * dExt;
+          const float base = m_TargetVolume * extNow;
+          float ai, bi, ao, bo;
+          m_InSin2.next(ai, bi);
+          m_OutSin2.next(ao, bo);
+          const float vol = base * (bi * ao);
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::SqrtEqualPower: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float extNow = startExt + i * dExt;
+          const float base = m_TargetVolume * extNow;
+          float ai, bi, ao, bo;
+          m_InSqrt.next(ai, bi);
+          m_OutSqrt.next(ao, bo);
+          const float vol = base * (bi * ao);
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::X2: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float extNow = startExt + i * dExt;
+          const float base = m_TargetVolume * extNow;
+          float ai, bi, ao, bo;
+          m_InX2.next(ai, bi);
+          m_OutX2.next(ao, bo);
+          const float vol = base * (bi * ao);
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::Custom: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float extNow = startExt + i * dExt;
+          const float base = m_TargetVolume * extNow;
+          float ai = 1.f, bi = 0.f, ao = 1.f, bo = 0.f;
+          if (in_on) {
+            if (m_TplIn && m_TplIn->len > 0) {
+              const unsigned idx = std::min(m_InPos + i, m_TplIn->len - 1);
+              ai = m_TplIn->a[idx];
+              bi = m_TplIn->b[idx];
+            } else if (m_InLen > 1) {
+              const float t = float(m_InPos + i) / float(m_InLen - 1);
+              const auto g = go_crossfade_eval(mode, t);
+              ai = g.a; bi = g.b;
+            } else {
+              ai = 1.f; bi = 0.f;
+            }
+          }
+          if (out_on) {
+            if (m_TplOut && m_TplOut->len > 0) {
+              const unsigned idx = std::min(m_OutPos + i, m_TplOut->len - 1);
+              ao = m_TplOut->a[idx];
+              bo = m_TplOut->b[idx];
+            } else if (m_OutLen > 1) {
+              const float t = float(m_OutPos + i) / float(m_OutLen - 1);
+              const auto g = go_crossfade_eval(mode, t);
+              ao = g.a; bo = g.b;
+            } else {
+              ao = 1.f; bo = 0.f;
+            }
+          }
+          float vol = base * ((in_on ? bi : 1.0f) * (out_on ? ao : 1.0f));
+          vol = sanitize_vol(vol, lastVol);
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      default: { // fallback to linear
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float extNow = startExt + i * dExt;
+          const float base = m_TargetVolume * extNow;
+          float ai, bi, ao, bo;
+          m_InLin.next(ai, bi);
+          m_OutLin.next(ao, bo);
+          const float vol = base * (bi * ao);
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+    }
+  } else if (in_on && !out_on) {
+    switch (mode) {
+      case GOCrossfadeMode::Linear: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_InLin.next(a,b);
+          float vol = base * b;
+          vol = sanitize_vol(vol, lastVol);
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::SinEqualPower: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_InSin.next(a,b);
+          float vol = base * b;
+          vol = sanitize_vol(vol, lastVol);
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::Sin2: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_InSin2.next(a,b);
+          const float vol = base * b;
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::SqrtEqualPower: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_InSqrt.next(a,b);
+          const float vol = base * b;
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::X2: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_InX2.next(a,b);
+          const float vol = base * b;
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::Custom: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a = 1.f, b = 0.f;
+          if (m_TplIn && m_TplIn->len > 0) {
+            const unsigned idx = std::min(m_InPos + i, m_TplIn->len - 1);
+            a = m_TplIn->a[idx];
+            b = m_TplIn->b[idx];
+          } else if (m_InLen > 1) {
+            const float t = float(m_InPos + i) / float(m_InLen - 1);
+            const auto g = go_crossfade_eval(mode, t);
+            a = g.a; b = g.b;
+          } else {
+            a = 1.f; b = 0.f;
+          }
+          const float vol = base * b;
+          const float vol_s = sanitize_vol(vol, lastVol);
+          dst[0] += src[0] * vol_s; dst[1] += src[1] * vol_s;
+          src += 2; dst += 2;
+          lastVol = vol_s;
+        }
+        break;
+      }
+      
+      default: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_InLin.next(a,b);
+          const float vol = base * b;
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+    }
+  } else if (!in_on && out_on) {
+    switch (mode) {
+      case GOCrossfadeMode::Linear: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_OutLin.next(a,b);
+          float vol = base * a;
+          vol = sanitize_vol(vol, lastVol);
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::SinEqualPower: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_OutSin.next(a,b);
+          float vol = base * a;
+          vol = sanitize_vol(vol, lastVol);
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::Sin2: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_OutSin2.next(a,b);
+          const float vol = base * a;
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::SqrtEqualPower: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_OutSqrt.next(a,b);
+          const float vol = base * a;
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::X2: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_OutX2.next(a,b);
+          const float vol = base * a;
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+      case GOCrossfadeMode::Custom: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a = 1.f, b = 0.f;
+          if (m_TplOut && m_TplOut->len > 0) {
+            const unsigned idx = std::min(m_OutPos + i, m_TplOut->len - 1);
+            a = m_TplOut->a[idx];
+            b = m_TplOut->b[idx];
+          } else if (m_OutLen > 1) {
+            const float t = float(m_OutPos + i) / float(m_OutLen - 1);
+            const auto g = go_crossfade_eval(mode, t);
+            a = g.a; b = g.b;
+          } else {
+            a = 1.f; b = 0.f;
+          }
+          const float vol = base * a;
+          const float vol_s = sanitize_vol(vol, lastVol);
+          dst[0] += src[0] * vol_s; dst[1] += src[1] * vol_s;
+          src += 2; dst += 2;
+          lastVol = vol_s;
+        }
+        break;
+      }
+      default: {
+        for (unsigned i = 0; i < nFrames; ++i) {
+          const float base = m_TargetVolume * (startExt + i * dExt);
+          float a,b;
+          m_OutLin.next(a,b);
+          const float vol = base * a;
+          dst[0] += src[0] * vol; dst[1] += src[1] * vol;
+          src += 2; dst += 2;
+          lastVol = vol;
+        }
+        break;
+      }
+    }
+  } else {
+    // neither In nor Out active: only external volume ramp applies
+    const float base0 = m_TargetVolume * startExt;
+    if (endExt == startExt) {
+      for (unsigned i = 0; i < nFrames; ++i) {
+        dst[0] += src[0] * base0; dst[1] += src[1] * base0;
+        src += 2; dst += 2;
+      }
+      lastVol = base0;
+    } else {
+      for (unsigned i = 0; i < nFrames; ++i) {
+        const float base = m_TargetVolume * (startExt + i * dExt);
+        dst[0] += src[0] * base; dst[1] += src[1] * base;
+        src += 2; dst += 2;
+        lastVol = base;
+      }
+    }
+  }
+
+  m_LastExternalVolumePoint = endExt;
+  m_LastTargetVolumePoint   = lastVol;
+
+  // advance positions (one-shot bulk update)
+  if (in_on)  { m_InPos  += nFrames; if (m_InPos  >= m_InLen)  m_InActive  = false; }
+  if (out_on) { m_OutPos += nFrames; if (m_OutPos >= m_OutLen) { m_OutActive = false; m_LastTargetVolumePoint = 0.0f;}}  
+}
+
 void GOSoundFader::ProcessNonLinearFade(unsigned n, float* buf, float external) {
+
   if (n == 0)
     return;
 
