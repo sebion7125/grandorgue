@@ -144,8 +144,8 @@ public:
    */
   inline void StartDecreasingVolume(unsigned nFrames) {
     // REMOVE ME: I'm just a debugging helper
-    if(IsSilent())
-    {    return; wxLogInfo("This Sample is already silent!"); }
+    /*if(IsSilent())
+    {    return; wxLogInfo("This Sample is already silent!"); }*/ // <- got you removed :P you little bug!
 
     // Use current runtime crossfade mode (don't rely on a per-fader cached copy).
     using namespace GOAudioParams;
