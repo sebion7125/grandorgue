@@ -28,6 +28,81 @@ static inline float sanitize_vol(float vol, float /*lastVol*/) {
 }
 
 
+static inline float go_fade_in_multiplier_at(
+  GOCrossfadeMode mode, unsigned len, unsigned pos) {
+  if (len <= 1)
+    return 1.0f;
+  pos = std::min(pos, len - 1);
+  const float t = float(pos) / float(len - 1);
+  return go_crossfade_eval(mode, t).b;
+}
+
+static inline float go_fade_out_multiplier_at(
+  GOCrossfadeMode mode, unsigned len, unsigned pos) {
+  if (len <= 1)
+    return 0.0f;
+  pos = std::min(pos, len - 1);
+  const float t = float(pos) / float(len - 1);
+  return go_crossfade_eval(mode, t).a;
+}
+
+static inline float go_compute_target_state_after_block(
+  GOCrossfadeMode mode,
+  float targetVolume,
+  bool wasInActive,
+  bool isInActive,
+  unsigned inLen,
+  unsigned inPos,
+  bool wasOutActive,
+  bool isOutActive,
+  unsigned outLen,
+  unsigned outPos) {
+  float mult = 1.0f;
+
+  if (wasInActive && isInActive)
+    mult *= go_fade_in_multiplier_at(mode, inLen, inPos);
+
+  if (wasOutActive) {
+    if (isOutActive)
+      mult *= go_fade_out_multiplier_at(mode, outLen, outPos);
+    else
+      mult = 0.0f;
+  }
+
+  return targetVolume * mult;
+}
+
+static inline void go_advance_legacy_shadow_state(
+  unsigned nFrames,
+  bool &inActive,
+  unsigned &inPos,
+  unsigned inLen,
+  float increasingDeltaPerFrame,
+  bool &outActive,
+  unsigned &outPos,
+  unsigned outLen,
+  float decreasingDeltaPerFrame,
+  float lastTargetVolumePoint) {
+  if (inActive) {
+    if (increasingDeltaPerFrame > 0.0f) {
+      inPos = std::min(inPos + nFrames, inLen);
+    } else {
+      inPos = inLen;
+      inActive = false;
+    }
+  }
+
+  if (outActive) {
+    if (decreasingDeltaPerFrame > 0.0f && lastTargetVolumePoint > 0.0f) {
+      outPos = std::min(outPos + nFrames, outLen);
+    } else {
+      outPos = outLen;
+      outActive = false;
+    }
+  }
+}
+
+
 // backup old version of setup:
 /*void GOSoundFader::Setup(
   float targetVolume, float velocityVolume, unsigned nFramesToIncreaseIn) {
@@ -209,6 +284,18 @@ void GOSoundFader::Process(
       frameTotalVolume += frameTotalVolumeDelta;
     }
   }
+  go_advance_legacy_shadow_state(
+    nFrames,
+    m_InActive,
+    m_InPos,
+    m_InLen,
+    m_IncreasingDeltaPerFrame,
+    m_OutActive,
+    m_OutPos,
+    m_OutLen,
+    m_DecreasingDeltaPerFrame,
+    m_LastTargetVolumePoint);
+
 }
  
  // non-linear fade processing
@@ -294,6 +381,18 @@ void GOSoundFader::ProcessAndAccumulate(
       g += dg;
     }
   }
+  go_advance_legacy_shadow_state(
+    nFrames,
+    m_InActive,
+    m_InPos,
+    m_InLen,
+    m_IncreasingDeltaPerFrame,
+    m_OutActive,
+    m_OutPos,
+    m_OutLen,
+    m_DecreasingDeltaPerFrame,
+    m_LastTargetVolumePoint);
+
 }
 
 void GOSoundFader::ProcessNonLinearFadeAndAccumulate(
@@ -455,7 +554,17 @@ void GOSoundFader::ProcessNonLinearFadeAndAccumulate(
     if (in_on)  { m_InPos  += nFrames; if (m_InPos  >= m_InLen)  m_InActive  = false; }
     if (out_on) { m_OutPos += nFrames; if (m_OutPos >= m_OutLen) m_OutActive = false; }
     m_LastExternalVolumePoint = endExt;
-    m_LastTargetVolumePoint   = lastVol;
+    m_LastTargetVolumePoint = go_compute_target_state_after_block(
+      mode,
+      m_TargetVolume,
+      in_on,
+      m_InActive,
+      m_InLen,
+      m_InPos,
+      out_on,
+      m_OutActive,
+      m_OutLen,
+      m_OutPos);
     return;
   }
 #endif
@@ -808,12 +917,22 @@ void GOSoundFader::ProcessNonLinearFadeAndAccumulate(
     }
   }
 
-  m_LastExternalVolumePoint = endExt;
-  m_LastTargetVolumePoint   = lastVol;
-
   // advance positions (one-shot bulk update)
   if (in_on)  { m_InPos  += nFrames; if (m_InPos  >= m_InLen)  m_InActive  = false; }
-  if (out_on) { m_OutPos += nFrames; if (m_OutPos >= m_OutLen) { m_OutActive = false; m_LastTargetVolumePoint = 0.0f;}}  
+  if (out_on) { m_OutPos += nFrames; if (m_OutPos >= m_OutLen) m_OutActive = false; }
+
+  m_LastExternalVolumePoint = endExt;
+  m_LastTargetVolumePoint = go_compute_target_state_after_block(
+    mode,
+    m_TargetVolume,
+    in_on,
+    m_InActive,
+    m_InLen,
+    m_InPos,
+    out_on,
+    m_OutActive,
+    m_OutLen,
+    m_OutPos);
 }
 
 void GOSoundFader::ProcessNonLinearFade(unsigned n, float* buf, float external) {
@@ -989,7 +1108,17 @@ void GOSoundFader::ProcessNonLinearFade(unsigned n, float* buf, float external) 
     if (out_on) { m_OutPos += n; if (m_OutPos >= m_OutLen) m_OutActive = false; }
 
     m_LastExternalVolumePoint = endExt;
-    m_LastTargetVolumePoint   = lastVol;
+    m_LastTargetVolumePoint = go_compute_target_state_after_block(
+      mode,
+      m_TargetVolume,
+      in_on,
+      m_InActive,
+      m_InLen,
+      m_InPos,
+      out_on,
+      m_OutActive,
+      m_OutLen,
+      m_OutPos);
     return;
   }
 #endif
@@ -1161,7 +1290,17 @@ void GOSoundFader::ProcessNonLinearFade(unsigned n, float* buf, float external) 
     if (in_on)  { m_InPos  += n; if (m_InPos  >= m_InLen)  m_InActive  = false; }
     if (out_on) { m_OutPos += n; if (m_OutPos >= m_OutLen) m_OutActive = false; }
     m_LastExternalVolumePoint = endExt;
-    m_LastTargetVolumePoint   = lastVol;
+    m_LastTargetVolumePoint = go_compute_target_state_after_block(
+      mode,
+      m_TargetVolume,
+      in_on,
+      m_InActive,
+      m_InLen,
+      m_InPos,
+      out_on,
+      m_OutActive,
+      m_OutLen,
+      m_OutPos);
     return;
   }
 #endif
@@ -1491,10 +1630,20 @@ void GOSoundFader::ProcessNonLinearFade(unsigned n, float* buf, float external) 
     }
   }
 
-  m_LastExternalVolumePoint = endExt;
-  m_LastTargetVolumePoint   = lastVol;
-
   // advance positions (one-shot bulk update)
   if (in_on)  { m_InPos  += n; if (m_InPos  >= m_InLen)  m_InActive  = false; }
-  if (out_on) { m_OutPos += n; if (m_OutPos >= m_OutLen) { m_OutActive = false; m_LastTargetVolumePoint = 0.0f;}}  
+  if (out_on) { m_OutPos += n; if (m_OutPos >= m_OutLen) m_OutActive = false; }
+
+  m_LastExternalVolumePoint = endExt;
+  m_LastTargetVolumePoint = go_compute_target_state_after_block(
+    mode,
+    m_TargetVolume,
+    in_on,
+    m_InActive,
+    m_InLen,
+    m_InPos,
+    out_on,
+    m_OutActive,
+    m_OutLen,
+    m_OutPos);
 }

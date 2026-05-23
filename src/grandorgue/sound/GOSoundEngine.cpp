@@ -731,7 +731,7 @@ void GOSoundEngine::CreateReleaseSampler(GOSoundSampler *handle) {
       if (
         releaseLength > 0
         && (releaseLength < gain_decay_length || gain_decay_length == 0))
-        gain_decay_length = releaseLength;
+        gain_decay_length = releaseLength;      
       
       if (gain_decay_length > 0)
         new_sampler->fader.StartDecreasingVolume(
