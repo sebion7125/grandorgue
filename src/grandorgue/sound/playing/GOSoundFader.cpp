@@ -459,6 +459,39 @@ void GOSoundFader::ProcessNonLinearFadeAndAccumulate(
   }
 #endif
 
+  // Re-seed steppers at block start using absolute positions to avoid drift/misalignment.
+  // This aligns the stepper state to the same sample index mapping as the reference evaluator.
+  switch (mode) {
+    case GOCrossfadeMode::Linear:
+      if (in_on)  m_InLin.init(m_InLen,  m_InPos);
+      if (out_on) m_OutLin.init(m_OutLen, m_OutPos);
+      break;
+    case GOCrossfadeMode::SinEqualPower:
+      if (in_on)  m_InSin.init(m_InLen,  m_InPos);
+      if (out_on) m_OutSin.init(m_OutLen, m_OutPos);
+      break;
+    case GOCrossfadeMode::Sin2:
+      if (in_on)  m_InSin2.init(m_InLen,  m_InPos);
+      if (out_on) m_OutSin2.init(m_OutLen, m_OutPos);
+      break;
+    case GOCrossfadeMode::SqrtEqualPower:
+      if (in_on)  m_InSqrt.init(m_InLen,  m_InPos);
+      if (out_on) m_OutSqrt.init(m_OutLen, m_OutPos);
+      break;
+    case GOCrossfadeMode::X2:
+      if (in_on)  m_InX2.init(m_InLen,  m_InPos);
+      if (out_on) m_OutX2.init(m_OutLen, m_OutPos);
+      break;
+    case GOCrossfadeMode::Custom:
+      // Custom mode: no generic stepper. Use templates (if present) or the
+      // reference evaluator in the hot loop instead of the linear stepper.
+      break;
+    default:
+      if (in_on)  m_InLin.init(m_InLen,  m_InPos);
+      if (out_on) m_OutLin.init(m_OutLen, m_OutPos);
+      break;
+  }
+
   float lastVol = 0.0f;
   const float* src = in;
   float*       dst = out;

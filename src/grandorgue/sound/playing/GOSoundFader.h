@@ -84,7 +84,7 @@ private:
   float m_LastTargetVolumePoint;
   float m_LastExternalVolumePoint;
   
-  GOCrossfadeMode m_CurrentFadeMode = GOCrossfadeMode::SinEqualPower;
+  GOCrossfadeMode m_CurrentFadeMode = GOCrossfadeMode::Linear;
 
   // for sinus-fade
   unsigned m_FadeStartSample = 0;
@@ -151,7 +151,7 @@ public:
     using namespace GOAudioParams;
     const auto mode = GetCrossfadeMode();
     if (mode != GOCrossfadeMode::Linear) {
-      if(m_OutActive && ((m_OutLen-m_OutPos)<nFrames))
+      if (m_OutActive && (m_OutPos < m_OutLen) && ((m_OutLen - m_OutPos) < nFrames))
         return;   // ignore Fade Out when shorter fade is already active
 
       m_OutActive = true;
