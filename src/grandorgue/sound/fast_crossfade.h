@@ -20,7 +20,7 @@
 
 // Debug dump switch: uncomment to enable writing template/reference/summary files
 // next to the working directory. Enable only for debugging.
-#define GO_FAST_XFADE_DUMP 1
+//#define GO_FAST_XFADE_DUMP 1
 
 // Optional includes used by the debug dump (harmless when the macro is commented)
 #include <fstream>

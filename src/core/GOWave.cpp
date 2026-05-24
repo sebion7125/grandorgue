@@ -17,7 +17,8 @@
 #include "GOWavPack.h"
 #include "GOWavPackWriter.h"
 #include "GOWaveTypes.h"
-#define GO_WAVE_FASTCOPY
+
+//#define GO_WAVE_FASTCOPY
 
 void GOWave::SetInvalid() {
   m_SampleData.free();
