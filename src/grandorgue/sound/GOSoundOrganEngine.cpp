@@ -631,7 +631,7 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
          * volume on the detached chest will not match the volume on
          * the existing chest. */
         gain_target *= vol;
-        // if (m_ScaledReleases) {
+        if (m_ScaledReleases) {
         /* Note: "time" is in milliseconds. */
         int time = ((m_CurrentTime - handle->time) * 1000) / m_SampleRate;
         /* TODO: below code should be replaced by a more accurate model of the
@@ -640,7 +640,7 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
         unsigned midikey_frequency = this_pipe->GetMidiKeyNumber();
         /* if MidiKeyNumber is not within the range of organ pipes (64 feet
          * to 1 foot), we assume average pipe (MIDI = 60) */
-        if (midikey_frequency > 133 || midikey_frequency == 0)
+        if (midikey_frequency > 127 || midikey_frequency == 0)
           midikey_frequency = 60;
         /* attack duration is assumed 50 ms above MIDI 96, 800 ms below MIDI
          * 24 and linear in between */
@@ -709,22 +709,20 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
 
           if (time < (int)attack_duration) {
             float attack_index = (float)time / attack_duration;
-            using namespace GOAudioParams;
-            const auto mode = GetCrossfadeMode();
-            const auto g = go_crossfade_eval(mode, attack_index);
-            float gain_delta = g.a * g_0 + g.b * 1.0f;
+            float gain_delta = (1.0f-attack_index) * g_0 + attack_index * 1.0f;
             gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
-            gain_target *= gain_delta; // test without attenuation of reverb
-            // gain_target = 0;
+            gain_target *= gain_delta;           
           }
+          
+          // old parabola model removed:
           /* calculate gain (gain_target) to apply to tail amplitude as a
            * function of when the note is released during the attack */
-          if (time < (int)attack_duration) {
+          /*if (time < (int)attack_duration) {
             float attack_index = (float)time / attack_duration;
             float gain_delta
               = (0.2f + (0.8f * (2.0f * attack_index - (attack_index * attack_index))));
             gain_target *= gain_delta;
-          }
+          }*/
 
           /*float attack_duration = tmax_by_midi[midikey_frequency];
           float a = curvature_by_midi[midikey_frequency];*/
@@ -782,51 +780,51 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
           // gain_decay_length = 0;
           //= time_to_full_reverb + 6000 * time / time_to_full_reverb;
           //}
-          //}
+          }
         }
+      }
 
         const unsigned releaseLength = this_pipe->GetReleaseTail();
 
-        new_sampler->fader.Setup(
-          gain_target, handle->fader.GetVelocityVolume(), crossFadeSamples);
+      new_sampler->fader.Setup(
+        gain_target, handle->fader.GetVelocityVolume(), crossFadeSamples);
 
-        if (
-          releaseLength > 0
-          && (releaseLength < gain_decay_length || gain_decay_length == 0))
-          gain_decay_length = releaseLength;
+      if (
+        releaseLength > 0
+        && (releaseLength < gain_decay_length || gain_decay_length == 0))
+        gain_decay_length = releaseLength;
 
-        if (gain_decay_length > 0)
-          new_sampler->fader.StartDecreasingVolume(
-            MsToSamples(gain_decay_length));
+      if (gain_decay_length > 0)
+        new_sampler->fader.StartDecreasingVolume(
+          MsToSamples(gain_decay_length));
 
-        if (
-          m_ReleaseAlignmentEnabled
-          && release_section->SupportsStreamAlignment()) {
-          new_sampler->stream.InitAlignedStream(
-            release_section, m_interpolation, &handle->stream);
-        } else {
-          new_sampler->stream.InitStream(
-            &m_resample,
-            release_section,
-            m_interpolation,
-            this_pipe->GetTuning() / (float)m_SampleRate);
-        }
-        new_sampler->is_release = true;
-
-        new_sampler->m_SamplerTaskId = not_a_tremulant
-          ? /* detached releases are enabled and the pipe was on a regular
-             * windchest. Play the release on the detached windchest */
-          DETACHED_RELEASE_TASK_ID
-          /* detached releases are disabled (or this isn't really a pipe)
-           * so put the release on the same windchest as the pipe (which
-           * means it will still be affected by tremulants - yuck). */
-          : handle->m_SamplerTaskId;
-        new_sampler->m_AudioGroupId = handle->m_AudioGroupId;
-        new_sampler->toneBalanceFilterState.Init(
-          new_sampler->p_SoundProvider->GetToneBalance()->GetFilter());
-        StartSampler(new_sampler);
-        handle->time = m_CurrentTime;
+      if (
+        m_ReleaseAlignmentEnabled
+        && release_section->SupportsStreamAlignment()) {
+        new_sampler->stream.InitAlignedStream(
+          release_section, m_interpolation, &handle->stream);
+      } else {
+        new_sampler->stream.InitStream(
+          &m_resample,
+          release_section,
+          m_interpolation,
+          this_pipe->GetTuning() / (float)m_SampleRate);
       }
+      new_sampler->is_release = true;
+
+      new_sampler->m_SamplerTaskId = not_a_tremulant
+        ? /* detached releases are enabled and the pipe was on a regular
+           * windchest. Play the release on the detached windchest */
+        DETACHED_RELEASE_TASK_ID
+        /* detached releases are disabled (or this isn't really a pipe)
+         * so put the release on the same windchest as the pipe (which
+         * means it will still be affected by tremulants - yuck). */
+        : handle->m_SamplerTaskId;
+      new_sampler->m_AudioGroupId = handle->m_AudioGroupId;
+      new_sampler->toneBalanceFilterState.Init(
+        new_sampler->p_SoundProvider->GetToneBalance()->GetFilter());
+      StartSampler(new_sampler);
+      handle->time = m_CurrentTime;
     }
   }
 }
