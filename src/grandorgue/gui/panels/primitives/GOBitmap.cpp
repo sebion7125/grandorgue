@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2023 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -11,80 +11,102 @@
 #include <wx/dcmemory.h>
 #include <wx/image.h>
 
-GOBitmap::GOBitmap()
-  : m_img(NULL),
-    m_Scale(0),
-    m_ResultWidth(0),
-    m_ResultHeight(0),
-    m_ResultXOffset(0),
-    m_ResultYOffset(0) {}
+unsigned GOBitmap::GetSourceWidth() const {
+  return p_SourceImage ? p_SourceImage->GetWidth() : 0;
+}
 
-GOBitmap::GOBitmap(wxImage *img)
-  : m_img(img),
-    m_Scale(0),
-    m_ResultWidth(0),
-    m_ResultHeight(0),
-    m_ResultXOffset(0),
-    m_ResultYOffset(0) {}
+unsigned GOBitmap::GetSourceHeight() const {
+  return p_SourceImage ? p_SourceImage->GetHeight() : 0;
+}
 
-void GOBitmap::ScaleBMP(
-  wxImage &img, double scale, const wxRect &rect, GOBitmap *background) {
-  if (background && img.HasAlpha()) {
-    wxBitmap bmp(img.GetWidth(), img.GetHeight());
-    wxBitmap orig(img);
-    wxMemoryDC dc;
+void GOBitmap::BuildBitmapFrom(
+  const wxImage &img, double scale, const wxRect &rect, GOBitmap *background) {
+  const int imgHeight = img.GetHeight();
+  const int imgWidth = img.GetWidth();
+  const int newHeight = imgHeight * scale;
+  const int newWidth = imgWidth * scale;
 
-    dc.SelectObject(bmp);
-    dc.DrawBitmap(background->GetBitmap(), -rect.GetX(), -rect.GetY(), false);
-    dc.DrawBitmap(orig, 0, 0, true);
-    bmp.SetMask(orig.GetMask());
-    wxImage img_result = bmp.ConvertToImage();
-    if (!img_result.HasAlpha())
-      img_result.InitAlpha();
-    memcpy(
-      img_result.GetAlpha(), img.GetAlpha(), img.GetWidth() * img.GetHeight());
+  m_ResultValid = newHeight > 0 && newWidth > 0;
+  if (m_ResultValid) {
+    const wxBitmap *pBackgroundBitmap
+      = background ? background->GetResultBitmap() : nullptr;
 
-    m_bmp = (wxBitmap)img_result.Scale(
-      img.GetWidth() * scale, img.GetHeight() * scale, wxIMAGE_QUALITY_BICUBIC);
-  } else
-    m_bmp = (wxBitmap)img.Scale(
-      img.GetWidth() * scale, img.GetHeight() * scale, wxIMAGE_QUALITY_BICUBIC);
+    if (pBackgroundBitmap && img.HasAlpha()) {
+      wxBitmap bmp(imgWidth, imgHeight);
+      wxBitmap orig(img);
+      wxMemoryDC dc;
+
+      dc.SelectObject(bmp);
+      dc.DrawBitmap(*pBackgroundBitmap, -rect.GetX(), -rect.GetY(), false);
+      dc.DrawBitmap(orig, 0, 0, true);
+      bmp.SetMask(orig.GetMask());
+
+      wxImage img_result = bmp.ConvertToImage();
+
+      if (!img_result.HasAlpha())
+        img_result.InitAlpha();
+      memcpy(img_result.GetAlpha(), img.GetAlpha(), imgWidth * imgHeight);
+      m_ResultBitmap = (wxBitmap)img_result.Scale(
+        newWidth, newHeight, wxIMAGE_QUALITY_BICUBIC);
+    } else
+      m_ResultBitmap
+        = (wxBitmap)img.Scale(newWidth, newHeight, wxIMAGE_QUALITY_BICUBIC);
+  }
   m_Scale = scale;
 }
 
-void GOBitmap::PrepareBitmap(
+void GOBitmap::BuildScaledBitmap(
   double scale, const wxRect &rect, GOBitmap *background) {
-  if (scale != m_Scale || m_ResultWidth || m_ResultHeight) {
-    ScaleBMP(*m_img, scale, rect, background);
+  if (p_SourceImage && (scale != m_Scale || m_ResultWidth || m_ResultHeight)) {
+    BuildBitmapFrom(*p_SourceImage, scale, rect, background);
     m_ResultWidth = 0;
     m_ResultHeight = 0;
   }
 }
 
-void GOBitmap::PrepareTileBitmap(
+void GOBitmap::BuildTileBitmap(
   double scale,
-  const wxRect &rect,
-  unsigned xo,
-  unsigned yo,
+  const wxRect &newRect,
+  unsigned newXOffset,
+  unsigned newYOffset,
   GOBitmap *background) {
+  const int tgtHeight = newRect.GetHeight();
+  const int tgtWidth = newRect.GetWidth();
+
   if (
-    scale != m_Scale || m_ResultWidth != rect.GetWidth()
-    || m_ResultHeight != rect.GetHeight() || xo != m_ResultXOffset
-    || yo != m_ResultYOffset) {
-    wxImage img(rect.GetWidth(), rect.GetHeight());
-    for (int y = -yo; y < img.GetHeight(); y += GetHeight())
-      for (int x = -xo; x < img.GetWidth(); x += GetWidth())
-        img.Paste(*m_img, x, y);
-    ScaleBMP(img, scale, rect, background);
-    m_ResultWidth = rect.GetWidth();
-    m_ResultHeight = rect.GetHeight();
-    m_ResultXOffset = xo;
-    m_ResultYOffset = yo;
+    p_SourceImage
+    && (scale != m_Scale || m_ResultWidth != tgtHeight || m_ResultHeight != tgtWidth || newXOffset != m_ResultXOffset || newYOffset != m_ResultYOffset)) {
+    const int srcHeight = p_SourceImage->GetHeight();
+    const int srcWidth = p_SourceImage->GetWidth();
+    wxImage img(tgtWidth, tgtHeight);
+
+    for (int y = -newYOffset; y < tgtHeight; y += srcHeight)
+      for (int x = -newXOffset; x < tgtWidth; x += srcWidth) {
+        // Calculate source starting position using std::max(0, -offset)
+        const int srcX = std::max(0, -x);
+        const int srcY = std::max(0, -y);
+
+        // Ensure copy stays within target bounds using std::min
+        const int copyWidth = std::min(srcWidth - srcX, tgtWidth - x);
+        const int copyHeight = std::min(srcHeight - srcY, tgtHeight - y);
+
+        // Paste only if valid copy region exists
+        if (copyWidth > 0 && copyHeight > 0) {
+          if (copyWidth != (int)srcWidth || copyHeight != (int)srcHeight) {
+            // Partial copy - use GetSubImage
+            wxImage tile = p_SourceImage->GetSubImage(
+              wxRect(srcX, srcY, copyWidth, copyHeight));
+            img.Paste(tile, x, y);
+          } else {
+            // Full tile copy - use direct Paste
+            img.Paste(*p_SourceImage, x, y);
+          }
+        }
+      }
+    BuildBitmapFrom(img, scale, newRect, background);
+    m_ResultHeight = tgtHeight;
+    m_ResultWidth = tgtWidth;
+    m_ResultXOffset = newXOffset;
+    m_ResultYOffset = newYOffset;
   }
 }
-
-const wxBitmap &GOBitmap::GetBitmap() { return m_bmp; }
-
-unsigned GOBitmap::GetWidth() { return m_img->GetWidth(); }
-
-unsigned GOBitmap::GetHeight() { return m_img->GetHeight(); }

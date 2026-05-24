@@ -25,7 +25,10 @@ CMakeFiles/
 Makefile
 /_CPack_Packages/
 
+nbproject/
+CLAUDE.md
 .DS_Store
+<<<<<<< HEAD
 
 # Ignore editor/IDE caches and indexes
 .cache/
@@ -40,3 +43,12 @@ tags
 *.~ 
 *.tmp
 *.bak
+=======
+.idea/
+.vscode/
+
+# eclipse
+.cproject
+.project
+.settings/
+>>>>>>> upstream/master

@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -8,11 +8,12 @@
 #ifndef GOCONFIG_H
 #define GOCONFIG_H
 
-#include <wx/gdicmn.h>
-#include <wx/string.h>
-
+#include <filesystem>
 #include <unordered_map>
 #include <vector>
+
+#include <wx/gdicmn.h>
+#include <wx/string.h>
 
 #include "gui/dialogs/common/GODialogSizeSet.h"
 #include "gui/size/GOLogicalRect.h"
@@ -45,10 +46,15 @@ public:
     INTERPOLATION_LINEAR = 0,
     INTERPOLATION_POLYPHASE,
   };
+  enum MetronomeSoundType {
+    METRONOME_SOUND_BELL,
+    METRONOME_SOUND_CLICK,
+    METRONOME_SOUND_CUSTOM,
+  };
 
 private:
   wxString m_InstanceName;
-  wxString m_ConfigFileName;
+  std::filesystem::path m_ConfigFilePath;
   wxString m_ResourceDir;
   std::vector<wxString> m_AudioGroups;
   GOPortsConfig m_SoundPortsConfig;
@@ -82,7 +88,7 @@ private:
   void LoadDefaults();
 
 public:
-  GOConfig(wxString instance);
+  GOConfig(const std::string &instanceName, const std::string &confFilePath);
 
   GOSettingDirectory OrganSettingsPath;
   GOSettingDirectory OrganCachePath;
@@ -110,6 +116,7 @@ public:
   GOSettingBool ManagePolyphony;
   GOSettingBool ScaleRelease;
   GOSettingBool RandomizeSpeaking;
+  GOSettingBool NewBasMelBehaviour;
   GOSettingBool ReverbEnabled;
   GOSettingBool ReverbDirect;
   GOSettingUnsigned ReverbChannel;
@@ -148,9 +155,6 @@ public:
 
   GOSettingInteger Transpose;
 
-  GOSettingUnsigned MetronomeMeasure;
-  GOSettingUnsigned MetronomeBPM;
-
   GOSettingBool IsToAutoAddMidi;
   GOSettingBool IsToCheckMidiOnStart;
   GOSettingString MidiRecorderOutputDevice;
@@ -167,6 +171,12 @@ public:
 
   GOMidiDeviceConfigList m_MidiIn;
   GOMidiDeviceConfigList m_MidiOut;
+
+  GOSettingUnsigned MetronomeMeasure;
+  GOSettingUnsigned MetronomeBPM;
+  GOSettingUnsigned m_MetromomeSound;
+  GOSettingFile m_MetronomeFirstBeat;
+  GOSettingFile m_MetronomeBeat;
 
   GODialogSizeSet m_DialogSizes;
 
@@ -218,9 +228,10 @@ public:
     m_MidiPortsConfig = portsConfig;
   }
 
-  GOMidiMap &GetMidiMap();
+  GOMidiMap &GetMidiMap() { return m_MidiMap; }
+  const GOMidiMap &GetMidiMap() const { return m_MidiMap; }
 
-  GOTemperamentList &GetTemperaments();
+  GOTemperamentList &GetTemperaments() { return m_Temperaments; }
 
   const GOLogicalRect &GetMainWindowRect() const { return m_MainWindowRect; }
   void SetMainWindowRect(const GOLogicalRect &rect) { m_MainWindowRect = rect; }

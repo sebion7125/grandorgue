@@ -1,0 +1,73 @@
+Proposed merged code for the conflict region (to be inserted in place of the current conflict block):
+
+{
+  // find out rank and chamade flag (private logic preserved)
+  auto* prov = handle->p_SoundProvider;
+  if (!prov) return;
+  auto* pipe = prov->GetOwnerPipe();
+  GORank* rank = pipe ? pipe->GetRank() : nullptr;
+  const wxString rankName = rank ? rank->GetName().Lower() : wxString();
+
+  const ChannelKind chan = ChannelFromRankName(rankName);
+  const bool chamade = IsChamade(rankName);
+
+  CHAMADE_DEBUG("Release: Rank: %s , bCham=%i, Type=%i", rankName.mb_str(), chamade, chan);
+
+  float g_0 = 0.0f;
+
+  if (chamade) {
+    // Chamade-specific parameters (preserve HEAD behavior)
+    switch (chan) {
+      case CK_Dry:
+        attack_duration = tmax_dry_by_midi[midikey_frequency];
+        g_0 = g0_dry_by_midi[midikey_frequency];
+        CHAMADE_DEBUG("Release gestartet: Cham Dry ");
+        break;
+      case CK_Front:
+        attack_duration = tmax_front_by_midi[midikey_frequency];
+        g_0 = g0_front_by_midi[midikey_frequency];
+        CHAMADE_DEBUG("Release gestartet: Cham Front ");
+        break;
+      case CK_Rear:
+        attack_duration = tmax_rear_by_midi[midikey_frequency];
+        g_0 = g0_rear_by_midi[midikey_frequency];
+        CHAMADE_DEBUG("Release gestartet: Cham Rear ");
+        break;
+      default:
+        break;
+    }
+
+    if (time < (int)attack_duration) {
+      float attack_index = (float)time / attack_duration;
+      using namespace GOAudioParams;
+      const auto mode = GetCrossfadeMode();
+      const auto g = go_crossfade_eval(mode, attack_index);
+      float gain_delta = g.a * g_0 + g.b * 1.0f;
+      gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
+      gain_target *= gain_delta;
+    }
+
+  } else {
+    // Non-chamade path: prefer the upstream generic formula (fast/easy)
+    if (time < (int)attack_duration) {
+      float attack_index = (float)time / attack_duration;
+      float gain_delta = (0.2f + (0.8f * (2.0f * attack_index - (attack_index * attack_index))));
+      gain_target *= gain_delta;
+    } else {
+      // Fallback: preserve HEAD's "new model" estimated behavior as a last-resort.
+      // This is only evaluated if time >= attack_duration above and may be
+      // redundant, but keeps the private heuristic available.
+      float est_attack_duration = 70.0f;
+      float est_g0 = 0.1f;
+      if (time < (int)est_attack_duration) {
+        float attack_index = (float)time / est_attack_duration;
+        using namespace GOAudioParams;
+        const auto mode = GetCrossfadeMode();
+        const auto g = go_crossfade_eval(mode, attack_index);
+        float gain_delta = g.a * est_g0 + g.b * 1.0f;
+        gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
+        gain_target *= gain_delta;
+      }
+    }
+  }
+}

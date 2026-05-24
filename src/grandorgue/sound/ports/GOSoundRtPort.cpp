@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -12,12 +12,13 @@
 
 #include "GOSoundPortFactory.h"
 #include "config/GODeviceNamePattern.h"
+#include "sound/buffer/GOSoundBufferMutable.h"
 
 const wxString GOSoundRtPort::PORT_NAME = wxT("RtAudio");
 const wxString GOSoundRtPort::PORT_NAME_OLD = wxT("Rt");
 
 GOSoundRtPort::GOSoundRtPort(
-  GOSound *sound, RtAudio *rtApi, unsigned rtDevId, const wxString &name)
+  GOSoundSystem *sound, RtAudio *rtApi, unsigned rtDevId, const wxString &name)
   : GOSoundPort(sound, name),
     m_rtApi(rtApi),
     m_RtDevId(rtDevId),
@@ -131,10 +132,10 @@ int GOSoundRtPort::Callback(
   RtAudioStreamStatus status,
   void *userData) {
   GOSoundRtPort *port = (GOSoundRtPort *)userData;
-  if (port->AudioCallback((float *)outputBuffer, nFrames))
-    return 0;
-  else
-    return 1;
+  GOSoundBufferMutable outputBufferMutable(
+    (float *)outputBuffer, port->m_Channels, nFrames);
+
+  return port->AudioCallback(outputBufferMutable) ? 0 : 1;
 }
 
 static wxString compose_device_name(
@@ -204,7 +205,7 @@ const std::vector<wxString> &GOSoundRtPort::getApis() {
 
 GOSoundPort *GOSoundRtPort::create(
   const GOPortsConfig &portsConfig,
-  GOSound *sound,
+  GOSoundSystem *sound,
   GODeviceNamePattern &pattern) {
   GOSoundRtPort *port = NULL;
 

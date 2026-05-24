@@ -1,5 +1,5 @@
 # Copyright 2006 Milan Digital Audio LLC
-# Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+# Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
 # License GPL-2.0 or later
 # (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
 
@@ -23,6 +23,58 @@ project(
 set(NUM_VERSION "${PROJECT_VERSION}")
 string(REPLACE "." "," NUM_WIN_VERSION ${NUM_VERSION})
 
+option(RELEASE_FLAG "Build as a release" OFF)
+
+# GO_SPLIT_DEBUG_SYMBOLS: save debug symbols to separate files (.dbg on Linux, .pdb on Windows).
+# Default: always ON on Windows (PDB is always useful); on Linux equals RELEASE_FLAG.
+#
+# Behavior matrix (BT = CMAKE_BUILD_TYPE, GS = GO_SPLIT_DEBUG_SYMBOLS):
+# BT default: Debug when RELEASE_FLAG=OFF/unset, Release when RELEASE_FLAG=ON
+# GS default: ON on Windows; on Linux = RELEASE_FLAG
+#
+# RELEASE_FLAG | CMAKE_BUILD_TYPE | GO_SPLIT_DEBUG_SYMBOLS || Compiler flags | Result (Linux)  | Result (Windows)
+# -------------|------------------|------------------------||----------------|-----------------|------------------
+# unset        | unset            | unset                  || -g3 -Og        | unstripped      | stripped + .pdb
+# unset        | unset            | OFF                    || -g3 -Og        | unstripped      | unstripped
+# unset        | unset            | ON                     || -g3 -Og        | stripped + .dbg | stripped + .pdb
+# unset        | Debug            | unset                  || -g3 -Og        | unstripped      | stripped + .pdb
+# unset        | Debug            | OFF                    || -g3 -Og        | unstripped      | unstripped
+# unset        | Debug            | ON                     || -g3 -Og        | stripped + .dbg | stripped + .pdb
+# unset        | Release          | unset                  || -O3 -g         | stripped        | stripped + .pdb
+# unset        | Release          | OFF                    || -O3 -g         | stripped        | stripped
+# unset        | Release          | ON                     || -O3 -g         | stripped + .dbg | stripped + .pdb
+# OFF          | unset            | unset                  || -g3 -Og        | unstripped      | stripped + .pdb
+# OFF          | unset            | OFF                    || -g3 -Og        | unstripped      | unstripped
+# OFF          | unset            | ON                     || -g3 -Og        | stripped + .dbg | stripped + .pdb
+# OFF          | Debug            | unset                  || -g3 -Og        | unstripped      | stripped + .pdb
+# OFF          | Debug            | OFF                    || -g3 -Og        | unstripped      | unstripped
+# OFF          | Debug            | ON                     || -g3 -Og        | stripped + .dbg | stripped + .pdb
+# OFF          | Release          | unset                  || -O3 -g         | stripped        | stripped + .pdb
+# OFF          | Release          | OFF                    || -O3 -g         | stripped        | stripped
+# OFF          | Release          | ON                     || -O3 -g         | stripped + .dbg | stripped + .pdb
+# ON           | unset            | unset                  || -O3 -g         | stripped + .dbg | stripped + .pdb
+# ON           | unset            | OFF                    || -O3 -g         | stripped        | stripped
+# ON           | unset            | ON                     || -O3 -g         | stripped + .dbg | stripped + .pdb
+# ON           | Debug            | unset                  || -g3 -Og        | stripped + .dbg | stripped + .pdb
+# ON           | Debug            | OFF                    || -g3 -Og        | unstripped      | unstripped
+# ON           | Debug            | ON                     || -g3 -Og        | stripped + .dbg | stripped + .pdb
+# ON           | Release          | unset                  || -O3 -g         | stripped + .dbg | stripped + .pdb
+# ON           | Release          | OFF                    || -O3 -g         | stripped        | stripped
+# ON           | Release          | ON                     || -O3 -g         | stripped + .dbg | stripped + .pdb
+if(WIN32)
+  option(GO_SPLIT_DEBUG_SYMBOLS "Save debug symbols separately (PDB on Windows, .dbg on Linux)" ON)
+else()
+  option(GO_SPLIT_DEBUG_SYMBOLS "Save debug symbols separately (PDB on Windows, .dbg on Linux)" ${RELEASE_FLAG})
+endif()
+
+if(NOT CMAKE_BUILD_TYPE)
+  if(RELEASE_FLAG)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+  else()
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+  endif()
+endif()
+
 if(NOT DEFINED BUILD_VERSION)
   set(BUILD_VERSION "0.XFadeDemo")
 elseif(NOT BUILD_VERSION)
@@ -32,6 +84,14 @@ endif()
 
 if (NOT DEFINED GO_BUILD_TESTING OR GO_BUILD_TESTING STREQUAL "")
   set(GO_BUILD_TESTING ${BUILD_TESTING})
+endif()
+
+if (NOT DEFINED GO_BUILD_COVERAGE OR GO_BUILD_COVERAGE STREQUAL "")
+  set(GO_BUILD_COVERAGE OFF)
+endif()
+
+if (NOT DEFINED GO_BUILD_ASAN OR GO_BUILD_ASAN STREQUAL "")
+  set(GO_BUILD_ASAN OFF)
 endif()
 
 set(FULL_VERSION "${PROJECT_VERSION}-${BUILD_VERSION}")
@@ -122,6 +182,7 @@ SET(CMAKE_INSTALL_RPATH_USE_LINK_PATH FALSE)
 add_option(-Wall)
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_option(-g3)
+  add_option(-Og)
 else()
   add_option(-O3)
   add_option(-g)
@@ -217,12 +278,26 @@ message(STATUS "  wxWidgets configuration     : ${wxWidgets_CONFIGURATION}")
 message(STATUS "============================================================================")
 
 
-if (GO_BUILD_TESTING)
+if (GO_BUILD_COVERAGE)
     # Add coverage configuration to include project files - Don't put extra libraries here under
     set(CMAKE_CXX_FLAGS_DEBUG "-g --coverage")
     message(STATUS "============================================================================")
     message(STATUS " Coverage enabled")
     message(STATUS "============================================================================")
+endif()
+
+if(GO_BUILD_ASAN)
+  add_option(-fsanitize=address)
+  add_option(-fno-omit-frame-pointer)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
+  if(UNIX AND NOT APPLE)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libasan")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -static-libasan")
+  endif()
+  message(STATUS "============================================================================")
+  message(STATUS " AddressSanitizer enabled")
+  message(STATUS "============================================================================")
 endif()
 
 add_subdirectory(src/build)
@@ -362,6 +437,12 @@ elseif(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
   else()
     set(CPACK_STRIP_FILES ON)
   endif()
+  if(GO_SPLIT_DEBUG_SYMBOLS)
+    set(CPACK_STRIP_FILES OFF)  # stripped via install(CODE) in BuildExecutable/BuildLibrary
+    # Disable RPM's built-in brp-strip: we handle stripping ourselves, and the host strip may
+    # not recognize the target arch ELF (e.g. x86_64 host strip on aarch64 cross-built binaries)
+    string(APPEND CPACK_RPM_SPEC_MORE_DEFINE "%define __strip /bin/true\n%define __objcopy /bin/true\n")
+  endif()
 
   set(CPACK_SYSTEM_NAME "linux")
   set(CPACK_GENERATOR TGZ RPM DEB)
@@ -390,7 +471,7 @@ elseif(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
   # On Ubuntu rpmbuild generates a libcurl.so.4(CURL_OPENSSL_4)(64bit) requirement for libcurl.
   # In Fedora libcurl is based on openssl, but libcurl package does not provide such symbol.
   # As a workaround, we set the right symbol manually.
-  set(CPACK_RPM_SPEC_MORE_DEFINE "%global __requires_exclude libcurl.*")
+  string(APPEND CPACK_RPM_SPEC_MORE_DEFINE "%global __requires_exclude libcurl.*")
   if("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "aarch64" OR "${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "x86_64")
     # dnf tries to install the 32-bit package on x86_64 if '()(64bit)' is omitted
     set(CPACK_RPM_PACKAGE_REQUIRES "libcurl.so.4()(64bit)")

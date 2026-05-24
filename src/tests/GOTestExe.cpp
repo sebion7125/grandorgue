@@ -1,34 +1,62 @@
 /*
- * Copyright 2023-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2023-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
 
 #include <cstdio>
 #include <iostream>
+#include <optional>
+#include <string>
 
-#include "GOTestCollection.h"
-#include "GOTestDrawStop.h"
-#include "GOTestOrganModel.h"
-#include "GOTestSwitch.h"
-#include "GOTestWindchest.h"
+#include "common/GOTestCollection.h"
+#include "testing/GOTestNameMap.h"
+#include "testing/model/GOTestDrawStop.h"
+#include "testing/model/GOTestOrganModel.h"
+#include "testing/model/GOTestSwitch.h"
+#include "testing/model/GOTestWindchest.h"
+#include "testing/sound/buffer/GOTestPerfSoundBufferMutable.h"
+#include "testing/sound/buffer/GOTestSoundBuffer.h"
+#include "testing/sound/buffer/GOTestSoundBufferManaged.h"
+#include "testing/sound/buffer/GOTestSoundBufferMutable.h"
+#include "testing/sound/buffer/GOTestSoundBufferMutableMono.h"
 
-int main() {
+int main(int argc, char *argv[]) {
   /*
       This is the main function that will collect all tests in the collection,
       then run the whole bunch.
 
-      TODO: It should displays also the tests results
+      Supported arguments:
+        --perf-only   run only performance tests (GOTest::PERF)
+        --no-perf     run only functional tests (GOTest::FUNCTIONAL)
+        (no argument) run all tests
   */
+
+  std::optional<GOTest::Category> categoryFilter;
+
+  for (int argI = 1; argI < argc; ++argI) {
+    const std::string arg = argv[argI];
+
+    if (arg == "--perf-only")
+      categoryFilter = GOTest::PERF;
+    else if (arg == "--no-perf")
+      categoryFilter = GOTest::FUNCTIONAL;
+  }
 
   /* Instantiate all the test classes here */
   GOTestDrawStop testDrawStop;
   GOTestOrganModel testOrganModel;
   GOTestSwitch testSwitch;
   GOTestWindchest testWindchest;
+  GOTestNameMap goTestNameMap;
+  GOTestSoundBuffer goTestSoundBuffer;
+  GOTestSoundBufferManaged testSoundBufferManaged;
+  GOTestSoundBufferMutable testSoundBufferMutable;
+  GOTestSoundBufferMutableMono testSoundBufferMutableMono;
+  GOTestPerfSoundBufferMutable testPerfSoundBufferMutable;
   /* end of instanciation */
   GOTestResultCollection test_result_collection;
-  test_result_collection = GOTestCollection::Instance()->run();
+  test_result_collection = GOTestCollection::Instance()->Run(categoryFilter);
 
   // Display tests results
   int run_number_ = 0;

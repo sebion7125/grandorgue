@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <math.h>
+
 #include <wx/filename.h>
 #include <wx/log.h>
 #include <wx/msgdlg.h>
@@ -41,10 +42,10 @@
 #include "gui/dialogs/GOProgressDialog.h"
 #include "gui/dialogs/go-message-boxes.h"
 #include "gui/panels/GOGUIBankedGeneralsPanel.h"
+#include "gui/panels/GOGUICouplerManualsAndVolumePanel.h"
 #include "gui/panels/GOGUICouplerPanel.h"
 #include "gui/panels/GOGUICrescendoPanel.h"
 #include "gui/panels/GOGUIDivisionalsPanel.h"
-#include "gui/panels/GOGUIFloatingPanel.h"
 #include "gui/panels/GOGUIMasterPanel.h"
 #include "gui/panels/GOGUIMetronomePanel.h"
 #include "gui/panels/GOGUIPanel.h"
@@ -55,9 +56,9 @@
 #include "loader/GOLoaderFilename.h"
 #include "loader/cache/GOCache.h"
 #include "loader/cache/GOCacheWriter.h"
-#include "midi/GOMidi.h"
 #include "midi/GOMidiPlayer.h"
 #include "midi/GOMidiRecorder.h"
+#include "midi/GOMidiSystem.h"
 #include "midi/events/GOMidiEvent.h"
 #include "model/GOCoupler.h"
 #include "model/GODivisionalCoupler.h"
@@ -67,9 +68,9 @@
 #include "model/GOSoundingPipe.h"
 #include "model/GOSwitch.h"
 #include "model/GOTremulant.h"
-#include "sound/GOSoundEngine.h"
-#include "sound/GOSoundReleaseAlignTable.h"
 #include "sound/GOCrossfadeParam.h"
+#include "sound/GOSoundOrganEngine.h"
+#include "sound/playing/GOSoundReleaseAlignTable.h"
 #include "temperaments/GOTemperament.h"
 #include "yaml/GOYamlModel.h"
 
@@ -135,14 +136,14 @@ GOOrganController::GOOrganController(GOConfig &config, bool isAppInitialized)
     m_MidiSamplesetMatch(),
     m_SampleSetId1(0),
     m_SampleSetId2(0),
-    m_bitmaps(nullptr),
+    mp_ImageCache(nullptr),
     m_PitchLabel(*this),
     m_TemperamentLabel(*this),
     m_MainWindowData(this, wxT("MainWindow")) {
   if (isAppInitialized) {
     // Load here objects that needs App (wx) to be loaded
     m_timer = new GOTimer();
-    m_bitmaps = new GOBitmapCache(this);
+    mp_ImageCache = new GOImageCache(m_FileStore);
   }
   GOOrganModel::SetModelModificationListener(this);
   m_setter = new GOSetter(this);
@@ -168,8 +169,8 @@ GOOrganController::~GOOrganController() {
   m_elementcreators.clear();
   // some elementcreator may reference to m_timer so we respect the deletion
   // order
-  if (m_bitmaps)
-    delete m_bitmaps;
+  if (mp_ImageCache)
+    delete mp_ImageCache;
   if (m_timer)
     delete m_timer;
 }
@@ -204,8 +205,6 @@ void GOOrganController::ResetOrganModified() {
   ResetOrganModelModified();
   SetOrganModified(false);
 }
-
-bool GOOrganController::IsCacheable() { return m_Cacheable; }
 
 GOHashType GOOrganController::GenerateCacheHash() {
   GOHash hash;
@@ -322,7 +321,7 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
   m_elementcreators.push_back(m_MidiRecorder);
   m_elementcreators.push_back(new GOMetronome(this));
   m_panelcreators.push_back(new GOGUICouplerPanel(this, m_VirtualCouplers));
-  m_panelcreators.push_back(new GOGUIFloatingPanel(this));
+  m_panelcreators.push_back(new GOGUICouplerManualsAndVolumePanel(this));
   m_panelcreators.push_back(new GOGUIMetronomePanel(this));
   m_panelcreators.push_back(new GOGUICrescendoPanel(this));
   m_panelcreators.push_back(new GOGUIDivisionalsPanel(this));
@@ -348,7 +347,7 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
   if (p_OnStateButton) {
     // we do not want to send midi events on m_OnStateButton together with
     // other events. They will be sent separately.
-    UnRegisterSoundStateHandler(p_OnStateButton);
+    UnRegisterLifecycleListener(p_OnStateButton);
   }
 
   m_PitchLabel.Load(cfg, wxT("SetterMasterPitch"), _("organ pitch"));
@@ -1048,7 +1047,11 @@ wxString GOOrganController::ExportCombination(const wxString &fileName) {
 
   yamlOut << *m_setter;
   yamlOut << *m_DivisionalSetter;
-  return yamlOut.writeTo(fileName);
+
+  const wxString errMsg = yamlOut.writeTo(fileName);
+
+  m_setter->OnCombinationsSaved(fileName);
+  return errMsg;
 }
 
 void GOOrganController::LoadCombination(const wxString &file) {
@@ -1112,8 +1115,6 @@ void GOOrganController::LoadCombination(const wxString &file) {
   }
 }
 
-bool GOOrganController::CachePresent() { return wxFileExists(m_CacheFilename); }
-
 bool GOOrganController::UpdateCache(GOProgressDialog *dlg, bool compress) {
   bool isOk = false;
 
@@ -1130,7 +1131,7 @@ bool GOOrganController::UpdateCache(GOProgressDialog *dlg, bool compress) {
     GOCacheWriter writer(file, compress);
 
     /* Save pipes to cache */
-    bool isOk = writer.WriteHeader();
+    isOk = writer.WriteHeader();
 
     GOHashType hash = GenerateCacheHash();
     if (!writer.Write(&hash, sizeof(hash)))
@@ -1245,48 +1246,6 @@ GOButtonControl *GOOrganController::GetButtonControl(
   return NULL;
 }
 
-// GODocument *GOOrganController::GetDocument() { return m_doc; }
-
-void GOOrganController::SetVolume(int volume) { m_volume = volume; }
-
-int GOOrganController::GetVolume() { return m_volume; }
-
-GOSetter *GOOrganController::GetSetter() { return m_setter; }
-
-GOGUIPanel *GOOrganController::GetPanel(unsigned index) {
-  return m_panels[index];
-}
-
-unsigned GOOrganController::GetPanelCount() { return m_panels.size(); }
-
-void GOOrganController::AddPanel(GOGUIPanel *panel) {
-  m_panels.push_back(panel);
-}
-
-const wxString &GOOrganController::GetChurchAddress() {
-  return m_ChurchAddress;
-}
-
-const wxString &GOOrganController::GetOrganBuilder() { return m_OrganBuilder; }
-
-const wxString &GOOrganController::GetOrganBuildDate() {
-  return m_OrganBuildDate;
-}
-
-const wxString &GOOrganController::GetOrganComments() {
-  return m_OrganComments;
-}
-
-const wxString &GOOrganController::GetRecordingDetails() {
-  return m_RecordingDetails;
-}
-
-const wxString &GOOrganController::GetInfoFilename() { return m_InfoFilename; }
-
-bool GOOrganController::IsCustomized() { return m_b_customized; }
-
-const wxString GOOrganController::GetODFFilename() { return m_odf; }
-
 const wxString GOOrganController::GetOrganPathInfo() {
   if (m_ArchiveID == wxEmptyString)
     return GetODFFilename();
@@ -1310,22 +1269,10 @@ GOOrgan GOOrganController::GetOrganInfo() {
     GetRecordingDetails());
 }
 
-const wxString GOOrganController::GetSettingFilename() {
-  return m_SettingFilename;
-}
-
-const wxString GOOrganController::GetCacheFilename() { return m_CacheFilename; }
-
 wxString GOOrganController::GetCombinationsDir() const {
   return wxFileName(m_config.OrganCombinationsPath(), GetOrganName())
     .GetFullPath();
 }
-
-GOMemoryPool &GOOrganController::GetMemoryPool() { return m_pool; }
-
-GOConfig &GOOrganController::GetSettings() { return m_config; }
-
-GOMidi *GOOrganController::GetMidi() { return m_midi; }
 
 void GOOrganController::LoadMIDIFile(wxString const &filename) {
   m_MidiPlayer->LoadFile(
@@ -1342,7 +1289,8 @@ void GOOrganController::Abort() {
   m_AudioRecorder->StopRecording();
   m_AudioRecorder->SetAudioRecorder(NULL);
   if (p_OnStateButton)
-    p_OnStateButton->AbortPlaybackExt();
+    p_OnStateButton->AbortPlayback();
+  GOOrganModel::GOSoundOrganInterfaceProxy::Disconnect();
   GOOrganModel::SetMidi(nullptr, nullptr);
   m_midi = NULL;
 }
@@ -1355,7 +1303,7 @@ void GOOrganController::PreconfigRecorder() {
 }
 
 void GOOrganController::PreparePlayback(
-  GOSoundEngine *engine, GOMidi *midi, GOSoundRecorder *recorder) {
+  GOSoundOrganEngine *engine, GOMidiSystem *midi, GOSoundRecorder *recorder) {
   m_soundengine = engine;
   m_midi = midi;
   m_MidiRecorder->SetOutputDevice(m_config.MidiRecorderOutputDevice());
@@ -1368,7 +1316,8 @@ void GOOrganController::PreparePlayback(
 
   m_MidiSamplesetMatch.clear();
   GOOrganModel::SetMidi(midi, m_MidiRecorder);
-  GOEventDistributor::PreparePlayback(engine);
+  GOOrganModel::GOSoundOrganInterfaceProxy::Connect(engine);
+  GOEventDistributor::PreparePlayback();
 
   m_setter->UpdateModified(m_OrganModified);
 
@@ -1378,9 +1327,9 @@ void GOOrganController::PreparePlayback(
 
   // Light the OnState button
   if (p_OnStateButton) {
-    p_OnStateButton->PreparePlaybackExt(engine);
-    p_OnStateButton->StartPlaybackExt();
-    p_OnStateButton->PrepareRecordingExt();
+    p_OnStateButton->PreparePlayback();
+    p_OnStateButton->StartPlayback();
+    p_OnStateButton->PrepareRecording();
   }
 }
 
@@ -1450,7 +1399,7 @@ void GOOrganController::Reset() {
 }
 
 void GOOrganController::SetTemperament(const GOTemperament &temperament) {
-  m_TemperamentLabel.SetContent(wxGetTranslation(temperament.GetName()));
+  m_TemperamentLabel.SetContent(temperament.GetTitle());
   for (unsigned k = 0; k < m_ranks.size(); k++)
     m_ranks[k]->SetTemperament(temperament);
 }
@@ -1462,19 +1411,7 @@ void GOOrganController::SetTemperament(const wxString &name) {
   SetTemperament(temperament);
 }
 
-wxString GOOrganController::GetTemperament() { return m_Temperament; }
-
 void GOOrganController::AllNotesOff() {
   for (unsigned k = GetFirstManualIndex(); k <= GetManualAndPedalCount(); k++)
     GetManual(k)->AllNotesOff();
-}
-
-GOLabelControl *GOOrganController::GetPitchLabel() { return &m_PitchLabel; }
-
-GOLabelControl *GOOrganController::GetTemperamentLabel() {
-  return &m_TemperamentLabel;
-}
-
-GOMainWindowData *GOOrganController::GetMainWindowData() {
-  return &m_MainWindowData;
 }

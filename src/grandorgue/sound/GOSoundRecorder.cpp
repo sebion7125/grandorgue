@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -10,9 +10,10 @@
 #include <wx/intl.h>
 #include <wx/log.h>
 
-#include "GOSoundBufferItem.h"
-#include "GOWaveTypes.h"
+#include "tasks/GOSoundBufferTaskBase.h"
 #include "threading/GOMutexLocker.h"
+
+#include "GOWaveTypes.h"
 
 #pragma pack(push, 1)
 
@@ -109,7 +110,7 @@ void GOSoundRecorder::SetBytesPerSample(unsigned value) {
 }
 
 void GOSoundRecorder::SetOutputs(
-  std::vector<GOSoundBufferItem *> outputs, unsigned samples_per_buffer) {
+  std::vector<GOSoundBufferTaskBase *> outputs, unsigned samples_per_buffer) {
   m_Outputs = outputs;
   m_SamplesPerBuffer = samples_per_buffer;
   SetupBuffer();
@@ -121,7 +122,7 @@ void GOSoundRecorder::SetupBuffer() {
     delete[] m_Buffer;
   m_Channels = 0;
   for (unsigned i = 0; i < m_Outputs.size(); i++)
-    m_Channels += m_Outputs[i]->GetChannels();
+    m_Channels += m_Outputs[i]->GetNChannels();
   m_BufferSize = m_SamplesPerBuffer * m_Channels * m_BytesPerSample;
   m_Buffer = new char[m_BufferSize];
 }
@@ -154,18 +155,23 @@ static void convertValue(float value, float &result) { result = value; }
 template <class T> void GOSoundRecorder::ConvertData() {
   unsigned start_pos = 0;
   T *buf = (T *)m_Buffer;
-  for (unsigned i = 0; i < m_Outputs.size(); i++) {
-    m_Outputs[i]->Finish(m_Stop.load());
 
+  for (unsigned i = 0; i < m_Outputs.size(); i++) {
+    GOSoundBufferTaskBase *pOutput = m_Outputs[i];
+
+    pOutput->Finish(m_Stop.load());
+
+    const unsigned nChannels = pOutput->GetNChannels();
+    float *pData = pOutput->GetData();
     unsigned pos = start_pos;
-    unsigned inc = m_Channels - m_Outputs[i]->GetChannels();
-    for (unsigned l = 0, j = 0; j < m_SamplesPerBuffer; j++) {
-      for (unsigned k = 0; k < m_Outputs[i]->GetChannels(); k++, l++) {
-        convertValue(m_Outputs[i]->m_Buffer[l], buf[pos++]);
-      }
+    unsigned inc = m_Channels - nChannels;
+
+    for (unsigned j = 0; j < m_SamplesPerBuffer; j++) {
+      for (unsigned k = 0; k < nChannels; k++, pData++)
+        convertValue(*pData, buf[pos++]);
       pos += inc;
     }
-    start_pos += m_Outputs[i]->GetChannels();
+    start_pos += nChannels;
   }
 }
 

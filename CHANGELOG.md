@@ -1,3 +1,32 @@
+- Fixed controlling organ elements when recording or playing MIDI https://github.com/GrandOrgue/grandorgue/issues/2388
+- Fixed Loading organ errors with Tuskish system locale https://github.com/GrandOrgue/grandorgue/issues/2401
+# 3.17.1 (2026-03-31)
+- Fixed wrong .cmb group of division sender MIDI settings https://github.com/GrandOrgue/grandorgue/issues/2409
+- Fixed wrong initial position of the Combination Setter https://github.com/GrandOrgue/grandorgue/issues/2430
+- Fixed listening a SYSEX Johanus event in the MIDI event editor https://github.com/GrandOrgue/grandorgue/issues/2114
+# 3.17.0 (2026-02-09)
+- Added capability of entering a setter combination number with the new "N" MIDI button https://github.com/GrandOrgue/grandorgue/issues/1237
+- Fixed importing MIDI settings with "Any device" 
+- Added capability of changing metronome sound https://github.com/GrandOrgue/grandorgue/issues/2258
+- Fixed switching the convolution reverb off when the system is overloaded https://github.com/GrandOrgue/grandorgue/issues/2348
+- Added capability to specify the config file path in the command line with the --config option https://github.com/GrandOrgue/grandorgue/issues/2328
+- Fixed displaying an invalid user-defined temperament name in the Master Control panel https://github.com/GrandOrgue/grandorgue/discussions/2362
+- Fixed saving a SYSEX ID https://github.com/GrandOrgue/grandorgue/issues/2353
+# 3.16.3 (2025-12-26)
+- Fixed resetting devices of MIDI events on editing if the device was missed
+- Added logging a warning message when importing MIDI objects referencing to a not-existing device https://github.com/GrandOrgue/grandorgue/issues/2281
+- Fixed exporting MIDI Settings to yaml file https://github.com/GrandOrgue/grandorgue/issues/2333
+- Fixed creating an organ cache https://github.com/GrandOrgue/grandorgue/issues/2325
+- Removed support of MacOs 13. Now MacOs 14+-arm64 and MacOs 15-intel are only supported
+- Fixed light of the Save combinations button https://github.com/GrandOrgue/grandorgue/issues/2305
+- Added validation of the device logical names for leading/trailing spaces in the Device Matching Dialog https://github.com/GrandOrgue/grandorgue/issues/2278
+# 3.16.2 (2025-11-10)
+- Added option of BAS/MEL coupler behaviour to fix missed notes https://github.com/GrandOrgue/grandorgue/issues/1672
+- Fixed displaying more than 10 enclosures on the CouplerManualsAndVolume panel https://github.com/GrandOrgue/grandorgue/issues/2100
+# 3.16.1 (2025-08-28)
+- Fixed sending 'ON' strings in sysex MIDI messages https://github.com/GrandOrgue/grandorgue/issues/2260
+- Fixed crash on exit from GrandOrgue on MacOs https://github.com/GrandOrgue/grandorgue/issues/2256
+- Fixed playing the last sample of a loop https://github.com/GrandOrgue/grandorgue/issues/2211
 # 3.16.0 (2025-08-03)
 - Added more columns to the Initial MIDI tab of the Organ settings  https://github.com/GrandOrgue/grandorgue/issues/1974
 - Added capability of assigning any MIDI object events to the initial MIDI configuration https://github.com/GrandOrgue/grandorgue/issues/1974

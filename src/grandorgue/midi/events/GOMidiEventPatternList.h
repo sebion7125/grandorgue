@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -11,7 +11,14 @@
 #include <algorithm>
 #include <vector>
 
-template <class MidiType, class MidiEventPattern> class GOMidiEventPatternList {
+#include "GOMidiBasePatternList.h"
+
+template <
+  class MidiType,
+  class MidiEventPattern,
+  typename = std::enable_if_t<
+    std::is_base_of<GOMidiEventPattern, MidiEventPattern>::value>>
+class GOMidiEventPatternList : public GOMidiBasePatternList {
 protected:
   MidiType m_type;
   std::vector<MidiEventPattern> m_events;
@@ -22,7 +29,7 @@ public:
 
   MidiType GetType() const { return m_type; }
 
-  unsigned GetEventCount() const { return m_events.size(); }
+  unsigned GetEventCount() const override { return m_events.size(); }
 
   bool IsMidiConfigured() const { return !m_events.empty(); }
 
@@ -30,6 +37,10 @@ public:
 
   const MidiEventPattern &GetEvent(unsigned index) const {
     return m_events[index];
+  }
+
+  const GOMidiEventPattern &GetBasePattern(unsigned index) const override {
+    return GetEvent(index);
   }
 
   MidiEventPattern &GetEvent(unsigned index) { return m_events[index]; }

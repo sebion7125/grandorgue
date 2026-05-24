@@ -1,11 +1,15 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
 
 #include "GOSetter.h"
+
+#include <iomanip>
+#include <sstream>
+#include <string>
 
 #include <wx/app.h>
 #include <wx/dir.h>
@@ -197,6 +201,12 @@ static const GOElementCreator::ButtonDefinitionEntry BUTTON_DEFS[] = {
    &MIDI_CONTEXT_SEQUENCER},
   {wxT("L9"),
    GOSetter::ID_SETTER_L9,
+   true,
+   true,
+   false,
+   &MIDI_CONTEXT_SEQUENCER},
+  {wxT("SetterN"),
+   GOSetter::ID_SETTER_N,
    true,
    true,
    false,
@@ -726,6 +736,8 @@ const GOSetter::ButtonDefinitionEntry *const GOSetter::P_BUTTON_DEFS
 GOSetter::GOSetter(GOOrganController *organController)
   : m_OrganController(organController),
     m_pos(0),
+    m_NumericModeDigitsEntered(-1),
+    m_NumericModeAccomulated(0),
     m_bank(0),
     m_crescendopos(0),
     m_crescendobank(0),
@@ -746,7 +758,7 @@ GOSetter::GOSetter(GOOrganController *organController)
   SetSetterType(GOSetterState::SETTER_REGULAR);
   SetCrescendoType(m_crescendobank);
 
-  m_OrganController->RegisterSoundStateHandler(this);
+  m_OrganController->RegisterLifecycleListener(this);
   m_OrganController->RegisterCombinationButtonSet(this);
   m_OrganController->RegisterControlChangedHandler(this);
 }
@@ -901,6 +913,8 @@ void GOSetter::Load(GOConfigReader &cfg) {
     group.Printf(wxT("SetterL%d"), i);
     m_buttons[ID_SETTER_L0 + i]->Init(cfg, group, buffer);
   }
+
+  m_buttons[ID_SETTER_N]->Init(cfg, wxT("SetterN"), _("N"));
 
   for (unsigned i = 0; i < GENERALS; i++) {
     wxString group;
@@ -1108,6 +1122,27 @@ bool GOSetter::CopyFrameGenerals(
   return changed;
 }
 
+// Display entered number on m_PosDisplay in the N__ format
+void GOSetter::DisplayNumericPos() {
+  std::string numStr;
+
+  if (m_NumericModeDigitsEntered > 0) {
+    std::ostringstream oss;
+
+    oss << std::setw(m_NumericModeDigitsEntered) << std::setfill('0')
+        << m_NumericModeAccomulated;
+    numStr = oss.str();
+  }
+  std::string strToDisplay
+    = numStr + std::string(3 - m_NumericModeDigitsEntered, '_');
+  m_PosDisplay.SetContent(strToDisplay);
+}
+
+// Display the current sequencer position on m_PosDisplay in the 00N format
+void GOSetter::DisplayPos() {
+  m_PosDisplay.SetContent(wxString::Format(wxT("%03d"), m_pos));
+}
+
 void GOSetter::ButtonStateChanged(int id, bool newState) {
   switch (id) {
 
@@ -1210,8 +1245,34 @@ void GOSetter::ButtonStateChanged(int id, bool newState) {
   case ID_SETTER_L6:
   case ID_SETTER_L7:
   case ID_SETTER_L8:
-  case ID_SETTER_L9:
-    SetPosition(m_pos - (m_pos % 10) + id - ID_SETTER_L0);
+  case ID_SETTER_L9: {
+    unsigned digit = id - ID_SETTER_L0;
+
+    if (m_NumericModeDigitsEntered < 0) {
+      // not numeric mode. Change the current position.
+      SetPosition(m_pos - (m_pos % 10) + digit);
+    } else {
+      m_NumericModeDigitsEntered++;
+      m_NumericModeAccomulated = m_NumericModeAccomulated * 10 + digit;
+      if (m_NumericModeDigitsEntered < 3)
+        DisplayNumericPos();
+      else {
+        m_NumericModeDigitsEntered = -1;
+        SetPosition(m_NumericModeAccomulated);
+        m_buttons[ID_SETTER_N]->Display(false);
+      }
+    }
+  } break;
+  case ID_SETTER_N:
+    if (m_NumericModeDigitsEntered < 0) { // enter to the numeric mode
+      m_NumericModeDigitsEntered = 0;
+      m_NumericModeAccomulated = 0;
+      DisplayNumericPos();
+    } else { // cancel the numeric mode
+      m_NumericModeDigitsEntered = -1;
+      DisplayPos();
+    }
+    m_buttons[ID_SETTER_N]->Display(m_NumericModeDigitsEntered >= 0);
     break;
   case ID_SETTER_GENERAL00:
   case ID_SETTER_GENERAL01:
@@ -1384,22 +1445,16 @@ void GOSetter::ButtonStateChanged(int id, bool newState) {
 }
 
 void GOSetter::PreparePlayback() {
-  wxString buffer;
-  buffer.Printf(wxT("%03d"), m_pos);
-  m_PosDisplay.SetContent(buffer);
-
+  DisplayPos();
   m_NameDisplay.SetContent(m_OrganController->GetOrganName());
 
   wxCommandEvent event(wxEVT_SETVALUE, ID_METER_FRAME_SPIN);
+
   event.SetInt(m_pos);
   wxTheApp->GetTopWindow()->GetEventHandler()->AddPendingEvent(event);
-
-  buffer.Printf(wxT("%d"), m_crescendopos + 1);
-  m_CrescendoDisplay.SetContent(buffer);
-
-  buffer.Printf(wxT("%c"), m_bank + wxT('A'));
-  m_BankDisplay.SetContent(buffer);
-
+  m_CrescendoDisplay.SetContent(
+    wxString::Format(wxT("%d"), m_crescendopos + 1));
+  m_BankDisplay.SetContent(wxString::Format(wxT("%c"), m_bank + wxT('A')));
   UpdateTranspose();
 }
 
@@ -1526,9 +1581,7 @@ void GOSetter::SetPosition(int pos, bool push) {
     PushGeneral(*m_framegeneral[m_pos], m_buttons[ID_SETTER_L0 + m_pos % 10]);
     m_buttons[ID_SETTER_HOME]->Display(m_pos == 0);
   }
-
-  buffer.Printf(wxT("%03d"), m_pos);
-  m_PosDisplay.SetContent(buffer);
+  DisplayPos();
   if (pos != old_pos) {
     wxCommandEvent event(wxEVT_SETVALUE, ID_METER_FRAME_SPIN);
     event.SetInt(m_pos);

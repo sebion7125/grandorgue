@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -15,7 +15,6 @@ template <class T> class GOChoice;
 class GOConfig;
 class wxCheckBox;
 class wxChoice;
-class wxDirPickerCtrl;
 class wxSpinCtrl;
 class wxStaticText;
 class wxSpinEvent;
@@ -45,8 +44,7 @@ class GOSettingsOptions : public wxPanel {
     ID_RECORD_DOWNMIX,
     ID_VOLUME,
     ID_LANGUAGE,
-    ID_METRONOME_MEASURE,
-    ID_METRONOME_BPM,
+    ID_NEW_BAS_MEL,
   };
 
 private:
@@ -62,6 +60,7 @@ private:
   GOChoice<GOInitialLoadType> *m_LoadLastFile;
   wxCheckBox *m_Scale;
   wxCheckBox *m_Random;
+  wxCheckBox *m_NewBasMel;
   wxCheckBox *m_ODFCheck;
   wxCheckBox *m_ODFHw1Check;
   wxCheckBox *m_RecordDownmix;
@@ -75,8 +74,6 @@ private:
   wxSpinCtrl *m_MemoryLimit;
   wxStaticText *m_MemoryLimitWarn;
   wxChoice *m_Language;
-  wxSpinCtrl *m_MetronomeMeasure;
-  wxSpinCtrl *m_MetronomeBPM;
   wxCheckBox *m_CheckForUpdatesAtStartup;
 
   wxString m_OldLanguageCode;

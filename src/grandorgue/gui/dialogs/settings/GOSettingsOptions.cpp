@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -122,6 +122,12 @@ GOSettingsOptions::GOSettingsOptions(GOConfig &settings, wxWindow *parent)
     wxEXPAND | wxALL,
     5);
   item6->Add(
+    m_NewBasMel
+    = new wxCheckBox(this, ID_NEW_BAS_MEL, _("New Bas/Mel coupler behaviour")),
+    0,
+    wxEXPAND | wxALL,
+    5);
+  item6->Add(
     m_LoadLastFile = new GOChoice<GOInitialLoadType>(this, ID_LOAD_LAST_FILE),
     0,
     wxEXPAND | wxALL,
@@ -136,6 +142,7 @@ GOSettingsOptions::GOSettingsOptions(GOConfig &settings, wxWindow *parent)
   m_LoadLastFile->SetCurrentValue(m_config.LoadLastFile());
   m_Scale->SetValue(m_config.ScaleRelease());
   m_Random->SetValue(m_config.RandomizeSpeaking());
+  m_NewBasMel->SetValue(m_config.NewBasMelBehaviour());
 
   wxFlexGridSizer *grid = new wxFlexGridSizer(2, 5, 5);
   item6 = new wxStaticBoxSizer(wxVERTICAL, this, _("&Sound Engine"));
@@ -381,39 +388,6 @@ GOSettingsOptions::GOSettingsOptions(GOConfig &settings, wxWindow *parent)
     5);
   m_ODFHw1Check->SetValue(m_config.ODFHw1Check());
 
-  item6 = new wxStaticBoxSizer(wxVERTICAL, this, _("&Metronome"));
-  grid = new wxFlexGridSizer(2, 5, 5);
-  grid->Add(
-    new wxStaticText(this, wxID_ANY, _("BPM:")),
-    0,
-    wxALIGN_CENTER_VERTICAL | wxALIGN_RIGHT);
-  grid->Add(
-    m_MetronomeBPM = new wxSpinCtrl(
-      this, ID_METRONOME_BPM, wxEmptyString, wxDefaultPosition, SPINCTRL_SIZE),
-    0,
-    wxALL);
-  m_MetronomeBPM->SetRange(1, 500);
-
-  grid->Add(
-    new wxStaticText(this, wxID_ANY, _("Ticks per Measure:")),
-    0,
-    wxALIGN_CENTER_VERTICAL | wxALIGN_RIGHT);
-  grid->Add(
-    m_MetronomeMeasure = new wxSpinCtrl(
-      this,
-      ID_METRONOME_MEASURE,
-      wxEmptyString,
-      wxDefaultPosition,
-      SPINCTRL_SIZE),
-    0,
-    wxALL);
-  m_MetronomeMeasure->SetRange(0, 32);
-
-  m_MetronomeBPM->SetValue(m_config.MetronomeBPM());
-  m_MetronomeMeasure->SetValue(m_config.MetronomeMeasure());
-  item6->Add(grid, 0, wxEXPAND | wxALL, 5);
-  item9->Add(item6, 0, wxEXPAND | wxALL, 5);
-
   item6 = new wxStaticBoxSizer(wxVERTICAL, this, _("&Updates"));
   item9->Add(item6, 0, wxEXPAND | wxALL, 5);
   item6->Add(
@@ -444,6 +418,7 @@ bool GOSettingsOptions::TransferDataFromWindow() {
   m_config.Volume(m_Volume->GetValue());
   m_config.ScaleRelease(m_Scale->IsChecked());
   m_config.RandomizeSpeaking(m_Random->IsChecked());
+  m_config.NewBasMelBehaviour(m_NewBasMel->IsChecked());
   m_config.Concurrency(m_Concurrency->GetSelection() + 1);
   m_config.ReleaseConcurrency(m_ReleaseConcurrency->GetSelection() + 1);
   m_config.LoadConcurrency(m_LoadConcurrency->GetSelection());
@@ -455,8 +430,6 @@ bool GOSettingsOptions::TransferDataFromWindow() {
   m_config.LoadChannels(m_Channels->GetSelection());
   m_config.m_InterpolationType(m_Interpolation->GetSelection());
   m_config.MemoryLimit(m_MemoryLimit->GetValue());
-  m_config.MetronomeBPM(m_MetronomeBPM->GetValue());
-  m_config.MetronomeMeasure(m_MetronomeMeasure->GetValue());
   m_config.CheckForUpdatesAtStartup(m_CheckForUpdatesAtStartup->GetValue());
 
   // Language

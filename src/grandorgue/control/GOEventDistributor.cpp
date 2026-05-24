@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2023 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -9,7 +9,7 @@
 
 #include "model/GOCacheObject.h"
 #include "model/GOEventHandlerList.h"
-#include "sound/GOSoundStateHandler.h"
+#include "model/GOOrganLifecycleListener.h"
 
 #include "GOControlChangedHandler.h"
 #include "GOEventHandler.h"
@@ -45,22 +45,22 @@ void GOEventDistributor::UpdateHash(GOHash &hash) {
     obj->UpdateHash(hash);
 }
 
-void GOEventDistributor::PreparePlayback(GOSoundEngine *pSoundEngine) {
-  for (auto handler : p_model->GetSoundStateHandlers())
-    handler->PreparePlaybackExt(pSoundEngine);
+void GOEventDistributor::PreparePlayback() {
+  for (auto handler : p_model->GetLifecycleListeners())
+    handler->PreparePlayback();
 }
 
 void GOEventDistributor::StartPlayback() {
-  for (auto handler : p_model->GetSoundStateHandlers())
-    handler->StartPlaybackExt();
+  for (auto handler : p_model->GetLifecycleListeners())
+    handler->StartPlayback();
 }
 
 void GOEventDistributor::AbortPlayback() {
-  for (auto handler : p_model->GetSoundStateHandlers())
-    handler->AbortPlaybackExt();
+  for (auto handler : p_model->GetLifecycleListeners())
+    handler->AbortPlayback();
 }
 
 void GOEventDistributor::PrepareRecording() {
-  for (auto handler : p_model->GetSoundStateHandlers())
-    handler->PrepareRecordingExt();
+  for (auto handler : p_model->GetLifecycleListeners())
+    handler->PrepareRecording();
 }

@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -12,16 +12,16 @@
 #include <wx/image.h>
 #include <wx/stopwatch.h>
 
-#include "ptrvector.h"
-
 #include "config/GOConfig.h"
 #include "model/GOWindchest.h"
-#include "sound/GOSoundEngine.h"
-#include "sound/GOSoundProviderWave.h"
+#include "sound/GOSoundOrganEngine.h"
 #include "sound/GOSoundRecorder.h"
+#include "sound/buffer/GOSoundBufferMutable.h"
+#include "sound/providers/GOSoundProviderWave.h"
 
 #include "GOOrganController.h"
 #include "GOStdPath.h"
+#include "ptrvector.h"
 
 #ifdef __linux__
 #include <sys/resource.h>
@@ -70,7 +70,7 @@ void GOPerfTestApp::RunTest(
   unsigned interpolation,
   unsigned samples_per_frame) {
   try {
-    GOConfig settings(wxT("perftest"));
+    GOConfig settings("perftest", "");
     GOOrganController *organController = new GOOrganController(settings);
     const wxString testsDir = argc >= 2 ? argv[1]
                                         : GOStdPath::GetResourceDir()
@@ -78,7 +78,7 @@ void GOPerfTestApp::RunTest(
 
     organController->InitOrganDirectory(testsDir);
     organController->AddWindchest(new GOWindchest(*organController));
-    GOSoundEngine *engine = new GOSoundEngine();
+    GOSoundOrganEngine *engine = new GOSoundOrganEngine();
     GOSoundRecorder recorder;
 
     try {
@@ -140,7 +140,7 @@ void GOPerfTestApp::RunTest(
       engine->SetAudioOutput(engine_config);
       engine->SetAudioRecorder(&recorder, false);
 
-      engine->Setup(organController);
+      engine->Setup(*organController, organController->GetMemoryPool());
 
       std::vector<GOSoundSampler *> handles;
       float output_buffer[samples_per_frame * 2];
@@ -157,9 +157,12 @@ void GOPerfTestApp::RunTest(
       wxMilliClock_t diff;
       unsigned batch_size = 1 * engine->GetSampleRate() / samples_per_frame;
       unsigned blocks = 0;
+      GOSoundBufferMutable outputBufferMutable(
+        output_buffer, 2, samples_per_frame);
+
       do {
         for (unsigned i = 0; i < batch_size; i++) {
-          engine->GetAudioOutput(output_buffer, samples_per_frame, 0, false);
+          engine->GetAudioOutput(0, false, outputBufferMutable);
           engine->NextPeriod();
           blocks++;
         }

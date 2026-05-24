@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -8,16 +8,16 @@
 #ifndef GOSOUNDRECORDER_H
 #define GOSOUNDRECORDER_H
 
-#include <wx/file.h>
-#include <wx/string.h>
-
 #include <atomic>
 #include <vector>
 
-#include "sound/scheduler/GOSoundTask.h"
+#include <wx/file.h>
+#include <wx/string.h>
+
+#include "scheduler/GOSoundTask.h"
 #include "threading/GOMutex.h"
 
-class GOSoundBufferItem;
+class GOSoundBufferTaskBase;
 struct struct_WAVE;
 
 class GOSoundRecorder : public GOSoundTask {
@@ -34,7 +34,7 @@ private:
   bool m_Recording;
   bool m_Done;
   std::atomic_bool m_Stop;
-  std::vector<GOSoundBufferItem *> m_Outputs;
+  std::vector<GOSoundBufferTaskBase *> m_Outputs;
   char *m_Buffer;
 
   void SetupBuffer();
@@ -52,7 +52,7 @@ public:
   /* 1 = 8 bit, 2 = 16 bit, 3 = 24 bit, 4 = float */
   void SetBytesPerSample(unsigned value);
   void SetOutputs(
-    std::vector<GOSoundBufferItem *> outputs, unsigned samples_per_buffer);
+    std::vector<GOSoundBufferTaskBase *> outputs, unsigned samples_per_buffer);
 
   unsigned GetGroup();
   unsigned GetCost();

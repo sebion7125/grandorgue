@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -54,7 +54,6 @@ protected:
   GOOrganController *m_OrganController;
   GOGUIMouseState &m_MouseState;
   ptr_vector<GOGUIControl> m_controls;
-  std::vector<GOBitmap> m_WoodImages;
   unsigned m_BackgroundControls;
   wxString m_Name;
   wxString m_GroupName;
@@ -112,8 +111,8 @@ public:
   GOGUILayoutEngine *GetLayoutEngine();
   void PrepareDraw(double scale, GOBitmap *background);
   void Draw(GODC &dc);
-  const GOBitmap &GetWood(unsigned which);
-  GOBitmap LoadBitmap(wxString filename, wxString maskname);
+  const wxImage *GetWoodImage(unsigned woodImageNumber) const;
+  const wxImage *LoadImage(const wxString &filename, const wxString &maskname);
   void HandleKey(int key);
   void HandleMousePress(int x, int y, bool right);
   void HandleMouseRelease(bool right);

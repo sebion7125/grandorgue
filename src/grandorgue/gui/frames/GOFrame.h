@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -8,10 +8,10 @@
 #ifndef GOFRAME_H
 #define GOFRAME_H
 
-#include <wx/dcmemory.h>
-#include <wx/frame.h>
-
+#include <memory>
 #include <vector>
+
+#include <wx/frame.h>
 
 #include "gui/size/GOResizable.h"
 #include "help/GOHelpRequestor.h"
@@ -20,6 +20,7 @@
 #include "modification/GOModificationListener.h"
 #include "threading/GOMutex.h"
 #include "updater/GOUpdateChecker.h"
+
 
 #include "GOEvent.h"
 
@@ -40,9 +41,10 @@ class GOMidiEvent;
 class GOOrgan;
 class GOOrganController;
 class GOProgressDialog;
-class GOSound;
+class GOSoundSystem;
 class wxChoice;
-class wxHtmlHelpController;
+class wxMsgBoxEvent;
+class wxRenameFileEvent;
 class wxSpinCtrl;
 class wxToolBar;
 class wxToolBarToolBase;
@@ -53,8 +55,13 @@ class GOFrame : public wxFrame,
                 protected GOMidiCallback,
                 private GOModificationListener {
 private:
-  GOApp &m_App;
+  GOApp &r_app;
+  GOConfig &r_config;
+  GOSoundSystem &r_SoundSystem;
+  GOMidiSystem &r_MidiSystem;
+
   GOMutex m_mutex;
+
   wxMenu *m_file_menu;
   wxMenu *m_audio_menu;
   wxMenu *m_crossfade_menu;
@@ -62,7 +69,9 @@ private:
   wxMenu *m_favorites_menu;
   wxMenu *m_recent_menu;
   wxMenu *m_temperament_menu;
-  GODocument *m_doc;
+
+  std::unique_ptr<GODocument> mp_doc;
+  GOOrganController *p_OrganController;
   wxToolBar *m_ToolBar;
   GOAudioGauge *m_SamplerUsage;
   wxControl *m_VolumeControl;
@@ -73,8 +82,6 @@ private:
   wxSpinCtrl *m_Polyphony;
   wxSpinCtrl *m_SetterPosition;
   wxSpinCtrl *m_Volume;
-  GOSound &m_Sound;
-  GOConfig &m_config;
   GOMidiListener m_listener;
   wxString m_Title;
   wxString m_Label;
@@ -100,16 +107,13 @@ private:
   void UpdateSize();
   void UpdateVolumeControlWithSettings();
 
-  // Returns the current open organ controller or nullptr
-  GOOrganController *GetOrganController() const;
-
   void AttachDetachOrganController(bool isToAttach);
 
   // Processes the organ model modification event:
   // updates some controls according the organ model changes
   void OnIsModifiedChanged(bool modified) override;
 
-  bool LoadOrgan(const GOOrgan &organ, const wxString &cmb = wxEmptyString);
+  void LoadOrgan(const GOOrgan &organ, const wxString &cmb = wxEmptyString);
 
   void OnMeters(wxCommandEvent &event);
   void OnLoadFile(wxCommandEvent &event);
@@ -200,7 +204,7 @@ public:
     const wxPoint &pos,
     const wxSize &size,
     const long type,
-    GOSound &sound);
+    GOSoundSystem &sound);
   virtual ~GOFrame(void);
 
   void Init(const wxString &filename, bool isGuiOnly);

@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -23,7 +23,7 @@
 #include "model/GOOrganModel.h"
 #include "modification/GOModificationProxy.h"
 
-#include "GOBitmapCache.h"
+#include "GOImageCache.h"
 #include "GOMemoryPool.h"
 #include "GOTimer.h"
 #include "GOVirtualCouplerController.h"
@@ -38,7 +38,7 @@ class GOCache;
 class GODialogSizeSet;
 class GODivisionalSetter;
 class GOElementCreator;
-class GOMidi;
+class GOMidiSystem;
 class GOMidiEvent;
 class GOMidiPlayer;
 class GOMidiRecorder;
@@ -48,7 +48,7 @@ class GOSetter;
 class GOConfig;
 class GOTemperament;
 class GODocument;
-class GOSoundEngine;
+class GOSoundOrganEngine;
 class GOSoundProvider;
 class GOSoundRecorder;
 typedef struct _GOHashType GOHashType;
@@ -95,13 +95,14 @@ private:
   ptr_vector<GOGUIPanelCreator> m_panelcreators;
   ptr_vector<GOElementCreator> m_elementcreators;
 
-  GOSoundEngine *m_soundengine;
-  GOMidi *m_midi;
+  GOSoundOrganEngine *m_soundengine;
+  GOMidiSystem *m_midi;
   std::vector<bool> m_MidiSamplesetMatch;
   int m_SampleSetId1, m_SampleSetId2;
   GOGUIMouseState m_MouseState;
 
   GOMemoryPool m_pool;
+
   // timing variables for profiling (ms) - declared as members so they are
   // accessible from ReadOrganFile and Load and remain consistent
   long long __tim_parse_ms;
@@ -111,7 +112,8 @@ private:
   long long __tim_panels_ms;
   long long __tim_ranks_ms;
   long long __tim_modelrest_ms;
-  GOBitmapCache *m_bitmaps;
+  
+  GOImageCache *mp_ImageCache;
   GOLabelControl m_PitchLabel;
   GOLabelControl m_TemperamentLabel;
   GOMainWindowData m_MainWindowData;
@@ -163,21 +165,21 @@ public:
     bool isGuiOnly);
   /**
    * Exports organ combinations in the yaml file
-   * @param fileName - the path to the taml file to export
-   * @return an empty string if successed otherwise the error message
+   * @param fileName - the path to the yaml file to export
+   * @return an empty string if succeeded otherwise the error message
    */
   wxString ExportCombination(const wxString &fileName);
   void LoadCombination(const wxString &cmb);
   bool Save();
   bool Export(const wxString &cmb);
-  bool CachePresent();
-  bool IsCacheable();
+  bool CachePresent() const { return wxFileExists(m_CacheFilename); }
+  bool IsCacheable() const { return m_Cacheable; }
   bool UpdateCache(GOProgressDialog *dlg, bool compress);
   void DeleteCache();
   void DeleteSettings();
   void Abort();
   void PreparePlayback(
-    GOSoundEngine *engine, GOMidi *midi, GOSoundRecorder *recorder);
+    GOSoundOrganEngine *engine, GOMidiSystem *midi, GOSoundRecorder *recorder);
   void PrepareRecording();
   void Update();
   void Reset();
@@ -186,24 +188,24 @@ public:
   // GODocument *GetDocument();
 
   /* Access to internal ODF objects */
-  GOSetter *GetSetter();
-  GOGUIPanel *GetPanel(unsigned index);
-  unsigned GetPanelCount();
-  void AddPanel(GOGUIPanel *panel);
-  GOMemoryPool &GetMemoryPool();
-  GOConfig &GetSettings();
-  GOBitmapCache &GetBitmapCache() const { return *m_bitmaps; }
+  GOSetter *GetSetter() const { return m_setter; }
+  GOGUIPanel *GetPanel(unsigned index) { return m_panels[index]; }
+  unsigned GetPanelCount() const { return m_panels.size(); }
+  void AddPanel(GOGUIPanel *panel) { m_panels.push_back(panel); }
+  GOMemoryPool &GetMemoryPool() { return m_pool; }
+  GOConfig &GetSettings() { return m_config; }
+  GOImageCache &GetImageCache() const { return *mp_ImageCache; }
   void SetTemperament(const wxString &name);
-  wxString GetTemperament();
+  const wxString &GetTemperament() const { return m_Temperament; }
 
-  GOLabelControl *GetPitchLabel();
-  GOLabelControl *GetTemperamentLabel();
-  GOMainWindowData *GetMainWindowData();
+  GOLabelControl *GetPitchLabel() { return &m_PitchLabel; }
+  GOLabelControl *GetTemperamentLabel() { return &m_TemperamentLabel; }
+  GOMainWindowData *GetMainWindowData() { return &m_MainWindowData; }
 
   void LoadMIDIFile(const wxString &filename);
 
-  void SetVolume(int volume);
-  int GetVolume();
+  void SetVolume(int volume) { m_volume = volume; }
+  int GetVolume() const { return m_volume; }
 
   unsigned GetReleaseTail() {
     return GetRootPipeConfigNode().GetEffectiveReleaseTail();
@@ -218,25 +220,25 @@ public:
     const wxString &name, bool is_panel = false);
 
   /* TODO: can somebody figure out what this thing is */
-  bool IsCustomized();
+  bool IsCustomized() const { return m_b_customized; }
 
   /* Filename of the organ definition used to load */
-  const wxString GetODFFilename();
+  const wxString &GetODFFilename() const { return m_odf; }
   const wxString GetOrganPathInfo();
   GOOrgan GetOrganInfo();
-  const wxString GetSettingFilename();
-  const wxString GetCacheFilename();
+  const wxString &GetSettingFilename() const { return m_SettingFilename; }
+  const wxString &GetCacheFilename() const { return m_CacheFilename; }
   wxString GetCombinationsDir() const;
 
   /* Organ and Building general information */
-  const wxString &GetChurchAddress();
-  const wxString &GetOrganBuilder();
-  const wxString &GetOrganBuildDate();
-  const wxString &GetOrganComments();
-  const wxString &GetRecordingDetails();
-  const wxString &GetInfoFilename();
+  const wxString &GetChurchAddress() const { return m_ChurchAddress; }
+  const wxString &GetOrganBuilder() const { return m_OrganBuilder; }
+  const wxString &GetOrganBuildDate() const { return m_OrganBuildDate; }
+  const wxString &GetOrganComments() const { return m_OrganComments; }
+  const wxString &GetRecordingDetails() const { return m_RecordingDetails; }
+  const wxString &GetInfoFilename() const { return m_InfoFilename; }
 
-  GOMidi *GetMidi();
+  GOMidiSystem *GetMidi() { return m_midi; }
 
   GOGUIMouseState &GetMouseState() { return m_MouseState; }
 
