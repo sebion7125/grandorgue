@@ -675,7 +675,7 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
           chan);
 
         // float attack_duration;
-        float g_0;
+        float g_0=0.1f;
 
         if (chamade) {
           switch (chan) {
@@ -725,31 +725,7 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
           }*/
 
           /*float attack_duration = tmax_by_midi[midikey_frequency];
-          float a = curvature_by_midi[midikey_frequency];*/
-
-          else {
-            // new modell with estimated values
-            attack_duration = 70;
-            g_0 = 0.1f;
-
-            if (time < (int)attack_duration) {
-              float attack_index = (float)time / attack_duration;
-              using namespace GOAudioParams;
-              const auto mode = GetCrossfadeMode();
-              const auto g = go_crossfade_eval(mode, attack_index);
-              float gain_delta = g.a * g_0 + g.b * 1.0f;
-              gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
-              gain_target *= gain_delta; // test without attenuation of reverb
-              // gain_target = 0;
-            }
-            /*if (time < (int)attack_duration) {
-              float attack_index = (float)time / attack_duration;
-              float gain_delta
-                = (0.2f + (0.8f * (2.0f * attack_index - (attack_index *
-            attack_index)))); gain_target *= gain_delta; // test without
-            attenuation of reverb
-            }*/
-          }
+          float a = curvature_by_midi[midikey_frequency];*/          
 
           // float attack_index = (float)time / attack_duration;
           // float gain_delta = (0.2f + (0.8f * (2.0f * attack_index -
@@ -780,6 +756,20 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
           // gain_decay_length = 0;
           //= time_to_full_reverb + 6000 * time / time_to_full_reverb;
           //}
+          }
+
+          else {
+            // new modell with estimated values
+            attack_duration = 120;
+            g_0 = 0.1f;
+
+            if (time < (int)attack_duration)
+            {
+              float attack_index = (float)time / attack_duration;
+              float gain_delta = (1.0f-attack_index) * g_0 + attack_index * 1.0f;
+              gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
+              gain_target *= gain_delta;           
+            }            
           }
         }
       }
