@@ -61,6 +61,7 @@
 #include "model/GOSoundingPipe.h"
 #include "model/GOSwitch.h"
 #include "model/GOTremulant.h"
+#include "sound/GOCrossfadeParam.h"
 #include "sound/GOSoundOrganEngine.h"
 #include "sound/playing/GOSoundReleaseAlignTable.h"
 #include "temperaments/GOTemperament.h"
@@ -246,6 +247,25 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg) {
     m_volume = 0;
   m_Temperament
     = cfg.ReadString(CMBSetting, WX_ORGAN, wxT("Temperament"), false);
+
+  // Read persisted crossfade mode for this organ (if present)
+  // Backwards compatibility: older organ files that do not contain a
+  // CrossfadeMode entry should keep the legacy Linear behaviour.
+  {
+    // Check presence by attempting to read the entry as a string (non-required).
+    const wxString cf_entry = cfg.ReadString(
+      CMBSetting, WX_ORGAN, wxT("CrossfadeMode"), false, wxEmptyString);
+    if (cf_entry.IsEmpty()) {
+      // Old organ file: keep legacy default (Linear)
+      GOAudioParams::SetCrossfadeMode(GOCrossfadeMode::Linear);
+    } else {
+      // Newer files: parse stored integer (fall back to SinEqualPower if parse fails)
+      long cf = static_cast<long>(GOCrossfadeMode::SinEqualPower);
+      cf = cfg.ReadInteger(
+        CMBSetting, WX_ORGAN, wxT("CrossfadeMode"), 0, 10, false, cf);
+      GOAudioParams::SetCrossfadeMode(static_cast<GOCrossfadeMode>(cf));
+    }
+  }
 
   // It must be created before GOOrganModel::Load because lots of objects
   // reference to it
@@ -772,6 +792,12 @@ bool GOOrganController::Export(const wxString &cmb) {
   cfg.WriteString(WX_ORGAN, WX_GRANDORGUE_VERSION, wxT(APP_VERSION));
   cfg.WriteInteger(WX_ORGAN, wxT("Volume"), m_volume);
   cfg.WriteString(WX_ORGAN, wxT("Temperament"), m_Temperament);
+
+  // Persist current crossfade mode for this organ
+  {
+    const long cf = static_cast<long>(GOAudioParams::GetCrossfadeMode());
+    cfg.WriteInteger(WX_ORGAN, wxT("CrossfadeMode"), cf);
+  }
 
   GOEventDistributor::Save(cfg);
   GetDialogSizeSet().Save(cfg);
