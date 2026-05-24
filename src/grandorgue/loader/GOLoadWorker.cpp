@@ -9,6 +9,8 @@
 
 #include "model/GOCacheObject.h"
 
+#include <wx/log.h>
+ 
 #include "GOAlloc.h"
 #include "GOCacheObjectDistributor.h"
 #include "GOMemoryPool.h"
@@ -28,6 +30,14 @@ void GOLoadWorker::LoadObjectNoExc(GOCacheObject *obj) {
     m_WereExceptions |= !obj->LoadFromFileWithoutExc(m_FileStore, m_pool);
   } catch (GOOutOfMemory e) {
     m_OutOfMemory = true;
+    m_WereExceptions = true;
+  } catch (const std::exception &e) {
+    // Capture and log unexpected std::exception derived errors to avoid
+    // uncaught exceptions escaping the worker thread.
+    wxLogError("GOLoadWorker caught std::exception: %s", e.what());
+    m_WereExceptions = true;
+  } catch (...) {
+    wxLogError("GOLoadWorker caught unknown exception");
     m_WereExceptions = true;
   }
 }

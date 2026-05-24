@@ -102,6 +102,17 @@ private:
   GOGUIMouseState m_MouseState;
 
   GOMemoryPool m_pool;
+
+  // timing variables for profiling (ms) - declared as members so they are
+  // accessible from ReadOrganFile and Load and remain consistent
+  long long __tim_parse_ms;
+  long long __tim_cmb_ms;
+  long long __tim_readorgan_ms;
+  long long __tim_cache_ms;
+  long long __tim_panels_ms;
+  long long __tim_ranks_ms;
+  long long __tim_modelrest_ms;
+  
   GOImageCache *mp_ImageCache;
   GOLabelControl m_PitchLabel;
   GOLabelControl m_TemperamentLabel;
@@ -113,7 +124,7 @@ private:
   // if modified then sets m_IsOrganModified
   void OnIsModifiedChanged(bool modified);
 
-  void ReadOrganFile(GOConfigReader &cfg);
+  void ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg = nullptr);
   GOHashType GenerateCacheHash();
   wxString GenerateSettingFileName();
   wxString GenerateCacheFileName();
