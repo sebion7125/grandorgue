@@ -28,7 +28,6 @@ Makefile
 nbproject/
 CLAUDE.md
 .DS_Store
-<<<<<<< HEAD
 
 # Ignore editor/IDE caches and indexes
 .cache/
@@ -40,15 +39,14 @@ CLAUDE.md
 tags
 
 # Ignore common OS/editor files
-*.~ 
+*.~
 *.tmp
 *.bak
-=======
+
 .idea/
-.vscode/
 
 # eclipse
 .cproject
 .project
 .settings/
->>>>>>> upstream/master
+repomix-output.xmlrepomix-output.xml
