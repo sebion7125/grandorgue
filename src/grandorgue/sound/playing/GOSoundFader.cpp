@@ -23,7 +23,7 @@
 
 
 static inline float sanitize_vol(float vol, float /*lastVol*/) {
-  // Hotloop: keine Prüfungen/Clamps (Performance/Deterministik).
+  // Hot path: no checks/clamps (performance/determinism).
   return vol;
 }
 
@@ -293,13 +293,13 @@ void GOSoundFader::Process(
  // non-linear fade processing
 void GOSoundFader::ProcessAndAccumulate(
     unsigned nFrames, const float* in, float* out, float externalVolume) {
-  // Non-linear: delegiere an nichtlinearen Akkumulator
+  // Non-linear mode: delegate to non-linear accumulator.
   if (GOAudioParams::GetCrossfadeMode() != GOCrossfadeMode::Linear) {
     ProcessNonLinearFadeAndAccumulate(nFrames, in, out, externalVolume);
     return;
   }
 
-  // ==== ab hier: identische „Kopf“-Logik wie in Process(...) ====
+  // ==== from here: identical header logic as in Process(...) ====
   float startTargetVolumePoint = m_LastTargetVolumePoint;
   unsigned framesLeftAfterIncreasing = nFrames;
 
@@ -346,10 +346,10 @@ void GOSoundFader::ProcessAndAccumulate(
 
   float frameTotalVolume = startTargetVolumePoint * startExternalVolumePoint;
 
-  // ==== ab hier: der Unterschied – wir akkumulieren in 'out' ====
+  // ==== from here: the difference — we accumulate into 'out' ====
   if ((m_LastTargetVolumePoint == startTargetVolumePoint)
       && (m_LastExternalVolumePoint == startExternalVolumePoint)) {
-    // Konstante Lautstärke
+    // Constant gain
     float g = frameTotalVolume;
     const float* src = in;
     float*       dst = out;
@@ -359,7 +359,7 @@ void GOSoundFader::ProcessAndAccumulate(
       src += 2; dst += 2;
     }
   } else {
-    // Ramp von frameTotalVolume → m_LastTargetVolumePoint * m_LastExternalVolumePoint
+    // Ramp from frameTotalVolume → m_LastTargetVolumePoint * m_LastExternalVolumePoint
     const float g1 = m_LastTargetVolumePoint * m_LastExternalVolumePoint;
     const float dg = (g1 - frameTotalVolume) / nFrames;
 
@@ -389,9 +389,8 @@ void GOSoundFader::ProcessAndAccumulate(
 
 void GOSoundFader::ProcessNonLinearFadeAndAccumulate(
     unsigned nFrames, const float* in, float* out, float externalVolume) {
-  // Diese Funktion spiegelt die Logik von ProcessNonLinearFade(...),
-  // wendet die berechnete Gain-Hüllkurve jedoch nicht in-place,
-  // sondern als Akkumulation auf 'out' an.
+  // Mirrors the logic of ProcessNonLinearFade(...), but instead of applying
+  // the gain envelope in-place, accumulates into 'out'.
   if (nFrames == 0)
     return;
 

@@ -316,7 +316,7 @@ bool GOSoundOrganEngine::ProcessSampler(
           m_SamplerPool.UsedSamplerCount() >= m_PolyphonySoftLimit &&
           m_CurrentTime - sampler->time > 2000) ||
          sampler->drop_counter > 1))
-      // Zufällige Jitter-Zeit, damit parallele Drops nicht synchron laufen.
+      // Random jitter time to prevent concurrent drops from synchronizing.
       sampler->fader.StartDecreasingVolume(MsToSamples(
         20 + (rand() % 5) - 10));
     // normal ranomized load dropping
@@ -325,7 +325,7 @@ bool GOSoundOrganEngine::ProcessSampler(
         m_SamplerPool.UsedSamplerCount()*5 >= m_PolyphonySoftLimit*4 &&
         m_CurrentTime - sampler->time > 48000/*((unsigned long)((sampler->m_SamplerTaskId * m_CurrentTime) % 40) + 80)*/) ||
         sampler->drop_counter > 1))
-      // Zufällige Jitter-Zeit, damit parallele Drops nicht synchron laufen.
+      // Random jitter time to prevent concurrent drops from synchronizing.
       sampler->fader.StartDecreasingVolume(MsToSamples(
         1000 + (rand() % 1000) - 500));
 
@@ -349,11 +349,11 @@ bool GOSoundOrganEngine::ProcessSampler(
         || GOAudioParams::GetFuseFadeAndAccumulate();
 
       if (fuse && !sampler->toneBalanceFilterState.IsToApply()) {
-        // 2) Fader skaliert + akkumuliert direkt in output_buffer
+        // 2) Fader scales and accumulates directly into output_buffer
         sampler->fader.ProcessAndAccumulate(
           n_frames, temp, output_buffer, volume);
       } else {
-        // Legacy-Pfad (keine Fusion oder ToneBalance aktiv)
+        // Legacy path (no fused accumulation or ToneBalance active)
         sampler->fader.Process(n_frames, temp, volume);
         if (sampler->toneBalanceFilterState.IsToApply())
           sampler->toneBalanceFilterState.ProcessBuffer(n_frames, temp);
@@ -690,25 +690,25 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
             switch (chan) {
             case CK_Dry:
               attack_duration
-                = tmax_dry_by_midi[midikey_frequency]; /* spezielle
-                                                          Release-Parameter für
+                = tmax_dry_by_midi[midikey_frequency]; /* special release
+                                                          parameters for
                                                           Chamade Dry */
               g_0 = g0_dry_by_midi[midikey_frequency];
               CHAMADE_DEBUG("Release gestartet: Cham Dry ");
               break;
             case CK_Front:
               attack_duration
-                = tmax_front_by_midi[midikey_frequency]; /* spezielle
-                                                            Release-Parameter
-                                                            für Chamade Dry */
+                = tmax_front_by_midi[midikey_frequency]; /* special release
+                                                            parameters for
+                                                            Chamade Front */
               g_0 = g0_front_by_midi[midikey_frequency];
               CHAMADE_DEBUG("Release gestartet: Cham Front ");
               break;
             case CK_Rear:
               attack_duration
-                = tmax_rear_by_midi[midikey_frequency]; /* spezielle
-                                                           Release-Parameter für
-                                                           Chamade Dry */
+                = tmax_rear_by_midi[midikey_frequency]; /* special release
+                                                           parameters for
+                                                           Chamade Rear */
               g_0 = g0_rear_by_midi[midikey_frequency];
               CHAMADE_DEBUG("Release gestartet: Cham Rear ");
               break;
