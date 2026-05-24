@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -10,13 +10,11 @@
 #include <wx/cmdline.h>
 #include <wx/filesys.h>
 #include <wx/fs_zip.h>
-#include <wx/image.h>
 #include <wx/regex.h>
-#include <wx/stopwatch.h>
 
 #include "config/GOConfig.h"
 #include "gui/frames/GOFrame.h"
-#include "sound/GOSound.h"
+#include "sound/GOSoundSystem.h"
 
 #include "GOLog.h"
 #include "GOStdPath.h"
@@ -32,20 +30,21 @@
 
 IMPLEMENT_APP(GOApp)
 
-GOApp::GOApp()
-  : m_Restart(false),
-    m_Frame(NULL),
-    m_locale(),
-    m_config(NULL),
-    m_soundSystem(NULL),
-    m_Log(NULL),
-    m_FileName(),
-    m_InstanceName(),
-    m_IsGuiOnly(false) {}
+GOApp::~GOApp() = default;
+
+void GOApp::TemporaryLog::DoLogTextAtLevel(
+  wxLogLevel level, const wxString &msg) {
+  FILE *output = (level <= wxLOG_Warning) ? stderr : stdout;
+
+  fprintf(output, "%s\n", msg.mb_str().data());
+  if (level <= wxLOG_Error)
+    wxMessageBox(msg, "Error", wxOK | wxICON_ERROR);
+}
 
 static const char *const SWITCH_GUI = "g";
 static const char *const SWITCH_HELP = "h";
 static const char *const OPTION_INSTANCE = "i";
+static const char *const OPTION_CONFIG_FILE = "c";
 
 static const wxCmdLineEntryDesc cmd_line_desc[] = {
   {wxCMD_LINE_SWITCH,
@@ -64,6 +63,12 @@ static const wxCmdLineEntryDesc cmd_line_desc[] = {
    OPTION_INSTANCE,
    "instance",
    wxTRANSLATE("specify GrandOrgue instance name"),
+   wxCMD_LINE_VAL_STRING,
+   wxCMD_LINE_PARAM_OPTIONAL},
+  {wxCMD_LINE_OPTION,
+   OPTION_CONFIG_FILE,
+   "config",
+   wxTRANSLATE("specify GrandOrgue config file name"),
    wxCMD_LINE_VAL_STRING,
    wxCMD_LINE_PARAM_OPTIONAL},
   {wxCMD_LINE_SWITCH,
@@ -88,23 +93,22 @@ void GOApp::OnInitCmdLine(wxCmdLineParser &parser) {
 
 bool GOApp::OnCmdLineParsed(wxCmdLineParser &parser) {
   bool res = wxApp::OnCmdLineParsed(parser);
+  wxString str;
 
   if (res)
     m_IsGuiOnly = parser.FoundSwitch(SWITCH_GUI) == wxCMD_SWITCH_ON;
-  if (res) {
-    wxString str;
+  if (res && parser.Found(OPTION_INSTANCE, &str)) {
+    wxRegEx r(wxT("^[A-Za-z0-9]+$"), wxRE_ADVANCED);
 
-    if (parser.Found(OPTION_INSTANCE, &str)) {
-      wxRegEx r(wxT("^[A-Za-z0-9]+$"), wxRE_ADVANCED);
-
-      if (r.Matches(str))
-        m_InstanceName = wxT("-") + str;
-      else {
-        wxMessageOutput::Get()->Printf(_("Invalid instance name"));
-        res = false;
-      }
+    if (r.Matches(str))
+      m_InstanceName = std::string("-") + str.ToStdString();
+    else {
+      wxMessageOutput::Get()->Printf(_("Invalid instance name"));
+      res = false;
     }
   }
+  if (res && parser.Found(OPTION_CONFIG_FILE, &str))
+    m_ConfigFilePath = str.ToStdString();
   if (res)
     for (unsigned i = 0; i < parser.GetParamCount(); i++)
       m_FileName = parser.GetParam(i);
@@ -112,9 +116,7 @@ bool GOApp::OnCmdLineParsed(wxCmdLineParser &parser) {
 }
 
 bool GOApp::OnInit() {
-  /* wxMessageOutputStderr break wxLogStderr (fwide), therefore use MessageBox
-   * everywhere */
-  wxMessageOutput::Set(new wxMessageOutputMessageBox());
+  wxLog::SetActiveTarget(mp_TemporaryLog.get());
 
 #ifdef __WXMAC__
   /* This ensures that the executable (when it is not in the form of an OS X
@@ -147,16 +149,16 @@ bool GOApp::OnInit() {
   if (!wxApp::OnInit())
     return false;
 
-  m_config = new GOConfig(m_InstanceName);
-  m_config->Load();
+  mp_config = std::make_unique<GOConfig>(m_InstanceName, m_ConfigFilePath);
+  mp_config->Load();
 
   GOStdPath::InitLocaleDir();
-  m_locale.Init(m_config->GetLanguageId());
+  m_locale.Init(mp_config->GetLanguageId());
   m_locale.AddCatalog(wxT("GrandOrgue"));
 
-  m_soundSystem = new GOSound(*m_config);
+  mp_SoundSystem = std::make_unique<GOSoundSystem>(*mp_config);
 
-  m_Frame = new GOFrame(
+  p_frame = new GOFrame(
     *this,
     NULL,
     wxID_ANY,
@@ -165,19 +167,19 @@ bool GOApp::OnInit() {
     wxDefaultSize,
     wxMINIMIZE_BOX | wxRESIZE_BORDER | wxSYSTEM_MENU | wxCAPTION | wxCLOSE_BOX
       | wxCLIP_CHILDREN | wxFULL_REPAINT_ON_RESIZE,
-    *m_soundSystem);
-  SetTopWindow(m_Frame);
-  m_Log = new GOLog(m_Frame);
-  wxLog::SetActiveTarget(m_Log);
-  m_Frame->Init(m_FileName, m_IsGuiOnly);
+    *mp_SoundSystem);
+  SetTopWindow(p_frame);
+  mp_log = std::make_unique<GOLog>(p_frame);
+  wxLog::SetActiveTarget(mp_log.get());
+  p_frame->Init(m_FileName, m_IsGuiOnly);
 
   return true;
 }
 
 #ifdef __WXMAC__
 void GOApp::MacOpenFile(const wxString &filename) {
-  if (m_Frame)
-    m_Frame->SendLoadFile(filename);
+  if (p_frame)
+    p_frame->SendLoadFile(filename);
 }
 #endif
 
@@ -185,11 +187,11 @@ int GOApp::OnRun() { return wxApp::OnRun(); }
 
 int GOApp::OnExit() {
   wxLog::FlushActive();
-  wxLog::SetActiveTarget(NULL);
+  wxLog::SetActiveTarget(nullptr);
 
   int rc = wxApp::OnExit();
 
-  if (m_Restart) {
+  if (m_IsToRestartAfterExit) {
     wchar_t **cmdargs(argv);
 
     wxExecute(cmdargs);
@@ -200,21 +202,9 @@ int GOApp::OnExit() {
 void GOApp::CleanUp() {
   // Ensure that GOFrame and other objects are destroyed before deleting
   wxApp::CleanUp();
-
-  // CleanUp() may be called even if OnInit() has not succeed, so we need to
-  // check
-  if (m_soundSystem) {
-    delete m_soundSystem;
-    m_soundSystem = nullptr;
-  }
-  if (m_config) {
-    delete m_config;
-    m_config = nullptr;
-  }
-  if (m_Log) {
-    delete m_Log;
-    m_Log = nullptr;
-  }
+  // CleanUp() may be called even if OnInit() has not succeed, so unique_ptr
+  // reset() is safe to call even if the objects were never created
+  mp_SoundSystem.reset();
+  mp_config.reset();
+  mp_log.reset();
 }
-
-void GOApp::SetRestart() { m_Restart = true; }

@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -41,10 +41,10 @@ GOGUIPanelWidget::GOGUIPanelWidget(
   : wxPanel(parent, id),
     m_panel(panel),
     m_BGInit(false),
-    m_Background(&m_BGImage),
     m_Scale(1),
     m_FontScale(1),
     m_PressedPoint(default_point) {
+  m_Background.SetSourceImage(&m_BGImage);
   initFont();
   SetLabel(m_panel->GetName());
   m_ClientBitmap.Create(
@@ -52,7 +52,7 @@ GOGUIPanelWidget::GOGUIPanelWidget(
   m_panel->PrepareDraw(m_Scale, NULL);
   OnUpdate();
   m_BGImage = m_ClientBitmap.ConvertToImage();
-  m_Background.PrepareBitmap(m_Scale, wxRect(0, 0, 0, 0), NULL);
+  m_Background.BuildScaledBitmap(m_Scale, wxRect(0, 0, 0, 0), NULL);
   m_BGInit = true;
   SetCanFocus(true);
 }

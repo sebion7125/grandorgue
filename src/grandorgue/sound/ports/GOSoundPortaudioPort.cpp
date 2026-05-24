@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -11,6 +11,7 @@
 #include <wx/regex.h>
 
 #include "config/GODeviceNamePattern.h"
+#include "sound/buffer/GOSoundBufferMutable.h"
 
 const wxString GOSoundPortaudioPort::PORT_NAME = wxT("PortAudio");
 const wxString GOSoundPortaudioPort::PORT_NAME_OLD = wxT("Pa");
@@ -37,7 +38,7 @@ wxString GOSoundPortaudioPort::getLastError(PaError error) {
 }
 
 GOSoundPortaudioPort::GOSoundPortaudioPort(
-  GOSound *sound, unsigned paDevIndex, const wxString &name)
+  GOSoundSystem *sound, unsigned paDevIndex, const wxString &name)
   : GOSoundPort(sound, name), m_PaDevIndex(paDevIndex), m_stream(nullptr) {}
 
 GOSoundPortaudioPort::~GOSoundPortaudioPort() { Close(); }
@@ -114,10 +115,10 @@ int GOSoundPortaudioPort::Callback(
   PaStreamCallbackFlags statusFlags,
   void *userData) {
   GOSoundPortaudioPort *port = (GOSoundPortaudioPort *)userData;
-  if (port->AudioCallback((float *)output, frameCount))
-    return paContinue;
-  else
-    return paAbort;
+  GOSoundBufferMutable outputBuffer(
+    (float *)output, port->m_Channels, frameCount);
+
+  return port->AudioCallback(outputBuffer) ? paContinue : paAbort;
 }
 
 // for compatibility with old settings
@@ -146,7 +147,7 @@ void GOSoundPortaudioPort::terminate() {
 
 GOSoundPort *GOSoundPortaudioPort::create(
   const GOPortsConfig &portsConfig,
-  GOSound *sound,
+  GOSoundSystem *sound,
   GODeviceNamePattern &pattern) {
   GOSoundPort *pPort = nullptr;
 

@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -19,7 +19,7 @@
 #include "midi/objects/GOMidiObjectContext.h"
 
 #include "GOEvent.h"
-#include "GOMidi.h"
+#include "GOMidiSystem.h"
 #include "GOOrganController.h"
 #include "go_path.h"
 
@@ -104,7 +104,7 @@ void GOMidiRecorder::ButtonStateChanged(int id, bool newState) {
 }
 
 void GOMidiRecorder::SetOutputDevice(const wxString &device_id) {
-  m_OutputDevice = m_Map.GetDeviceIdByLogicalName(device_id);
+  m_OutputDevice = m_Map.EnsureLogicalName(device_id);
 }
 
 void GOMidiRecorder::SendEvent(GOMidiEvent &e) {
@@ -133,8 +133,8 @@ void GOMidiRecorder::PreconfigureMapping(const wxString &element, bool isNRPN) {
 
 void GOMidiRecorder::PreconfigureMapping(
   const wxString &element, bool isNRPN, const wxString &reference) {
-  unsigned id = m_Map.GetElementByString(element);
-  unsigned ref = m_Map.GetElementByString(reference);
+  unsigned id = m_Map.EnsureRecorderElementName(element);
+  unsigned ref = m_Map.EnsureRecorderElementName(reference);
   for (unsigned i = 0; i < m_Preconfig.size(); i++)
     if (m_Preconfig[i].elementID == ref) {
       GOMidiEvent e1;

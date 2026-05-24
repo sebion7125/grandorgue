@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -8,30 +8,34 @@
 #ifndef GOMIDIEVENTPATTERN_H
 #define GOMIDIEVENTPATTERN_H
 
+#include <cstdint>
+
 #include "GOStringSet.h"
 
 namespace YAML {
 class Node;
 };
 
+class GOConfigReader;
+class GOConfigWriter;
 class GOMidiMap;
 
 struct GOMidiEventPattern {
   enum { MIN_VALUE = 0, MAX_VALUE = 127 };
 
-  unsigned deviceId;
-  int channel;
-  int key;
-  int low_value;
-  int high_value;
+  uint16_t deviceId;
+  int8_t channel;
+  int32_t key;        // Some MIDI events ex SysEx may have up to 21 bits
+  int32_t low_value;  // Some MIDI events ex SysEx may haveup to 32 bits
+  int32_t high_value; // Some MIDI events ex SysEx may haveup to 32 bits
   bool useNoteOff;
 
   GOMidiEventPattern(
-    unsigned uDeviceId,
-    int iChannel,
-    int iKey,
-    int iLowValue = 0,
-    int iHighValue = 0,
+    uint_fast16_t uDeviceId,
+    int_fast8_t iChannel,
+    int_fast32_t iKey,
+    int_fast32_t iLowValue = 0,
+    int_fast32_t iHighValue = 0,
     bool iUseNoteOff = true)
     : deviceId(uDeviceId),
       channel(iChannel),
@@ -43,6 +47,40 @@ struct GOMidiEventPattern {
   virtual bool IsEmpty() const = 0;
 
   bool operator==(const GOMidiEventPattern &other) const;
+
+  /**
+   * Search the device name in the map and put it's id to deviceId. If the
+   * device is not yet in the map, add it automatically and put a warning
+   * message
+   * @param msgContext a string to put into the warning message
+   * @param deviceName a device name to search
+   * @param map a GOMidiMap instance with the MIDI device list
+   */
+  void FillDeviceId(
+    const wxString &msgContext, const wxString &deviceName, GOMidiMap &map);
+
+  /**
+   * Read deviceId from the ConfigReader
+   * @param cfg - a source ConfigReader
+   * @param group - the configuration section
+   * @param keykeyPrefix - the configuration key prefix
+   * @param patternIndex - the pattern index used to calculate the final
+   *   configuration key
+   * @param map a GOMidiMap instance with the MIDI device list
+   */
+  void LoadDeviceId(
+    GOConfigReader &cfg,
+    const wxString &group,
+    const wxString &keyPrefix,
+    unsigned patternIndex,
+    GOMidiMap &map);
+
+  void SaveDeviceId(
+    GOConfigWriter &cfg,
+    const wxString &group,
+    const wxString &keyPrefix,
+    unsigned patternIndex,
+    const GOMidiMap &map) const;
 
   void DeviceIdToYaml(YAML::Node &eventNode, const GOMidiMap &map) const;
   void DeviceIdFromYaml(
@@ -63,7 +101,11 @@ struct GOMidiEventPattern {
    * @return the destination value
    **/
   static int convertValueBetweenRanges(
-    int srcValue, int srcLow, int srcHigh, int dstLow, int dstHigh);
+    int_fast8_t srcValue,
+    int_fast8_t srcLow,
+    int_fast8_t srcHigh,
+    int_fast8_t dstLow,
+    int_fast8_t dstHigh);
 };
 
 #endif /* GOMIDIEVENTPATTERN_H */

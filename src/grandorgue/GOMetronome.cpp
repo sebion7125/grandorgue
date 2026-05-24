@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -82,10 +82,38 @@ GOMetronome::GOMetronome(GOOrganController *organController)
     m_rank(NULL),
     m_StopID(0) {
   CreateButtons(*m_OrganController, BUTTON_DEFS);
-  m_OrganController->RegisterSoundStateHandler(this);
+  m_OrganController->RegisterLifecycleListener(this);
 }
 
 GOMetronome::~GOMetronome() { StopTimer(); }
+
+static const wxString WX_EMPTY_STRING;
+static const wxString WX_BELL_BEAT_PATH = wxT("sounds\\metronome\\beat.wv");
+static const wxString WX_BELL_FIRST_BEAT_PATH
+  = wxT("sounds\\metronome\\first_beat.wv");
+static const wxString WX_CLICK_BEAT_PATH
+  = wxT("sounds\\metronome\\click-beat.wv");
+static const wxString WX_CLICK_FIRST_BEAT_PATH
+  = wxT("sounds\\metronome\\click-first-beat.wv");
+
+const wxString &GOMetronome::GetSampleFilePath(bool isFirst) {
+  const GOConfig &config = m_OrganController->GetConfig();
+  const wxString *pPath = &WX_EMPTY_STRING;
+
+  switch (config.m_MetromomeSound()) {
+  case GOConfig::METRONOME_SOUND_BELL:
+    pPath = isFirst ? &WX_BELL_FIRST_BEAT_PATH : &WX_BELL_BEAT_PATH;
+    break;
+  case GOConfig::METRONOME_SOUND_CLICK:
+    pPath = isFirst ? &WX_CLICK_FIRST_BEAT_PATH : &WX_CLICK_BEAT_PATH;
+    break;
+  case GOConfig::METRONOME_SOUND_CUSTOM:
+    pPath
+      = isFirst ? &config.m_MetronomeFirstBeat() : &config.m_MetronomeBeat();
+    break;
+  }
+  return *pPath;
+}
 
 void GOMetronome::Load(GOConfigReader &cfg) {
   m_group = wxT("Metronome");
@@ -132,19 +160,15 @@ void GOMetronome::Load(GOConfigReader &cfg) {
   m_OrganController->AddRank(m_rank);
 
   GOSoundingPipe *pipe;
+
   pipe = new GOSoundingPipe(
     m_OrganController, m_rank, windchestN, 36, 8, 100, 100, false);
   m_rank->AddPipe(pipe);
-  pipe->Init(
-    cfg, wxT("MetronomSounds"), wxT("A"), wxT("sounds\\metronome\\beat.wv"));
+  pipe->Init(cfg, wxT("MetronomSounds"), wxT("A"), GetSampleFilePath(false));
   pipe = new GOSoundingPipe(
     m_OrganController, m_rank, windchestN, 37, 8, 100, 100, false);
   m_rank->AddPipe(pipe);
-  pipe->Init(
-    cfg,
-    wxT("MetronomSounds"),
-    wxT("B"),
-    wxT("sounds\\metronome\\first_beat.wv"));
+  pipe->Init(cfg, wxT("MetronomSounds"), wxT("B"), GetSampleFilePath(true));
 }
 
 void GOMetronome::Save(GOConfigWriter &cfg) {
@@ -235,8 +259,8 @@ void GOMetronome::HandleTimer() {
     type = 0;
   else
     type = 1;
-  m_rank->SetKey(type, 0x7f, m_StopID);
-  m_rank->SetKey(type, 0, m_StopID);
+  m_rank->SetPipeState(type, 0x7f, m_StopID);
+  m_rank->SetPipeState(type, 0, m_StopID);
 
   m_Pos++;
   if (m_Pos >= m_MeasureLength)

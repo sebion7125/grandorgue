@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -43,14 +43,15 @@ void GOGUIEnclosure::Init(GOConfigReader &cfg, wxString group) {
   for (unsigned i = 1; i <= bitmap_count; i++) {
     wxString bitmap = wxString::Format(
       wxT(GOBitmapPrefix "enclosure%c%02d"), wxT('B'), i - 1);
-    wxString mask = wxEmptyString;
-    m_Bitmaps.push_back(m_panel->LoadBitmap(bitmap, mask));
+
+    m_Bitmaps.emplace_back();
+    m_Bitmaps.back().SetSourceImage(m_panel->LoadImage(bitmap, wxEmptyString));
   }
 
   for (unsigned i = 1; i < m_Bitmaps.size(); i++)
     if (
-      m_Bitmaps[0].GetWidth() != m_Bitmaps[i].GetWidth()
-      || m_Bitmaps[0].GetHeight() != m_Bitmaps[i].GetHeight())
+      m_Bitmaps[0].GetSourceWidth() != m_Bitmaps[i].GetSourceWidth()
+      || m_Bitmaps[0].GetSourceHeight() != m_Bitmaps[i].GetSourceHeight())
       throw wxString::Format(
         _("bitmap size does not match for '%s'"), group.c_str());
 
@@ -58,8 +59,8 @@ void GOGUIEnclosure::Init(GOConfigReader &cfg, wxString group) {
 
   x = -1;
   y = -1;
-  w = m_Bitmaps[0].GetWidth();
-  h = m_Bitmaps[0].GetHeight();
+  w = m_Bitmaps[0].GetSourceWidth();
+  h = m_Bitmaps[0].GetSourceHeight();
   m_BoundingRect = wxRect(x, y, w, h);
 
   m_TileOffsetX = 0;
@@ -119,13 +120,14 @@ void GOGUIEnclosure::Load(GOConfigReader &cfg, wxString group) {
       wxString::Format(wxT("Mask%03d"), i),
       false,
       wxEmptyString);
-    m_Bitmaps.push_back(m_panel->LoadBitmap(bitmap, mask));
+    m_Bitmaps.emplace_back();
+    m_Bitmaps.back().SetSourceImage(m_panel->LoadImage(bitmap, mask));
   }
 
   for (unsigned i = 1; i < m_Bitmaps.size(); i++)
     if (
-      m_Bitmaps[0].GetWidth() != m_Bitmaps[i].GetWidth()
-      || m_Bitmaps[0].GetHeight() != m_Bitmaps[i].GetHeight())
+      m_Bitmaps[0].GetSourceWidth() != m_Bitmaps[i].GetSourceWidth()
+      || m_Bitmaps[0].GetSourceHeight() != m_Bitmaps[i].GetSourceHeight())
       throw wxString::Format(
         _("bitmap size does not match for '%s'"), group.c_str());
 
@@ -154,7 +156,7 @@ void GOGUIEnclosure::Load(GOConfigReader &cfg, wxString group) {
     1,
     m_metrics->GetScreenWidth(),
     false,
-    m_Bitmaps[0].GetWidth());
+    m_Bitmaps[0].GetSourceWidth());
   h = cfg.ReadInteger(
     ODFSetting,
     group,
@@ -162,7 +164,7 @@ void GOGUIEnclosure::Load(GOConfigReader &cfg, wxString group) {
     1,
     m_metrics->GetScreenHeight(),
     false,
-    m_Bitmaps[0].GetHeight());
+    m_Bitmaps[0].GetSourceHeight());
   m_BoundingRect = wxRect(x, y, w, h);
 
   m_TileOffsetX = cfg.ReadInteger(
@@ -170,7 +172,7 @@ void GOGUIEnclosure::Load(GOConfigReader &cfg, wxString group) {
     group,
     wxT("TileOffsetX"),
     0,
-    m_Bitmaps[0].GetWidth() - 1,
+    m_Bitmaps[0].GetSourceWidth() - 1,
     false,
     0);
   m_TileOffsetY = cfg.ReadInteger(
@@ -178,7 +180,7 @@ void GOGUIEnclosure::Load(GOConfigReader &cfg, wxString group) {
     group,
     wxT("TileOffsetY"),
     0,
-    m_Bitmaps[0].GetHeight() - 1,
+    m_Bitmaps[0].GetSourceHeight() - 1,
     false,
     0);
 
@@ -300,7 +302,7 @@ void GOGUIEnclosure::Layout() {
 
 void GOGUIEnclosure::PrepareDraw(double scale, GOBitmap *background) {
   for (unsigned i = 0; i < m_Bitmaps.size(); i++)
-    m_Bitmaps[i].PrepareTileBitmap(
+    m_Bitmaps[i].BuildTileBitmap(
       scale, m_BoundingRect, m_TileOffsetX, m_TileOffsetY, background);
 }
 

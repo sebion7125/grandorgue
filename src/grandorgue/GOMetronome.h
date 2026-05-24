@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -10,7 +10,7 @@
 
 #include "control/GOElementCreator.h"
 #include "control/GOLabelControl.h"
-#include "sound/GOSoundStateHandler.h"
+#include "model/GOOrganLifecycleListener.h"
 
 #include "GOSaveableObject.h"
 #include "GOTimerCallback.h"
@@ -20,7 +20,7 @@ class GORank;
 class GOOrganController;
 
 class GOMetronome : private GOTimerCallback,
-                    private GOSoundStateHandler,
+                    private GOOrganLifecycleListener,
                     private GOSaveableObject,
                     public GOElementCreator {
 public:
@@ -45,6 +45,8 @@ private:
   GOLabelControl m_MeasureDisplay;
   GORank *m_rank;
   unsigned m_StopID;
+
+  const wxString &GetSampleFilePath(bool isFirst);
 
   void HandleTimer() override;
 

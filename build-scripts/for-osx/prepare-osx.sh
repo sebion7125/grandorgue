@@ -4,13 +4,18 @@ set -e
 
 brew install pkg-config || true
 brew link --overwrite pkg-config
+
+# install cmake if it has not yet been installed
+cmake --version || brew install cmake
+
 brew install \
-  cmake \
+  docbook \
   docbook-xsl \
   fftw wavpack \
   gettext \
   imagemagick \
   jack \
+  librsvg \
   wxwidgets \
   yaml-cpp
 brew link gettext --force

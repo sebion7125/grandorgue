@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2023 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -28,8 +28,8 @@ void GOGUIHW1Background::Layout() {
 
   rect = wxRect(0, 0, m_layout->GetCenterX(), m_metrics->GetScreenHeight());
   if (is_rect_valid(rect))
-    m_Images.push_back(GOBackgroundImage(
-      rect, m_panel->GetWood(m_metrics->GetDrawstopBackgroundImageNum())));
+    m_Images.emplace_back(
+      rect, m_panel->GetWoodImage(m_metrics->GetDrawstopBackgroundImageNum()));
   rect = wxRect(
     m_layout->GetCenterX() + m_layout->GetCenterWidth(),
     0,
@@ -37,16 +37,16 @@ void GOGUIHW1Background::Layout() {
       - (m_layout->GetCenterX() + m_layout->GetCenterWidth()),
     m_metrics->GetScreenHeight());
   if (is_rect_valid(rect))
-    m_Images.push_back(GOBackgroundImage(
-      rect, m_panel->GetWood(m_metrics->GetDrawstopBackgroundImageNum())));
+    m_Images.emplace_back(
+      rect, m_panel->GetWoodImage(m_metrics->GetDrawstopBackgroundImageNum()));
   rect = wxRect(
     m_layout->GetCenterX(),
     0,
     m_layout->GetCenterWidth(),
     m_metrics->GetScreenHeight());
   if (is_rect_valid(rect))
-    m_Images.push_back(GOBackgroundImage(
-      rect, m_panel->GetWood(m_metrics->GetConsoleBackgroundImageNum())));
+    m_Images.emplace_back(
+      rect, m_panel->GetWoodImage(m_metrics->GetConsoleBackgroundImageNum()));
 
   if (m_metrics->HasPairDrawstopCols()) {
     for (unsigned i = 0; i < (m_metrics->NumberOfDrawstopColsToDisplay() >> 2);
@@ -58,9 +58,10 @@ void GOGUIHW1Background::Layout() {
         2 * m_metrics->GetDrawstopWidth() + 10,
         m_layout->GetJambLeftRightHeight());
       if (is_rect_valid(rect))
-        m_Images.push_back(GOBackgroundImage(
+        m_Images.emplace_back(
           rect,
-          m_panel->GetWood(m_metrics->GetDrawstopInsetBackgroundImageNum())));
+          m_panel->GetWoodImage(
+            m_metrics->GetDrawstopInsetBackgroundImageNum()));
       rect = wxRect(
         i * (2 * m_metrics->GetDrawstopWidth() + 18) + m_layout->GetJambRightX()
           - 5,
@@ -68,9 +69,10 @@ void GOGUIHW1Background::Layout() {
         2 * m_metrics->GetDrawstopWidth() + 10,
         m_layout->GetJambLeftRightHeight());
       if (is_rect_valid(rect))
-        m_Images.push_back(GOBackgroundImage(
+        m_Images.emplace_back(
           rect,
-          m_panel->GetWood(m_metrics->GetDrawstopInsetBackgroundImageNum())));
+          m_panel->GetWoodImage(
+            m_metrics->GetDrawstopInsetBackgroundImageNum()));
     }
   }
 
@@ -81,8 +83,8 @@ void GOGUIHW1Background::Layout() {
       m_layout->GetCenterWidth(),
       8);
     if (is_rect_valid(rect))
-      m_Images.push_back(GOBackgroundImage(
-        rect, m_panel->GetWood(m_metrics->GetKeyVertBackgroundImageNum())));
+      m_Images.emplace_back(
+        rect, m_panel->GetWoodImage(m_metrics->GetKeyVertBackgroundImageNum()));
   }
 
   if (m_layout->GetJambTopHeight() + m_layout->GetPistonTopHeight()) {
@@ -92,15 +94,15 @@ void GOGUIHW1Background::Layout() {
       m_layout->GetCenterWidth(),
       m_layout->GetJambTopHeight() + m_layout->GetPistonTopHeight());
     if (is_rect_valid(rect))
-      m_Images.push_back(GOBackgroundImage(
-        rect, m_panel->GetWood(m_metrics->GetKeyHorizBackgroundImageNum())));
+      m_Images.emplace_back(
+        rect,
+        m_panel->GetWoodImage(m_metrics->GetKeyHorizBackgroundImageNum()));
   }
 }
 
 void GOGUIHW1Background::PrepareDraw(double scale, GOBitmap *background) {
   for (unsigned i = 0; i < m_Images.size(); i++)
-    m_Images[i].bmp.PrepareTileBitmap(
-      scale, m_Images[i].rect, 0, 0, background);
+    m_Images[i].bmp.BuildTileBitmap(scale, m_Images[i].rect, 0, 0, background);
 }
 
 void GOGUIHW1Background::Draw(GODC &dc) {

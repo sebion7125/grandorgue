@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -77,18 +77,18 @@ void GOGUIButton::Init(
   on_mask_file = wxEmptyString;
   off_mask_file = on_mask_file;
 
-  m_OnBitmap = m_panel->LoadBitmap(on_file, on_mask_file);
-  m_OffBitmap = m_panel->LoadBitmap(off_file, off_mask_file);
+  m_OnBitmap.SetSourceImage(m_panel->LoadImage(on_file, on_mask_file));
+  m_OffBitmap.SetSourceImage(m_panel->LoadImage(off_file, off_mask_file));
 
   x = -1;
   y = -1;
-  w = m_OnBitmap.GetWidth();
-  h = m_OnBitmap.GetHeight();
+  w = m_OnBitmap.GetSourceWidth();
+  h = m_OnBitmap.GetSourceHeight();
   m_BoundingRect = wxRect(x, y, w, h);
 
   if (
-    m_OnBitmap.GetWidth() != m_OffBitmap.GetWidth()
-    || m_OnBitmap.GetHeight() != m_OffBitmap.GetHeight())
+    m_OnBitmap.GetSourceWidth() != m_OffBitmap.GetSourceWidth()
+    || m_OnBitmap.GetSourceHeight() != m_OffBitmap.GetSourceHeight())
     throw wxString::Format(
       _("bitmap size does not match for '%s'"), group.c_str());
 
@@ -207,8 +207,8 @@ void GOGUIButton::Load(GOConfigReader &cfg, wxString group) {
   off_mask_file = cfg.ReadStringTrim(
     ODFSetting, group, wxT("MaskOff"), false, on_mask_file);
 
-  m_OnBitmap = m_panel->LoadBitmap(on_file, on_mask_file);
-  m_OffBitmap = m_panel->LoadBitmap(off_file, off_mask_file);
+  m_OnBitmap.SetSourceImage(m_panel->LoadImage(on_file, on_mask_file));
+  m_OffBitmap.SetSourceImage(m_panel->LoadImage(off_file, off_mask_file));
 
   x = cfg.ReadInteger(
     ODFSetting,
@@ -233,7 +233,7 @@ void GOGUIButton::Load(GOConfigReader &cfg, wxString group) {
     1,
     m_metrics->GetScreenWidth(),
     false,
-    m_OnBitmap.GetWidth());
+    m_OnBitmap.GetSourceWidth());
   h = cfg.ReadInteger(
     ODFSetting,
     group,
@@ -241,12 +241,12 @@ void GOGUIButton::Load(GOConfigReader &cfg, wxString group) {
     1,
     m_metrics->GetScreenHeight(),
     false,
-    m_OnBitmap.GetHeight());
+    m_OnBitmap.GetSourceHeight());
   m_BoundingRect = wxRect(x, y, w, h);
 
   if (
-    m_OnBitmap.GetWidth() != m_OffBitmap.GetWidth()
-    || m_OnBitmap.GetHeight() != m_OffBitmap.GetHeight())
+    m_OnBitmap.GetSourceWidth() != m_OffBitmap.GetSourceWidth()
+    || m_OnBitmap.GetSourceHeight() != m_OffBitmap.GetSourceHeight())
     throw wxString::Format(
       _("bitmap size does not match for '%s'"), group.c_str());
 
@@ -255,7 +255,7 @@ void GOGUIButton::Load(GOConfigReader &cfg, wxString group) {
     group,
     wxT("TileOffsetX"),
     0,
-    m_OnBitmap.GetWidth() - 1,
+    m_OnBitmap.GetSourceWidth() - 1,
     false,
     0);
   m_TileOffsetY = cfg.ReadInteger(
@@ -263,7 +263,7 @@ void GOGUIButton::Load(GOConfigReader &cfg, wxString group) {
     group,
     wxT("TileOffsetY"),
     0,
-    m_OnBitmap.GetHeight() - 1,
+    m_OnBitmap.GetSourceHeight() - 1,
     false,
     0);
 
@@ -402,9 +402,9 @@ bool GOGUIButton::HandleMousePress(
 }
 
 void GOGUIButton::PrepareDraw(double scale, GOBitmap *background) {
-  m_OnBitmap.PrepareTileBitmap(
+  m_OnBitmap.BuildTileBitmap(
     scale, m_BoundingRect, m_TileOffsetX, m_TileOffsetY, background);
-  m_OffBitmap.PrepareTileBitmap(
+  m_OffBitmap.BuildTileBitmap(
     scale, m_BoundingRect, m_TileOffsetX, m_TileOffsetY, background);
 }
 
