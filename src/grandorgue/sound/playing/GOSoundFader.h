@@ -119,7 +119,7 @@ private:
   // runtime dump guard: set true after a single runtime trace has been emitted
   bool                      m_RuntimeDumpDone = false;
 
-  // Nichtlinearer Fader in die Ausgabe akkumulieren (interner Helfer).
+  // Non-linear fader: accumulate into output (internal helper).
   void ProcessNonLinearFadeAndAccumulate(unsigned nFrames,
                                          const float* in, float* out,
                                          float externalVolume);
@@ -185,10 +185,10 @@ public:
 
   void Process(unsigned nFrames, float *buffer, float externalVolume);
 
-  // Fused-Variante: skaliert und akkumuliert in einem Pass in den Output.
-  // Verändert 'in' NICHT. 'out' wird um (in * gain(t)) erhöht.
-  // Entspricht semantisch: Process(n, temp, extVol) + for(...) out += temp
-  // – nur eben in einem Loop (perf).
+  // Fused variant: scales and accumulates into output in a single pass.
+  // Does NOT modify 'in'. 'out' is incremented by (in * gain(t)).
+  // Semantically equivalent to: Process(n, temp, extVol) + for(...) out += temp
+  // — but in a single loop (perf).
   void ProcessAndAccumulate(unsigned nFrames,
                             const float* in, float* out,
                             float externalVolume);

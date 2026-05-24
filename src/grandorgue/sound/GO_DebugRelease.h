@@ -1,7 +1,7 @@
 #pragma once
 
-// === EIN / AUS Schalter ===
-#define ENABLE_CHAMADE_DEBUG  0   // 1 = an, 0 = aus
+// === ON / OFF switch ===
+#define ENABLE_CHAMADE_DEBUG  0   // 1 = on, 0 = off
 
 #if ENABLE_CHAMADE_DEBUG
   #include <wx/log.h>
