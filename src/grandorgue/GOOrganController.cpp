@@ -399,10 +399,9 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
       } else {
         wxString __panelLog = wxString::Format("Progress: Loading panel \"%s\" (%u/%u)", m_panels[m_panels.size() - 1]->GetName().c_str(), (unsigned)m_panels.size(), totalPanels);
         LOG_GUI_GAP("%s", __panelLog);
-        wxLog::FlushActive();
       }
     }
-    
+
     __tim_panels_ms = __sw_panels.Time();
     { wxString __log = wxString::Format("GUI.Panels.Load total_ms=%ld panels=%u", __go_panelsload_sw.Time(), (unsigned)m_panels.size()); LOG_GUI_GAP("%s", __log); }
   }
@@ -432,7 +431,6 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
       } else {
         wxString __panelLog = wxString::Format("Progress: Loading panel \"%s\" (%u/%u)", m_panels[m_panels.size() - 1]->GetName().c_str(), (unsigned)m_panels.size(), totalPanels);
         LOG_GUI_GAP("%s", __panelLog);
-        wxLog::FlushActive();
       }
     }
 
@@ -882,7 +880,6 @@ wxString GOOrganController::Load(
                   "Timing: Cache.byTitle[%d] title=\"%s\" count=%u total_ms=%lld avg_ms=%.2f",
                   i + 1, it.first.c_str(), it.second.count, it.second.total_ms, avg); LOG_TIMING("%s", __log); }
               }
-              wxLog::FlushActive();
             }
           }
 
@@ -1029,7 +1026,6 @@ wxString GOOrganController::Load(
   // raw ms values as requested
   { wxString __log2 = wxString::Format("Timing: Measured parse=%lld cmb=%lld ranks=%lld modelrest=%lld panels=%lld cache=%lld ms",
     __tim_parse_ms, __tim_cmb_ms, __tim_ranks_ms, __tim_modelrest_ms, __tim_panels_ms, __tim_cache_ms); LOG_TIMING("%s", __log2); }
-  wxLog::FlushActive();
 
   dummy.free();
   m_FileStore.CloseArchives();

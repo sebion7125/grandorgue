@@ -18,7 +18,7 @@
 #cmakedefine GO_GUI_GAP_TRACER
 
 #ifdef GO_PROFILE_ODFLOAD
-# define LOG_TIMING(...) wxLogMessage(__VA_ARGS__)
+# define LOG_TIMING(...) do { wxLogMessage(__VA_ARGS__); wxLog::FlushActive(); } while(0)
 #else
 # define LOG_TIMING(...) do{}while(0)
 #endif
