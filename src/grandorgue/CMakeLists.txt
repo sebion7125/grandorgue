@@ -234,6 +234,7 @@ sound/GOSoundDevInfo.cpp
 sound/GOSoundOrganEngine.cpp
 sound/GOSoundRecorder.cpp
 sound/GOSoundSystem.cpp
+sound/GO_Attack_Parameters.cpp
 updater/GOUpdateChecker.cpp
 yaml/GOSaveableToYaml.cpp
 yaml/GOYamlModel.cpp
