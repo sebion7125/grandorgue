@@ -88,7 +88,7 @@ jobs:
         BUILD_VERSION=`echo $GIT_VERSION | cut -d- -f2-3 --output-delimiter=.`
         GIT_CHANGE_NUM=`echo $GIT_VERSION | cut -d- -f3`
         if [[ -n "$GIT_CHANGE_NUM" ]] || [[ "$BUILD_VERSION" < "1" ]]; then
-          RELEASE_FLAG=ON
+          RELEASE_FLAG=OFF
         else
           RELEASE_FLAG=ON
         fi
