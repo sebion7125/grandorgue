@@ -22,14 +22,16 @@
 #include "GOSoundCompressionCache.h"
 #include "GOSoundReleaseAlignTable.h"
 #include "GOSoundResample.h"
+#include "../GOCrossfadeParam.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-// maximal readahead is necessary for polyphase resampling
+ // maximal readahead is necessary for polyphase resampling
 static constexpr unsigned MAX_READAHEAD = GOSoundResample::POLYPHASE_POINTS;
 static constexpr unsigned DEFAULT_END_SEG_LENGTH = MAX_READAHEAD * 2;
+static constexpr bool kForceLegacyLoopCrossfade = true; // when true, cached loop crossfades keep legacy cosine method
 
 const unsigned GOSoundAudioSection::getMaxReadAhead() { return MAX_READAHEAD; }
 
@@ -296,14 +298,37 @@ void GOSoundAudioSection::DoCrossfade(
   unsigned length) {
   for (; dest_offset < length; dest_offset += loop_length)
     for (unsigned pos = 0; pos < fade_length; pos++) {
-      float factor = (cos(M_PI * (pos + 0.5) / fade_length) + 1.0) * 0.5;
+      // t in [0,1] for the crossfade position
+      float t = float(pos + 0.5f) / float(fade_length);
+      if (t < 0.0f)
+        t = 0.0f;
+      else if (t > 1.0f)
+        t = 1.0f;
 
-      for (uint8_t j = 0; j < m_channels; j++) {
-        float val1 = GetSampleData(dest, pos + dest_offset, j);
-        float val2 = GetSampleData(src, pos + src_offset, j);
-        float result = val1 * factor + val2 * (1 - factor);
+      if (kForceLegacyLoopCrossfade) {
+        // legacy behaviour used for cached loop crossfades: cosine-based factor
+        float factor = (cos(M_PI * (pos + 0.5) / fade_length) + 1.0) * 0.5;
 
-        SetSampleData(dest, pos + dest_offset, j, (int)result);
+        for (uint8_t j = 0; j < m_channels; j++) {
+          float val1 = GetSampleData(dest, pos + dest_offset, j);
+          float val2 = GetSampleData(src, pos + src_offset, j);
+          float result = val1 * factor + val2 * (1.0f - factor);
+
+          SetSampleData(dest, pos + dest_offset, j, (int)result);
+        }
+      } else {
+        // runtime-configurable crossfade (uses current mode). kept ready for future switching.
+        using namespace GOAudioParams;
+        const auto mode = GetCrossfadeMode();
+        const auto g = go_crossfade_eval(mode, t);
+
+        for (uint8_t j = 0; j < m_channels; j++) {
+          float val1 = GetSampleData(dest, pos + dest_offset, j);
+          float val2 = GetSampleData(src, pos + src_offset, j);
+          float result = g.a * val1 + g.b * val2;
+
+          SetSampleData(dest, pos + dest_offset, j, (int)result);
+        }
       }
     }
 }

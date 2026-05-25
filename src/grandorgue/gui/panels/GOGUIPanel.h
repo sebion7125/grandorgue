@@ -10,6 +10,7 @@
 
 #include <wx/gdicmn.h>
 #include <wx/string.h>
+#include <memory>
 
 #include "ptrvector.h"
 
@@ -79,6 +80,17 @@ public:
     wxString name,
     wxString group,
     wxString group_name = wxT(""));
+  struct LoadSnapshot {
+    wxString group;
+    bool is_main_panel;
+    unsigned NumberOfImages;
+    unsigned NumberOfGUIElements;
+    unsigned NumberOfLabels;
+    unsigned NumberOfManuals;
+  };
+  std::shared_ptr<LoadSnapshot> CreateLoadSnapshot(GOConfigReader &cfg, const wxString &group);
+  void LoadFromSnapshot(std::shared_ptr<LoadSnapshot> snap);
+
   void Load(GOConfigReader &cfg, const wxString &group) override;
   void Layout();
 

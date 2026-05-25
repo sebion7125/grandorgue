@@ -1,0 +1,9 @@
+{
+"ccls.launch": false,
+"C_Cpp.intelliSenseEngine": "disabled",
+"clangd.arguments": [
+  "--compile-commands-dir=build/win64" 
+],
+"clangd.path": "/opt/clangd20/bin/clangd",
+"CodeGPT.apiKey": "OpenAI"
+}

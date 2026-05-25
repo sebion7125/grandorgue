@@ -11,6 +11,7 @@
 #include <wx/string.h>
 
 #include <map>
+#include <functional>
 
 class GOOpenedFile;
 
@@ -28,6 +29,11 @@ public:
   bool Read(GOOpenedFile *file);
   bool Read(wxString filename);
   wxString GetHash();
+
+  // Progress-enabled parse: reports percentage and label via onProgress
+  using ProgressFn = std::function<void(unsigned, const wxString &)>;
+  bool ReadWithProgress(
+    GOOpenedFile *file, const wxString &phaseLabel, ProgressFn onProgress);
 
   const std::map<wxString, std::map<wxString, wxString>> &GetContent();
   wxString getEntry(wxString group, wxString name);

@@ -154,6 +154,38 @@ void GOManual::Load(GOConfigReader &cfg, const wxString &group) {
     r_OrganModel.GetSwitchCount(),
     false);
 
+  // Prepare manual-local progress mapping into global model progress:
+  const unsigned firstManual = r_OrganModel.GetFirstManualIndex();
+  unsigned manualCount = 0;
+  if (r_OrganModel.GetODFManualCount() > firstManual)
+    manualCount = r_OrganModel.GetODFManualCount() - firstManual;
+  if (manualCount == 0)
+    manualCount = 1;
+  unsigned idx = m_manual_number - firstManual + 1; // 1..manualCount
+  unsigned baseStart = 70 + ((idx - 1) * 10) / manualCount;
+  unsigned baseEnd = 70 + (idx * 10) / manualCount;
+
+  // Account for heavy work inside some stops: if a Stop defines zero ranks,
+  // GOStop::Load creates a new rank and that rank will load pipes which can
+  // be costly. Add those pipe counts into the manual-local total so the
+  // manual progress slice covers this work.
+  unsigned extraPipeParts = 0;
+  for (unsigned si = 0; si < nb_stops; ++si) {
+    wxString stopGroup = wxString::Format(wxT("Stop%03d"), si + 1);
+    unsigned stopRanks = cfg.ReadInteger(
+      ODFSetting, stopGroup, wxT("NumberOfRanks"), 0, 999, false, 0);
+    if (stopRanks == 0) {
+      // When a stop has no ranks defined, GOStop::Load will create a rank
+      // using the manual's NumberOfAccessibleKeys as the pipe count.
+      extraPipeParts += m_nb_accessible_keys ? m_nb_accessible_keys : 1;
+    }
+  }
+
+  unsigned localTotalParts = nb_stops + m_ODFCouplerCount + nb_tremulants + extraPipeParts;
+  if (localTotalParts == 0)
+    localTotalParts = 1;
+  unsigned localProcessed = 0;
+
   for (unsigned i = 0; i < GOMidiReceiver::KEY_MAP_SIZE; i++)
     m_MidiKeyMap[i] = (uint8_t)cfg.ReadInteger(
       ODFSetting,
@@ -177,10 +209,51 @@ void GOManual::Load(GOConfigReader &cfg, const wxString &group) {
     buffer.Printf(
       wxT("Stop%03d"), cfg.ReadInteger(ODFSetting, group, buffer, 1, 999));
     cfg.MarkGroupInUse(buffer);
+
+    // Pre-report: announce start of this stop so UI updates before potentially
+    // heavy pStop->Load execution. Use the same manual slice mapping.
+    {
+      unsigned aboutIndex = localProcessed + 1;
+      unsigned aboutPct = baseStart + (unsigned)((uint64_t)aboutIndex * (baseEnd - baseStart) / localTotalParts);
+    r_OrganModel.ReportProgress(
+      aboutPct,
+      wxString::Format(
+        _("Building: manual %d stops (%u/%u) - starting").c_str(),
+        m_manual_number,
+        aboutIndex > nb_stops ? nb_stops : aboutIndex,
+        nb_stops));
+    }
+
+#ifdef GO_PROFILE_ODFLOAD
+    wxStopWatch __go_stopwatch;
+    __go_stopwatch.Start();
+#endif
     pStop->Load(cfg, buffer);
+#ifdef GO_PROFILE_ODFLOAD
+    {
+      long __go_ms = __go_stopwatch.Time();
+      wxLogMessage(
+        wxString::Format(
+          "Timing: GOManual %d Stop %u Load %ld ms",
+          m_manual_number,
+          localNumber,
+          __go_ms));
+    }
+#endif
     pStop->SetElementId(r_OrganModel.GetRecorderElementID(
       wxString::Format(wxT("M%dS%d"), m_manual_number, i)));
     m_stops.push_back(pStop);
+
+    // report local progress mapped into model progress window (finished this stop)
+    localProcessed++;
+    unsigned subPct = baseStart + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart) / localTotalParts);
+    r_OrganModel.ReportProgress(
+      subPct,
+      wxString::Format(
+        _("Building: manual %d stops (%u/%u)").c_str(),
+        m_manual_number,
+        localProcessed > nb_stops ? nb_stops : localProcessed,
+        nb_stops));
   }
 
   m_couplers.resize(0);
@@ -194,6 +267,16 @@ void GOManual::Load(GOConfigReader &cfg, const wxString &group) {
     m_couplers[i]->Load(cfg, buffer);
     m_couplers[i]->SetElementId(r_OrganModel.GetRecorderElementID(
       wxString::Format(wxT("M%dC%d"), m_manual_number, i)));
+    // report local progress
+    localProcessed++;
+    unsigned subPct = baseStart + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart) / localTotalParts);
+    r_OrganModel.ReportProgress(
+      subPct,
+      wxString::Format(
+        _("Building: manual %d couplers (%u/%u)").c_str(),
+        m_manual_number,
+        localProcessed > m_ODFCouplerCount ? m_ODFCouplerCount : localProcessed,
+        m_ODFCouplerCount));
   }
 
   m_tremulant_ids.resize(0);
@@ -208,6 +291,17 @@ void GOManual::Load(GOConfigReader &cfg, const wxString &group) {
           m_manual_number,
           new_id);
     m_tremulant_ids.push_back(new_id);
+
+    // report local progress
+    localProcessed++;
+    unsigned subPct = baseStart + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart) / localTotalParts);
+    r_OrganModel.ReportProgress(
+      subPct,
+      wxString::Format(
+        _("Building: manual %d tremulants (%u/%u)").c_str(),
+        m_manual_number,
+        localProcessed > nb_tremulants ? nb_tremulants : localProcessed,
+        nb_tremulants));
   }
 
   m_GlobalSwitchIds.resize(0);
@@ -241,6 +335,20 @@ void GOManual::LoadDivisionals(GOConfigReader &cfg) {
 
   m_DivisionalTemplate.InitDivisional(*this);
   m_divisionals.resize(0);
+
+  // Compute mapping for this manual into the global model progress range
+  const unsigned firstManual = r_OrganModel.GetFirstManualIndex();
+  unsigned manualCount = 0;
+  if (r_OrganModel.GetODFManualCount() > firstManual)
+    manualCount = r_OrganModel.GetODFManualCount() - firstManual;
+  if (manualCount == 0)
+    manualCount = 1;
+  unsigned idx = m_manual_number - firstManual + 1; // 1..manualCount
+  unsigned baseStart = 70 + ((idx - 1) * 10) / manualCount;
+  unsigned baseEnd = 70 + (idx * 10) / manualCount;
+
+  unsigned localTotalParts = nDivisionals ? nDivisionals : 1;
+
   for (unsigned i = 0; i < nDivisionals; i++) {
     m_divisionals.push_back(new GODivisionalButtonControl(
       r_OrganModel, m_manual_number, i, &m_MidiContextDivisionals));
@@ -251,6 +359,17 @@ void GOManual::LoadDivisionals(GOConfigReader &cfg) {
       cfg.ReadInteger(ODFSetting, m_group, buffer, 1, 999));
     cfg.MarkGroupInUse(buffer);
     m_divisionals[i]->Load(cfg, buffer);
+
+    // report divisional progress mapped to model (use same manual range)
+    unsigned partIndex = i + 1;
+    unsigned subPct = baseStart + (unsigned)((uint64_t)partIndex * (baseEnd - baseStart) / localTotalParts);
+    r_OrganModel.ReportProgress(
+      subPct,
+      wxString::Format(
+        _("Building: manual %d divisionals (%u/%u)").c_str(),
+        m_manual_number,
+        partIndex,
+        nDivisionals));
   }
 }
 

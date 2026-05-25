@@ -8,6 +8,7 @@
 #include "GOSoundOrganEngine.h"
 
 #include <algorithm>
+#include <vector>
 
 #include "buffer/GOSoundBufferMutable.h"
 #include "model/GOOrganModel.h"
@@ -24,8 +25,17 @@
 #include "tasks/GOSoundWindchestTask.h"
 #include "threading/GOMutexLocker.h"
 
+#include "GOCrossfadeParam.h"
 #include "GOEvent.h"
 #include "GOSoundRecorder.h"
+#include "GO_Attack_Parameters.h"
+#include "fast_crossfade.h"
+
+// needed for Debugging the new Release Model
+#include "GO_DebugRelease.h"
+#include "model/GORank.h"
+#include "model/GOSoundingPipe.h"
+#include <wx/log.h>
 
 GOSoundOrganEngine::GOSoundOrganEngine()
   : m_PolyphonyLimiting(true),
@@ -234,6 +244,15 @@ void GOSoundOrganEngine::Setup(
       new GOSoundWindchestTask(*this, organModel.GetWindchest(i)));
   m_TouchTask
     = std::unique_ptr<GOSoundTouchTask>(new GOSoundTouchTask(memoryPool));
+  // Precompute commonly used fast crossfade templates (ported from private
+  // HEAD). Doing this here ensures templates for typical bucket sizes exist
+  // before audio playback; the templates are also created on-demand by the
+  // fader.
+  {
+    std::vector<unsigned> _xfade_buckets = {32, 64, 128, 256, 512, 1024, 2048};
+    GOAudioParams::FastCrossfadeCache::PrecomputeForMode(
+      GOAudioParams::GetCrossfadeMode(), _xfade_buckets);
+  }
   m_HasBeenSetup.store(true);
   Reset();
 }
@@ -291,12 +310,24 @@ bool GOSoundOrganEngine::ProcessSampler(
   const bool process_sampler = (sampler->time <= m_CurrentTime);
 
   if (process_sampler) {
+    // panic mode load dropping, if Soft limit gets exeeded
     if (sampler->is_release &&
         ((m_PolyphonyLimiting &&
           m_SamplerPool.UsedSamplerCount() >= m_PolyphonySoftLimit &&
-          m_CurrentTime - sampler->time > 172 * 16) ||
+          m_CurrentTime - sampler->time > 2000) ||
          sampler->drop_counter > 1))
-      sampler->fader.StartDecreasingVolume(MsToSamples(370));
+      // Random jitter time to prevent concurrent drops from synchronizing.
+      sampler->fader.StartDecreasingVolume(MsToSamples(
+        20 + (rand() % 5) - 10));
+    // normal ranomized load dropping
+    else if(sampler->is_release &&
+      ((m_PolyphonyLimiting &&
+        m_SamplerPool.UsedSamplerCount()*5 >= m_PolyphonySoftLimit*4 &&
+        m_CurrentTime - sampler->time > 48000/*((unsigned long)((sampler->m_SamplerTaskId * m_CurrentTime) % 40) + 80)*/) ||
+        sampler->drop_counter > 1))
+      // Random jitter time to prevent concurrent drops from synchronizing.
+      sampler->fader.StartDecreasingVolume(MsToSamples(
+        1000 + (rand() % 1000) - 500));
 
     /* The decoded sampler frame will contain values containing
      * sampler->pipe_section->sample_bits worth of significant bits.
@@ -309,16 +340,32 @@ bool GOSoundOrganEngine::ProcessSampler(
     if (!sampler->stream.ReadBlock(temp, n_frames))
       sampler->p_SoundProvider = NULL;
 
-    sampler->fader.Process(n_frames, temp, volume);
-    if (sampler->toneBalanceFilterState.IsToApply())
-      sampler->toneBalanceFilterState.ProcessBuffer(n_frames, temp);
+    // Fused-Fade-Accumulate (compile-time or runtime switchable)
+#ifndef GO_ENABLE_FUSED_FADE_ACCUMULATE
+#define GO_ENABLE_FUSED_FADE_ACCUMULATE 0
+#endif
+    {
+      const bool fuse = GO_ENABLE_FUSED_FADE_ACCUMULATE
+        || GOAudioParams::GetFuseFadeAndAccumulate();
 
-    /* Add these samples to the current output buffer shifting
-     * right by the necessary amount to bring the sample gain back
-     * to unity (this value is computed in GOPipe.cpp)
-     */
-    for (unsigned i = 0; i < n_frames * 2; i++)
-      output_buffer[i] += temp[i];
+      if (fuse && !sampler->toneBalanceFilterState.IsToApply()) {
+        // 2) Fader scales and accumulates directly into output_buffer
+        sampler->fader.ProcessAndAccumulate(
+          n_frames, temp, output_buffer, volume);
+      } else {
+        // Legacy path (no fused accumulation or ToneBalance active)
+        sampler->fader.Process(n_frames, temp, volume);
+        if (sampler->toneBalanceFilterState.IsToApply())
+          sampler->toneBalanceFilterState.ProcessBuffer(n_frames, temp);
+
+        /* Add these samples to the current output buffer shifting
+         * right by the necessary amount to bring the sample gain back
+         * to unity (this value is computed in GOPipe.cpp)
+         */
+        for (unsigned i = 0; i < n_frames * 2; i++)
+          output_buffer[i] += temp[i];
+      }
+    }
 
     if (
       (sampler->stop && sampler->stop <= m_CurrentTime)
@@ -519,9 +566,36 @@ void GOSoundOrganEngine::SwitchToAnotherAttack(GOSoundSampler *pSampler) {
   }
 }
 
+namespace {
+// Helper Functions and Types for Debugging the new Release Model (internal
+// linkage)
+enum ChannelKind { CK_Unknown, CK_Dry, CK_Front, CK_Rear };
+
+static ChannelKind ChannelFromRankName(const wxString &n) {
+  // heuristic keywords; extend as needed
+  if (n.Contains("dry"))
+    return CK_Dry;
+  if (n.Contains("rear:"))
+    return CK_Rear;
+  if (n.Contains("front:"))
+    return CK_Front;
+  return CK_Dry;
+}
+
+static bool IsChamade(const wxString &n) {
+  return n.Contains("trompeta batalla 8") || n.Contains("batalla")
+    || n.Contains("cham.");
+}
+
+} // anonymous namespace
+
 void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
+
   if (!handle->p_SoundProvider)
     return;
+
+  // handle->p_SoundProvider->GetAttack(unsigned int velocity, unsigned int
+  // releasedDurationMs)
 
   /* The beloow code creates a new sampler to playback the release, the
    * following code takes the active sampler for this pipe (which will be
@@ -561,6 +635,7 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
       const bool not_a_tremulant = isWindchestTask(handle->m_SamplerTaskId);
 
       if (not_a_tremulant) {
+
         /* Because this sampler is about to be moved to a detached
          * windchest, we must apply the gain of the existing windchest
          * to the gain target for this fader - otherwise the playback
@@ -576,7 +651,7 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
           unsigned midikey_frequency = this_pipe->GetMidiKeyNumber();
           /* if MidiKeyNumber is not within the range of organ pipes (64 feet
            * to 1 foot), we assume average pipe (MIDI = 60) */
-          if (midikey_frequency > 133 || midikey_frequency == 0)
+          if (midikey_frequency > 127 || midikey_frequency == 0)
             midikey_frequency = 60;
           /* attack duration is assumed 50 ms above MIDI 96, 800 ms below MIDI
            * 24 and linear in between */
@@ -588,36 +663,123 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
               attack_duration
                 = 500.0f + ((24.0f - (float)midikey_frequency) * 6.25f);
           }
-          /* calculate gain (gain_target) to apply to tail amplitude as a
-           * function of when the note is released during the attack */
-          if (time < (int)attack_duration) {
-            float attack_index = (float)time / attack_duration;
-            float gain_delta
-              = (0.2f + (0.8f * (2.0f * attack_index - (attack_index * attack_index))));
-            gain_target *= gain_delta;
+          /* calculate gain (gain_target) to apply to tail amplitude in function
+           * of when the note is released during the attack */
+          // remove GO Model and use our lookuptable for the test stop:
+
+          // find out rank
+          auto *prov = handle->p_SoundProvider;
+
+          auto *pipe = prov->GetOwnerPipe();
+          GORank *rank = pipe ? pipe->GetRank() : nullptr;
+          const wxString rankName = rank ? rank->GetName().Lower() : wxString();
+
+          const ChannelKind chan = ChannelFromRankName(rankName);
+          const bool chamade = IsChamade(rankName);
+
+          CHAMADE_DEBUG(
+            "Release: Rank: %s , bCham=%i, Type=%i",
+            rankName.mb_str(),
+            chamade,
+            chan);
+
+          // float attack_duration;
+          float g_0 = 0.1f;
+
+          if (chamade) {
+            switch (chan) {
+            case CK_Dry:
+              attack_duration
+                = tmax_dry_by_midi[midikey_frequency]; /* special release
+                                                          parameters for
+                                                          Chamade Dry */
+              g_0 = g0_dry_by_midi[midikey_frequency];
+              CHAMADE_DEBUG("Release gestartet: Cham Dry ");
+              break;
+            case CK_Front:
+              attack_duration
+                = tmax_front_by_midi[midikey_frequency]; /* special release
+                                                            parameters for
+                                                            Chamade Front */
+              g_0 = g0_front_by_midi[midikey_frequency];
+              CHAMADE_DEBUG("Release gestartet: Cham Front ");
+              break;
+            case CK_Rear:
+              attack_duration
+                = tmax_rear_by_midi[midikey_frequency]; /* special release
+                                                           parameters for
+                                                           Chamade Rear */
+              g_0 = g0_rear_by_midi[midikey_frequency];
+              CHAMADE_DEBUG("Release gestartet: Cham Rear ");
+              break;
+            default: /* Fallback */
+              break;
+            }
+
+            if (time < (int)attack_duration) {
+              float attack_index = (float)time / attack_duration;
+              float gain_delta
+                = (1.0f - attack_index) * g_0 + attack_index * 1.0f;
+              gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
+              gain_target *= gain_delta;
+            }
+
+            // old parabola model removed:
+            /* calculate gain (gain_target) to apply to tail amplitude as a
+             * function of when the note is released during the attack */
+            /*if (time < (int)attack_duration) {
+              float attack_index = (float)time / attack_duration;
+              float gain_delta
+                = (0.2f + (0.8f * (2.0f * attack_index - (attack_index *
+            attack_index)))); gain_target *= gain_delta;
+            }*/
+
+            /*float attack_duration = tmax_by_midi[midikey_frequency];
+            float a = curvature_by_midi[midikey_frequency];*/
+
+            // float attack_index = (float)time / attack_duration;
+            // float gain_delta = (0.2f + (0.8f * (2.0f * attack_index -
+            // (attack_index * attack_index))));
+
+            // gain_target *= 1.0f; // test with extreme reverb
+
+            /* calculate the volume decay to be applied to the release to take
+             * into account the fact that reverb is not completely formed during
+             * staccato. Time to full reverb is estimated as a function of
+             * release length: for an organ with a release length of 5 seconds
+             * or more, time_to_full_reverb is around 350 ms; for an organ with
+             * a release length of 1 second or less, time_to_full_reverb is
+             * around 100 ms; time_to_full_reverb is linear in between */
+            /*int time_to_full_reverb = ((60 * release_section->GetLength())
+                                       / release_section->GetSampleRate())
+              + 40;
+            if (time_to_full_reverb > 350)
+              time_to_full_reverb = 350;
+            if (time_to_full_reverb < 100)
+              time_to_full_reverb = 100;
+            if (time < time_to_full_reverb) {
+              /* as a function of note duration, fading happens between:
+               * 200 ms and 6 s for release with little reverberation e.g. short
+               * release
+               * 700 ms and 6 s for release with large reverberation e.g. long
+               * release */
+            // gain_decay_length = 0;
+            //= time_to_full_reverb + 6000 * time / time_to_full_reverb;
+            //}
           }
-          /* calculate the volume decay to be applied to the release to take
-           * into account the fact that reverb is not completely formed during
-           * staccato. Time to full reverb is estimated as a function of release
-           * length: for an organ with a release length of 5 seconds or more,
-           * time_to_full_reverb is around 350 ms; for an organ with a release
-           * length of 1 second or less, time_to_full_reverb is around 100 ms;
-           * time_to_full_reverb is linear in between */
-          int time_to_full_reverb = ((60 * release_section->GetLength())
-                                     / release_section->GetSampleRate())
-            + 40;
-          if (time_to_full_reverb > 350)
-            time_to_full_reverb = 350;
-          if (time_to_full_reverb < 100)
-            time_to_full_reverb = 100;
-          if (time < time_to_full_reverb) {
-            /* as a function of note duration, fading happens between:
-             * 200 ms and 6 s for release with little reverberation e.g. short
-             * release
-             * 700 ms and 6 s for release with large reverberation e.g. long
-             * release */
-            gain_decay_length
-              = time_to_full_reverb + 6000 * time / time_to_full_reverb;
+
+          else {
+            // new modell with estimated values
+            attack_duration = 120;
+            g_0 = 0.1f;
+
+            if (time < (int)attack_duration) {
+              float attack_index = (float)time / attack_duration;
+              float gain_delta
+                = (1.0f - attack_index) * g_0 + attack_index * 1.0f;
+              gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
+              gain_target *= gain_delta;
+            }
           }
         }
       }
