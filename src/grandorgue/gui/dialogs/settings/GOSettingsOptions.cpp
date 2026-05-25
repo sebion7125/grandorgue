@@ -475,7 +475,7 @@ void GOSettingsOptions::UpdateMemoryLimitWarning() {
       col = *wxRED;
     } else {
       txt = wxString::Format(
-        _("System RAM: %lu MB. Recommended ≤ 80%%. Current: %d MB (%u%%)."),
+        _("System RAM: %lu MB. Recommended <= 80%%. Current: %d MB (%u%%)."),
         (unsigned long)sysMB, cfgMB, pct);
     }
   } else {
