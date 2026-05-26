@@ -1,4 +1,4 @@
-# 3.17.2-xfade-demo (2026-03-31)
+# 3.17.2-XFadeDemo (2026-05-26)
 Demo XFade + Release Scaling + other enhancements
 
 
