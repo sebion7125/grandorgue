@@ -1,3 +1,62 @@
+# 3.17.2-xfade-demo (2026-03-31)
+Demo XFade + Release Scaling + other enhancements
+
+
+This release contains experimental improvements to GrandOrgue, based on upstream version 3.17.1-1. All changes are available as individual feature branches so you can pick what you need.
+
+---
+
+## 🎚️ Crossfade Curves (feature/crossfade-curves)
+
+Adds five selectable crossfade curve shapes for smoother transitions between the sustain loop and the release sample (i.e. when a key is released):
+- **Linear** — simple straight-line fade
+- **Sin Equal Power** — sine-based equal-power crossfade (industry standard)
+- **Sin²** — squared sine curve
+- **Sqrt Equal Power** — square-root equal-power curve
+- **X²** — squared linear curve
+
+The active curve can be selected via the Audio menu (F7–F12). A lookup table cache (LUT) avoids expensive per-sample `sin()`/`sqrt()` calculations, keeping the audio thread fast. Loop crossfades are also prepared.
+
+---
+
+## 📊 Loading Progress Improvements (feature/progress-improvements)
+
+Smoother, more accurate progress display when loading organ samples:
+- Monotone progress bar (no more jumps backwards)
+- More realistic ETA calculation
+- **Responsive progress during ODF parsing** — GrandOrgue previously froze without any feedback while building data structures from the ODF. Individual steps are now shown, and loading can be cancelled at any point — not just during the final wave file loading phase. This is especially noticeable with large sample sets.
+
+---
+
+## 🔇 Polyphony Load Dropping (feature/polyphony-load-dropping)
+
+Improved voice stealing when the CPU is under heavy load:
+- Panic mode kicks in earlier to prevent audio dropouts
+- New soft-drop path at 80% of the soft polyphony limit
+- Randomized fade-out times for more natural-sounding voice stealing
+
+---
+
+## ⚠️ RAM Limit Warning (feature/memory-limit-warning)
+
+A live warning indicator in the settings when the configured RAM limit exceeds 85% of available system memory. Shown in red to alert the user before loading a large organ.
+
+---
+
+## 🧪 Release Gain Scaling (feature/release-scaling) — EXPERIMENTAL
+
+Scales the release sample gain based on how long a key was held. Short keystrokes produce softer releases, long ones produce fuller releases — more realistic for instruments like chamades.
+
+⚠️ This feature is a proof-of-concept. Parameters are currently hardcoded and not yet readable from the ODF. Not recommended for production use.
+
+---
+
+## Notes
+
+- Based on GrandOrgue upstream master (3.17.2)
+- Each feature is available as a standalone branch if you want to cherry-pick
+- Windows (x86_64), Linux (x86_64, armhf, aarch64), AppImage, and macOS (Intel + Apple Silicon) builds are provided
+# 3.17.2 (2026-05-20)
 - Fixed controlling organ elements when recording or playing MIDI https://github.com/GrandOrgue/grandorgue/issues/2388
 - Fixed Loading organ errors with Tuskish system locale https://github.com/GrandOrgue/grandorgue/issues/2401
 # 3.17.1 (2026-03-31)
