@@ -98,12 +98,17 @@ export CFLAGS="-O3 -DNDEBUG -g0"
 # ---- Release-Align-Logging (kein cmake-Eingriff nötig) ---------------------
 # Schreiben/Löschen eines Header-Files triggert automatisch nur GOSoundStream.cpp neu.
 LOG_HEADER="$SRC_DIR/src/grandorgue/sound/playing/GOLogReleaseAlignEnable.h"
+STREAM_SRC="$SRC_DIR/src/grandorgue/sound/playing/GOSoundStream.cpp"
+ALIGN_SRC="$SRC_DIR/src/grandorgue/sound/playing/GOSoundReleaseAlignTable.cpp"
 if $LOG_RELEASE_ALIGN; then
   echo "// generated — delete to disable release-align logging" > "$LOG_HEADER"
   echo "Release-Align-Logging aktiviert ($LOG_HEADER)"
+  # __has_include is not tracked by cmake deps — force recompile of affected files
+  touch "$STREAM_SRC" "$ALIGN_SRC"
 else
   if [[ -f "$LOG_HEADER" ]]; then
     rm -v "$LOG_HEADER"
+    touch "$STREAM_SRC" "$ALIGN_SRC"
   fi
 fi
 
