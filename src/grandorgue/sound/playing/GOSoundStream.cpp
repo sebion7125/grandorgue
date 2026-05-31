@@ -401,13 +401,13 @@ void GOSoundStream::InitAlignedStream(
     int history[BLOCK_HISTORY][MAX_OUTPUT_CHANNELS];
     existing_stream->GetHistory(history);
     unsigned legacy_result = releaseAligner->GetPositionFor(history);
-    unsigned corr_result   = releaseAligner->GetPositionForCorrelation(loop_pos);
+    unsigned corr_result   = releaseAligner->GetPositionForCorrelation(loop_pos, existing_stream->audio_section);
     LogReleaseAlign(
       loop_pos, releaseAligner->GetPeriodSamples(), legacy_result, corr_result);
     startIndex = useCorr ? corr_result : legacy_result;
 #else
     if (useCorr) {
-      startIndex = releaseAligner->GetPositionForCorrelation(loop_pos);
+      startIndex = releaseAligner->GetPositionForCorrelation(loop_pos, existing_stream->audio_section);
     } else {
       int history[BLOCK_HISTORY][MAX_OUTPUT_CHANNELS];
       existing_stream->GetHistory(history);

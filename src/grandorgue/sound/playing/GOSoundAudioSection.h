@@ -278,6 +278,9 @@ public:
     float sample_freq_hz = 440.f,
     unsigned harmonic_number = 8);
 
+  void AssignAttackLutPointers(
+    const std::vector<const GOSoundAudioSection *> &attacks);
+
   GOSampleStatistic GetStatistic();
 };
 

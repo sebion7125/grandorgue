@@ -33,15 +33,23 @@ private:
   int m_PositionEntries[PHASE_ALIGN_DERIVATIVES][PHASE_ALIGN_AMPLITUDES];
 
   // ── Sparse correlation LUT ──────────────────────────────────────────────
-  // Up to 10 support points; GetPositionForCorrelation() interpolates between
-  // them on the circle [0, T) using the shortest-arc path.
+  // Support points for one attack variant.
   struct CorrPoint {
     uint32_t loop_pos; // absolute sample position in loop (= n * period_samples)
     uint16_t best_r;   // best release offset r* in samples, in [0, T)
   };
-  std::vector<CorrPoint> m_CorrPoints;
-  uint32_t m_CorrPeriodSamples; // period length in samples
+  // One LUT per attack joinable; p_Attack is the runtime pointer used for
+  // lookup (null after cache load until AssignAttackPointers is called).
+  struct AttackLut {
+    const GOSoundAudioSection *p_Attack = nullptr;
+    std::vector<CorrPoint> points;
+  };
+  std::vector<AttackLut> m_CorrLuts;
+  uint32_t m_CorrPeriodSamples; // period length in samples (shared across LUTs)
   uint32_t m_CorrCrossfadeLen;  // crossfade window length in samples
+
+  const std::vector<CorrPoint> *FindLut(
+    const GOSoundAudioSection *p_Attack) const;
 
 public:
   GOSoundReleaseAlignTable();
@@ -60,6 +68,7 @@ public:
   unsigned GetPositionFor(
     int history[BLOCK_HISTORY][MAX_OUTPUT_CHANNELS]) const;
 
+  // Append one LUT for the given attack joinable. Call once per joinable.
   void ComputeCorrelationLut(
     const GOSoundAudioSection &loop,
     const GOSoundAudioSection &release,
@@ -68,7 +77,12 @@ public:
     float sample_freq_hz,
     unsigned harmonic_number);
 
-  unsigned GetPositionForCorrelation(unsigned loop_pos) const;
+  // Restore runtime attack pointers after cache load (in joinable order).
+  void AssignAttackPointers(
+    const std::vector<const GOSoundAudioSection *> &attacks);
+
+  unsigned GetPositionForCorrelation(
+    unsigned loop_pos, const GOSoundAudioSection *p_Attack = nullptr) const;
 
   unsigned GetPeriodSamples() const { return m_CorrPeriodSamples; }
 };
