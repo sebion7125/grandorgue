@@ -55,6 +55,7 @@ protected:
   ptr_vector<GOSoundAudioSection> m_Release;
   std::vector<ReleaseSelector> m_ReleaseInfo;
   void ComputeReleaseAlignmentInfo();
+  void RebuildAlignmentPointers();
   float m_VelocityVolumeBase;
   float m_VelocityVolumeIncrement;
   unsigned m_AttackSwitchCrossfadeLength;

@@ -31,8 +31,8 @@
 void GOSoundProvider::UpdateCacheHash(GOHash &hash) {
   hash.Update(sizeof(AttackSelector));
   hash.Update(sizeof(ReleaseSelector));
-  // Bump when the cache format changes (v2: adds correlation LUT)
-  static const uint8_t CACHE_FORMAT_VERSION = 2;
+  // Bump when the cache format changes (v3: per-attack correlation LUTs)
+  static const uint8_t CACHE_FORMAT_VERSION = 3;
   hash.Update(CACHE_FORMAT_VERSION);
 }
 
@@ -98,6 +98,8 @@ bool GOSoundProvider::LoadCache(GOMemoryPool &pool, GOCache &cache) {
       return false;
   }
 
+  // Restore per-attack LUT pointers (lost across cache serialisation).
+  RebuildAlignmentPointers();
   return true;
 }
 
@@ -131,6 +133,19 @@ bool GOSoundProvider::SaveCache(GOCacheWriter &cache) const {
   }
 
   return true;
+}
+
+void GOSoundProvider::RebuildAlignmentPointers() {
+  std::vector<const GOSoundAudioSection *> sections;
+  for (int8_t k = BOOL3_MIN; k <= BOOL3_MAX; ++k) {
+    sections.clear();
+    for (unsigned i = 0; i < m_Attack.size(); i++)
+      if (m_AttackInfo[i].m_WaveTremulantStateFor == k)
+        sections.push_back(m_Attack[i]);
+    for (unsigned i = 0; i < m_Release.size(); i++)
+      if (m_ReleaseInfo[i].m_WaveTremulantStateFor == k)
+        m_Release[i]->AssignAttackLutPointers(sections);
+  }
 }
 
 void GOSoundProvider::ComputeReleaseAlignmentInfo() {

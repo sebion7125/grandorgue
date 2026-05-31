@@ -586,6 +586,12 @@ void GOSoundAudioSection::Compress(bool format16) {
     throw GOOutOfMemory();
 }
 
+void GOSoundAudioSection::AssignAttackLutPointers(
+  const std::vector<const GOSoundAudioSection *> &attacks) {
+  if (m_ReleaseAligner)
+    m_ReleaseAligner->AssignAttackPointers(attacks);
+}
+
 void GOSoundAudioSection::SetupStreamAlignment(
   const std::vector<const GOSoundAudioSection *> &joinables,
   unsigned start_index,
@@ -621,9 +627,10 @@ void GOSoundAudioSection::SetupStreamAlignment(
 
     if (start_index == 0 && !joinables.empty() && m_ReleaseCrossfadeLength > 0) {
       unsigned crossfade_samples = m_ReleaseCrossfadeLength * m_SampleRate / 1000;
-      m_ReleaseAligner->ComputeCorrelationLut(
-        *joinables[0], *this, crossfade_samples, m_SampleRate, sample_freq_hz,
-        harmonic_number);
+      for (const GOSoundAudioSection *pAttack : joinables)
+        m_ReleaseAligner->ComputeCorrelationLut(
+          *pAttack, *this, crossfade_samples, m_SampleRate, sample_freq_hz,
+          harmonic_number);
     }
   }
 }

@@ -68,24 +68,29 @@ bool GOSoundReleaseAlignTable::Load(GOCache &cache) {
   if (!cache.Read(&m_PositionEntries, sizeof(m_PositionEntries)))
     return false;
 
-  // ── Sparse correlation LUT (optional — graceful on old cache files) ─────
-  uint8_t has_corr = 0;
-  if (!cache.Read(&has_corr, sizeof(has_corr)))
-    return true; // EOF on old cache: not an error
-  if (has_corr) {
+  // ── Sparse correlation LUTs (optional — graceful on old cache files) ──────
+  // Format v3: n_luts (uint32), then period+crossfade, then each LUT's points.
+  uint32_t n_luts = 0;
+  if (!cache.Read(&n_luts, sizeof(n_luts)))
+    return true; // EOF on old/v2 cache: not an error
+  if (n_luts > 0) {
     if (!cache.Read(&m_CorrPeriodSamples, sizeof(m_CorrPeriodSamples)))
       return false;
     if (!cache.Read(&m_CorrCrossfadeLen, sizeof(m_CorrCrossfadeLen)))
       return false;
-    uint32_t n_points = 0;
-    if (!cache.Read(&n_points, sizeof(n_points)))
-      return false;
-    m_CorrPoints.resize(n_points);
-    for (CorrPoint &cp : m_CorrPoints) {
-      if (!cache.Read(&cp.loop_pos, sizeof(cp.loop_pos)))
+    m_CorrLuts.resize(n_luts);
+    for (AttackLut &lut : m_CorrLuts) {
+      lut.p_Attack = nullptr; // restored by AssignAttackPointers after load
+      uint32_t n_points = 0;
+      if (!cache.Read(&n_points, sizeof(n_points)))
         return false;
-      if (!cache.Read(&cp.best_r, sizeof(cp.best_r)))
-        return false;
+      lut.points.resize(n_points);
+      for (CorrPoint &cp : lut.points) {
+        if (!cache.Read(&cp.loop_pos, sizeof(cp.loop_pos)))
+          return false;
+        if (!cache.Read(&cp.best_r, sizeof(cp.best_r)))
+          return false;
+      }
     }
   }
   return true;
@@ -101,23 +106,25 @@ bool GOSoundReleaseAlignTable::Save(GOCacheWriter &cache) {
   if (!cache.Write(&m_PositionEntries, sizeof(m_PositionEntries)))
     return false;
 
-  // ── Sparse correlation LUT ───────────────────────────────────────────────
-  uint8_t has_corr = m_CorrPoints.empty() ? 0 : 1;
-  if (!cache.Write(&has_corr, sizeof(has_corr)))
+  // ── Sparse correlation LUTs (v3 format) ─────────────────────────────────
+  uint32_t n_luts = (uint32_t)m_CorrLuts.size();
+  if (!cache.Write(&n_luts, sizeof(n_luts)))
     return false;
-  if (has_corr) {
+  if (n_luts > 0) {
     if (!cache.Write(&m_CorrPeriodSamples, sizeof(m_CorrPeriodSamples)))
       return false;
     if (!cache.Write(&m_CorrCrossfadeLen, sizeof(m_CorrCrossfadeLen)))
       return false;
-    uint32_t n_points = (uint32_t)m_CorrPoints.size();
-    if (!cache.Write(&n_points, sizeof(n_points)))
-      return false;
-    for (const CorrPoint &cp : m_CorrPoints) {
-      if (!cache.Write(&cp.loop_pos, sizeof(cp.loop_pos)))
+    for (const AttackLut &lut : m_CorrLuts) {
+      uint32_t n_points = (uint32_t)lut.points.size();
+      if (!cache.Write(&n_points, sizeof(n_points)))
         return false;
-      if (!cache.Write(&cp.best_r, sizeof(cp.best_r)))
-        return false;
+      for (const CorrPoint &cp : lut.points) {
+        if (!cache.Write(&cp.loop_pos, sizeof(cp.loop_pos)))
+          return false;
+        if (!cache.Write(&cp.best_r, sizeof(cp.best_r)))
+          return false;
+      }
     }
   }
   return true;
@@ -306,19 +313,22 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
 #if __has_include("GOLogReleaseAlignEnable.h")
   const auto t0 = std::chrono::high_resolution_clock::now();
 #endif
-  m_CorrPoints.clear();
-  m_CorrPeriodSamples = 0;
-  m_CorrCrossfadeLen  = crossfade_len;
+  // On the first call: initialise shared parameters.
+  // On subsequent calls (additional attack variants): T must match.
+  const bool first_call = m_CorrLuts.empty();
+  if (first_call) {
+    m_CorrPeriodSamples = 0;
+    m_CorrCrossfadeLen  = crossfade_len;
+  }
 
   if (crossfade_len < 2)
     return;
 
-  m_CorrPeriodSamples = PeriodFromFrequency(sample_freq_hz, sample_rate);
+  if (first_call)
+    m_CorrPeriodSamples = PeriodFromFrequency(sample_freq_hz, sample_rate);
 
-  // Mixtures and high aliquots (HarmonicNumber >= threshold) may repeat,
-  // making the formula-based period unreliable. Use autocorrelation on a
-  // stable section of the loop sample to find the true fundamental period.
-  if (harmonic_number >= CORR_MIXTURE_HARMONIC_THRESHOLD) {
+  // Mixtures: re-estimate T via autocorrelation only on first call.
+  if (first_call && harmonic_number >= CORR_MIXTURE_HARMONIC_THRESHOLD) {
     const unsigned T_formula = m_CorrPeriodSamples;
     const unsigned min_p = std::max(8u, T_formula / 2);
     const unsigned max_p = std::min(T_formula * 4, sample_rate / 20u);
@@ -456,7 +466,8 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   }
 
   // Compute correlation at each support point (in downsampled space)
-  m_CorrPoints.reserve(sample_periods.size());
+  std::vector<CorrPoint> points;
+  points.reserve(sample_periods.size());
   for (unsigned n : sample_periods) {
     unsigned crossfade_start = n * m_CorrPeriodSamples;
     if (crossfade_start < window_len)
@@ -476,7 +487,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
         best_r     = (uint16_t)((r_d * ds) % m_CorrPeriodSamples);
       }
     }
-    m_CorrPoints.push_back({crossfade_start, best_r});
+    points.push_back({crossfade_start, best_r});
   }
 
 #if __has_include("GOLogReleaseAlignEnable.h")
@@ -491,20 +502,40 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     f << "corr_lut"
       << " freq=" << sample_freq_hz
       << " T=" << m_CorrPeriodSamples
-      << " points=" << m_CorrPoints.size()
+      << " points=" << points.size()
       << " us=" << us
       << " total_ms=" << (total / 1000)
       << " n=" << n
       << "\n";
   }
 #endif
+  m_CorrLuts.push_back({&loop_section, std::move(points)});
+}
+
+void GOSoundReleaseAlignTable::AssignAttackPointers(
+  const std::vector<const GOSoundAudioSection *> &attacks) {
+  for (size_t i = 0; i < m_CorrLuts.size() && i < attacks.size(); i++)
+    m_CorrLuts[i].p_Attack = attacks[i];
+}
+
+const std::vector<GOSoundReleaseAlignTable::CorrPoint> *
+GOSoundReleaseAlignTable::FindLut(const GOSoundAudioSection *p_Attack) const {
+  if (m_CorrLuts.empty())
+    return nullptr;
+  if (p_Attack)
+    for (const auto &lut : m_CorrLuts)
+      if (lut.p_Attack == p_Attack)
+        return &lut.points;
+  return &m_CorrLuts[0].points; // fallback: first LUT
 }
 
 unsigned GOSoundReleaseAlignTable::GetPositionForCorrelation(
-  unsigned loop_pos) const {
-  if (m_CorrPoints.empty() || m_CorrPeriodSamples == 0)
+  unsigned loop_pos, const GOSoundAudioSection *p_Attack) const {
+  const std::vector<CorrPoint> *pts = FindLut(p_Attack);
+  if (!pts || pts->empty() || m_CorrPeriodSamples == 0)
     return 0;
 
+  const std::vector<CorrPoint> &m_CorrPoints = *pts;
   unsigned phi = loop_pos % m_CorrPeriodSamples;
   unsigned r_interp;
 
@@ -515,7 +546,6 @@ unsigned GOSoundReleaseAlignTable::GetPositionForCorrelation(
     r_interp = m_CorrPoints.back().best_r;
 
   } else {
-    // Find the two surrounding support points
     unsigned idx = 0;
     while (idx + 1 < m_CorrPoints.size()
            && m_CorrPoints[idx + 1].loop_pos <= loop_pos)
