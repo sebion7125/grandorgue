@@ -30,7 +30,9 @@ enum {
   ID_Crossfade_Sin2,
   ID_Crossfade_SqrtEq,
   ID_Crossfade_X2,
-  ID_Crossfade_Custom
+  ID_Crossfade_Custom,
+  ID_ReleaseAlign_Legacy,
+  ID_ReleaseAlign_Correlation,
 };
 
 class GOApp;
@@ -65,6 +67,7 @@ private:
   wxMenu *m_file_menu;
   wxMenu *m_audio_menu;
   wxMenu *m_crossfade_menu;
+  wxMenu *m_releasealign_menu;
   wxMenu *m_panel_menu;
   wxMenu *m_favorites_menu;
   wxMenu *m_recent_menu;
@@ -143,6 +146,7 @@ private:
   void OnAudioMemset(wxCommandEvent &event);
   void OnAudioState(wxCommandEvent &event);
   void OnSetCrossfade(wxCommandEvent &event);
+  void OnSetReleaseAlign(wxCommandEvent &event);
 
   void SetEventAfterSettings(
     wxEventType eventType, int eventId, GOOrgan *pOrganFile = NULL);

@@ -45,6 +45,7 @@ class GOSettingsOptions : public wxPanel {
     ID_VOLUME,
     ID_LANGUAGE,
     ID_NEW_BAS_MEL,
+    ID_CORR_LUT_DOWNSAMPLING,
   };
 
 private:
@@ -61,6 +62,7 @@ private:
   wxCheckBox *m_Scale;
   wxCheckBox *m_Random;
   wxCheckBox *m_NewBasMel;
+  wxCheckBox *m_CorrLutDownsampling;
   wxCheckBox *m_ODFCheck;
   wxCheckBox *m_ODFHw1Check;
   wxCheckBox *m_RecordDownmix;

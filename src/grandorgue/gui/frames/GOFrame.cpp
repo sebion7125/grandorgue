@@ -94,6 +94,7 @@ EVT_MENU(ID_AUDIO_PANIC, GOFrame::OnAudioPanic)
 EVT_MENU(ID_AUDIO_MEMSET, GOFrame::OnAudioMemset)
 EVT_MENU(ID_AUDIO_STATE, GOFrame::OnAudioState)
 EVT_MENU_RANGE(ID_Crossfade_Linear, ID_Crossfade_Custom, GOFrame::OnSetCrossfade)
+EVT_MENU_RANGE(ID_ReleaseAlign_Legacy, ID_ReleaseAlign_Correlation, GOFrame::OnSetReleaseAlign)
 EVT_MENU(ID_SETTINGS, GOFrame::OnSettings)
 EVT_MENU(ID_MIDI_LOAD, GOFrame::OnMidiLoad)
 EVT_MENU(wxID_HELP, GOFrame::OnHelp)
@@ -270,6 +271,21 @@ GOFrame::GOFrame(
   m_crossfade_menu->AppendRadioItem(ID_Crossfade_Custom,  _("Custom (Placeholder)\tF12"));
   m_audio_menu->AppendSubMenu(m_crossfade_menu, _("&Crossfade"));
 
+  m_releasealign_menu = new wxMenu;
+  m_releasealign_menu->AppendRadioItem(
+    ID_ReleaseAlign_Legacy,      _("Legacy (instantaneous values)\tF2"));
+  m_releasealign_menu->AppendRadioItem(
+    ID_ReleaseAlign_Correlation, _("Correlation (new)\tF3"));
+  m_audio_menu->AppendSubMenu(m_releasealign_menu, _("&Release Alignment"));
+
+  {
+    using namespace GOAudioParams;
+    if (GetReleaseAlignMode() == GOReleaseAlignMode::Correlation)
+      m_releasealign_menu->Check(ID_ReleaseAlign_Correlation, true);
+    else
+      m_releasealign_menu->Check(ID_ReleaseAlign_Legacy, true);
+  }
+
   // Mark the menu radio item that matches the current runtime crossfade mode
   // (uses GOAudioParams::GetCrossfadeMode())
   {
@@ -316,15 +332,17 @@ GOFrame::GOFrame(
   menu_bar->Append(help_menu, _("&Help"));
   SetMenuBar(menu_bar);
 
-  // Accelerator keys for Crossfade menu (F7..F12)
+  // Accelerator keys: F2/F3 = Release Align, F7..F12 = Crossfade
   {
-    wxAcceleratorEntry entries[6];
-    entries[0].Set(wxACCEL_NORMAL, WXK_F7,  ID_Crossfade_Linear);
-    entries[1].Set(wxACCEL_NORMAL, WXK_F8,  ID_Crossfade_SinEq);
-    entries[2].Set(wxACCEL_NORMAL, WXK_F9,  ID_Crossfade_Sin2);
-    entries[3].Set(wxACCEL_NORMAL, WXK_F10, ID_Crossfade_SqrtEq);
-    entries[4].Set(wxACCEL_NORMAL, WXK_F11, ID_Crossfade_X2);
-    entries[5].Set(wxACCEL_NORMAL, WXK_F12, ID_Crossfade_Custom);
+    wxAcceleratorEntry entries[8];
+    entries[0].Set(wxACCEL_NORMAL, WXK_F2,  ID_ReleaseAlign_Legacy);
+    entries[1].Set(wxACCEL_NORMAL, WXK_F3,  ID_ReleaseAlign_Correlation);
+    entries[2].Set(wxACCEL_NORMAL, WXK_F7,  ID_Crossfade_Linear);
+    entries[3].Set(wxACCEL_NORMAL, WXK_F8,  ID_Crossfade_SinEq);
+    entries[4].Set(wxACCEL_NORMAL, WXK_F9,  ID_Crossfade_Sin2);
+    entries[5].Set(wxACCEL_NORMAL, WXK_F10, ID_Crossfade_SqrtEq);
+    entries[6].Set(wxACCEL_NORMAL, WXK_F11, ID_Crossfade_X2);
+    entries[7].Set(wxACCEL_NORMAL, WXK_F12, ID_Crossfade_Custom);
     wxAcceleratorTable accel(WXSIZEOF(entries), entries);
     SetAcceleratorTable(accel);
   }
@@ -631,6 +649,15 @@ void GOFrame::AttachDetachOrganController(bool isToAttach) {
 
   if (p_OrganController) {
     p_OrganController->SetModificationListener(isToAttach ? this : nullptr);
+
+    // Sync release alignment menu
+    if (isToAttach && m_releasealign_menu) {
+      using namespace GOAudioParams;
+      if (GetReleaseAlignMode() == GOReleaseAlignMode::Correlation)
+        m_releasealign_menu->Check(ID_ReleaseAlign_Correlation, true);
+      else
+        m_releasealign_menu->Check(ID_ReleaseAlign_Legacy, true);
+    }
 
     // Sync crossfade menu with current runtime value when attaching an organ
     if (isToAttach && m_crossfade_menu) {
@@ -1306,6 +1333,16 @@ void GOFrame::OnSetCrossfade(wxCommandEvent &e) {
       GOAudioParams::FastCrossfadeCache::PrecomputeForMode(m, buckets);
     }).detach();
   }
+}
+
+void GOFrame::OnSetReleaseAlign(wxCommandEvent &e) {
+  using namespace GOAudioParams;
+  GOReleaseAlignMode m = GOReleaseAlignMode::Legacy;
+  if (e.GetId() == ID_ReleaseAlign_Correlation)
+    m = GOReleaseAlignMode::Correlation;
+  SetReleaseAlignMode(m);
+  // The LUT is computed at load time and is already in memory.
+  // The switch takes effect on the next key-off event.
 }
 
 void GOFrame::OnOrganSettings(wxCommandEvent &event) {

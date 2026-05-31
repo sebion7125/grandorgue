@@ -7,6 +7,8 @@
 
 #include "GOSoundProvider.h"
 
+#include <cmath>
+
 #include <wx/intl.h>
 
 #include "loader/cache/GOCache.h"
@@ -29,11 +31,15 @@
 void GOSoundProvider::UpdateCacheHash(GOHash &hash) {
   hash.Update(sizeof(AttackSelector));
   hash.Update(sizeof(ReleaseSelector));
+  // Bump when the cache format changes (v2: adds correlation LUT)
+  static const uint8_t CACHE_FORMAT_VERSION = 2;
+  hash.Update(CACHE_FORMAT_VERSION);
 }
 
 GOSoundProvider::GOSoundProvider()
   : m_MidiKeyNumber(0),
     m_MidiPitchFract(0),
+    m_HarmonicNumber(8),
     m_Tuning(1),
     m_ToneBalanceValue(0),
     m_IsWaveTremulantActive(BOOL3_FALSE),
@@ -128,6 +134,14 @@ bool GOSoundProvider::SaveCache(GOCacheWriter &cache) const {
 }
 
 void GOSoundProvider::ComputeReleaseAlignmentInfo() {
+  // Compute the actual fundamental frequency of this pipe's audio.
+  // m_MidiKeyNumber + m_MidiPitchFract give the base pitch from the WAV file.
+  // m_HarmonicNumber corrects for foot length: 8'=1x, 4'=2x, 16'=0.5x, 2'=4x.
+  const float sample_freq_hz = 440.f
+    * std::pow(2.f, ((float)m_MidiKeyNumber + m_MidiPitchFract / 100.f - 69.f)
+                      / 12.f)
+    * ((float)m_HarmonicNumber / 8.f);
+
   std::vector<const GOSoundAudioSection *> sections;
   for (int8_t k = BOOL3_MIN; k <= BOOL3_MAX; ++k) {
     sections.clear();
@@ -136,7 +150,7 @@ void GOSoundProvider::ComputeReleaseAlignmentInfo() {
         sections.push_back(m_Attack[i]);
     for (unsigned i = 0; i < m_Release.size(); i++)
       if (m_ReleaseInfo[i].m_WaveTremulantStateFor == k)
-        m_Release[i]->SetupStreamAlignment(sections, 0);
+        m_Release[i]->SetupStreamAlignment(sections, 0, sample_freq_hz, m_HarmonicNumber);
 
     sections.clear();
     for (unsigned i = 0; i < m_Attack.size(); i++)
@@ -144,7 +158,7 @@ void GOSoundProvider::ComputeReleaseAlignmentInfo() {
         sections.push_back(m_Attack[i]);
     for (unsigned i = 0; i < m_Attack.size(); i++)
       if (m_AttackInfo[i].m_WaveTremulantStateFor == k)
-        m_Attack[i]->SetupStreamAlignment(sections, 1);
+        m_Attack[i]->SetupStreamAlignment(sections, 1, sample_freq_hz, m_HarmonicNumber);
   }
 
   for (unsigned i = 1; i < m_Attack.size(); i++)

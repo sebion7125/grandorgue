@@ -25,12 +25,14 @@ BUILD_DIR="$SCRIPT_DIR/build/win64"     # <<< früh setzen!
 EXTRA_LABEL=""   # wird zu GO_VERSION_EXTRA
 DO_CLEAN=false
 DO_RECONF=false
+LOG_RELEASE_ALIGN=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean) DO_CLEAN=true; shift ;;
     --reconfigure) DO_RECONF=true; shift ;;
     --extra) EXTRA_LABEL="$2"; shift 2 ;;
+    --log-release-align) LOG_RELEASE_ALIGN=true; shift ;;
     *) break ;;  # Rest bleibt für set-ver-prms.sh (z.B. numerische Version)
   esac
 done
@@ -92,6 +94,18 @@ fi
 # ⚙️ Compiler-Flags
 export CXXFLAGS="-O3 -DNDEBUG -g0"
 export CFLAGS="-O3 -DNDEBUG -g0"
+
+# ---- Release-Align-Logging (kein cmake-Eingriff nötig) ---------------------
+# Schreiben/Löschen eines Header-Files triggert automatisch nur GOSoundStream.cpp neu.
+LOG_HEADER="$SRC_DIR/src/grandorgue/sound/playing/GOLogReleaseAlignEnable.h"
+if $LOG_RELEASE_ALIGN; then
+  echo "// generated — delete to disable release-align logging" > "$LOG_HEADER"
+  echo "Release-Align-Logging aktiviert ($LOG_HEADER)"
+else
+  if [[ -f "$LOG_HEADER" ]]; then
+    rm -v "$LOG_HEADER"
+  fi
+fi
 
 # ---- Version/Extra immer setzen -------------------------------------------
 # 1) Wenn --extra nicht gesetzt wurde, Standard setzen:

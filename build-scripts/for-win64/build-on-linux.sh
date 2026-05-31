@@ -42,7 +42,9 @@ export PATH="$MINGW_DIR/bin:$PATH"
 WX_CONFIG="$MINGW_DIR/bin/wx-config"; export WX_CONFIG
 
 # ⚠️ Verhindert unnötige Debug-Infos
-export CXXFLAGS="-O3 -DNDEBUG -g0"
+# Set GO_LOG_RELEASE_ALIGN=1 before calling this script to enable release-align logging.
+LOG_RELEASE_ALIGN_FLAG="${GO_LOG_RELEASE_ALIGN:+-DGO_LOG_RELEASE_ALIGN}"
+export CXXFLAGS="-O3 -DNDEBUG -g0 $LOG_RELEASE_ALIGN_FLAG"
 export CFLAGS="-O3 -DNDEBUG -g0"
 
 cmake "$SRC_DIR" \

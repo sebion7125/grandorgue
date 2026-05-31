@@ -43,6 +43,7 @@ protected:
 
   unsigned m_MidiKeyNumber;
   float m_MidiPitchFract;
+  unsigned m_HarmonicNumber; // foot length as harmonic number: 8=8', 4=4', 16=16'
   float m_Gain;
   float m_Tuning;
   int8_t m_ToneBalanceValue;
@@ -67,6 +68,7 @@ public:
   // Setters and getters for the above mentioned debug solution 
   void SetOwnerPipe(GOSoundingPipe* p) { m_OwnerPipe = p; }
   GOSoundingPipe* GetOwnerPipe() const { return m_OwnerPipe; }
+  void SetHarmonicNumber(unsigned n) { m_HarmonicNumber = (n > 0) ? n : 8; }
   void SetOwnerRankId(unsigned id) { m_OwnerRankId = id; } // optional
   unsigned GetOwnerRankId() const { return m_OwnerRankId; } // optional
 
