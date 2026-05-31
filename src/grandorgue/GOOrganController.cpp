@@ -892,6 +892,8 @@ wxString GOOrganController::Load(
         }
 
           if (!cache_ok) {
+            GOAudioParams::SetCorrLutDownsampling(
+              m_config.CorrLutDownsampling());
             GOLoadWorker thisWorker(m_FileStore, m_pool, objectDistributor);
             ptr_vector<GOLoadThread> threads;
 

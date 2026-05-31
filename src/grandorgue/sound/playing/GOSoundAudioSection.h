@@ -274,7 +274,9 @@ public:
 
   void SetupStreamAlignment(
     const std::vector<const GOSoundAudioSection *> &joinables,
-    unsigned start_index);
+    unsigned start_index,
+    float sample_freq_hz = 440.f,
+    unsigned harmonic_number = 8);
 
   GOSampleStatistic GetStatistic();
 };

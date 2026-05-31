@@ -297,6 +297,7 @@ void GOSoundingPipe::Load(
 
 void GOSoundingPipe::LoadData(
   const GOFileStore &fileStore, GOMemoryPool &pool) {
+  m_SoundProvider.SetHarmonicNumber(m_HarmonicNumber);
   try {
     m_SoundProvider.LoadFromMultipleFiles(
       fileStore,

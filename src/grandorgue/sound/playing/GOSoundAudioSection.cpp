@@ -588,7 +588,9 @@ void GOSoundAudioSection::Compress(bool format16) {
 
 void GOSoundAudioSection::SetupStreamAlignment(
   const std::vector<const GOSoundAudioSection *> &joinables,
-  unsigned start_index) {
+  unsigned start_index,
+  float sample_freq_hz,
+  unsigned harmonic_number) {
   if (m_ReleaseAligner) {
     delete m_ReleaseAligner;
     m_ReleaseAligner = NULL;
@@ -616,6 +618,13 @@ void GOSoundAudioSection::SetupStreamAlignment(
       max_derivative,
       m_SampleRate,
       m_StartSegments[m_ReleaseStartSegment].start_offset);
+
+    if (start_index == 0 && !joinables.empty() && m_ReleaseCrossfadeLength > 0) {
+      unsigned crossfade_samples = m_ReleaseCrossfadeLength * m_SampleRate / 1000;
+      m_ReleaseAligner->ComputeCorrelationLut(
+        *joinables[0], *this, crossfade_samples, m_SampleRate, sample_freq_hz,
+        harmonic_number);
+    }
   }
 }
 
