@@ -26,6 +26,7 @@ EXTRA_LABEL=""   # wird zu GO_VERSION_EXTRA
 DO_CLEAN=false
 DO_RECONF=false
 LOG_RELEASE_ALIGN=false
+LOG_RELEASE_ALIGN_VERBOSE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --reconfigure) DO_RECONF=true; shift ;;
     --extra) EXTRA_LABEL="$2"; shift 2 ;;
     --log-release-align) LOG_RELEASE_ALIGN=true; shift ;;
+    --log-release-align-verbose) LOG_RELEASE_ALIGN=true; LOG_RELEASE_ALIGN_VERBOSE=true; shift ;;
     *) break ;;  # Rest bleibt für set-ver-prms.sh (z.B. numerische Version)
   esac
 done
@@ -98,6 +100,7 @@ export CFLAGS="-O3 -DNDEBUG -g0"
 # ---- Release-Align-Logging (kein cmake-Eingriff nötig) ---------------------
 # Schreiben/Löschen eines Header-Files triggert automatisch nur GOSoundStream.cpp neu.
 LOG_HEADER="$SRC_DIR/src/grandorgue/sound/playing/GOLogReleaseAlignEnable.h"
+LOG_VERBOSE_HEADER="$SRC_DIR/src/grandorgue/sound/playing/GOLogReleaseAlignVerbose.h"
 STREAM_SRC="$SRC_DIR/src/grandorgue/sound/playing/GOSoundStream.cpp"
 ALIGN_SRC="$SRC_DIR/src/grandorgue/sound/playing/GOSoundReleaseAlignTable.cpp"
 if $LOG_RELEASE_ALIGN; then
@@ -109,6 +112,16 @@ else
   if [[ -f "$LOG_HEADER" ]]; then
     rm -v "$LOG_HEADER"
     touch "$STREAM_SRC" "$ALIGN_SRC"
+  fi
+fi
+if $LOG_RELEASE_ALIGN_VERBOSE; then
+  echo "// generated — delete to disable verbose sample logging" > "$LOG_VERBOSE_HEADER"
+  echo "Release-Align-Verbose-Logging aktiviert ($LOG_VERBOSE_HEADER)"
+  touch "$STREAM_SRC"
+else
+  if [[ -f "$LOG_VERBOSE_HEADER" ]]; then
+    rm -v "$LOG_VERBOSE_HEADER"
+    touch "$STREAM_SRC"
   fi
 fi
 

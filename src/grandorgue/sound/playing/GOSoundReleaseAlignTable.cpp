@@ -53,7 +53,8 @@ GOSoundReleaseAlignTable::GOSoundReleaseAlignTable() {
   m_PhaseAlignMaxAmplitude = 0;
   m_PhaseAlignMaxDerivative = 0;
   m_CorrPeriodSamples = 0;
-  m_CorrCrossfadeLen = 0;
+  m_CorrPeriodFloat   = 0.0;
+  m_CorrCrossfadeLen  = 0;
 }
 
 GOSoundReleaseAlignTable::~GOSoundReleaseAlignTable() {}
@@ -75,6 +76,8 @@ bool GOSoundReleaseAlignTable::Load(GOCache &cache) {
     return true; // EOF on old/v2 cache: not an error
   if (n_luts > 0) {
     if (!cache.Read(&m_CorrPeriodSamples, sizeof(m_CorrPeriodSamples)))
+      return false;
+    if (!cache.Read(&m_CorrPeriodFloat, sizeof(m_CorrPeriodFloat)))
       return false;
     if (!cache.Read(&m_CorrCrossfadeLen, sizeof(m_CorrCrossfadeLen)))
       return false;
@@ -112,6 +115,8 @@ bool GOSoundReleaseAlignTable::Save(GOCacheWriter &cache) {
     return false;
   if (n_luts > 0) {
     if (!cache.Write(&m_CorrPeriodSamples, sizeof(m_CorrPeriodSamples)))
+      return false;
+    if (!cache.Write(&m_CorrPeriodFloat, sizeof(m_CorrPeriodFloat)))
       return false;
     if (!cache.Write(&m_CorrCrossfadeLen, sizeof(m_CorrCrossfadeLen)))
       return false;
@@ -324,8 +329,10 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   if (crossfade_len < 2)
     return;
 
-  if (first_call)
-    m_CorrPeriodSamples = PeriodFromFrequency(sample_freq_hz, sample_rate);
+  if (first_call) {
+    m_CorrPeriodFloat   = (double)sample_rate / sample_freq_hz;
+    m_CorrPeriodSamples = (unsigned)std::round(m_CorrPeriodFloat);
+  }
 
   // Mixtures: re-estimate T via autocorrelation only on first call.
   if (first_call && harmonic_number >= CORR_MIXTURE_HARMONIC_THRESHOLD) {
@@ -354,6 +361,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
       }
       m_CorrPeriodSamples = EstimatePeriodByAutocorr(
         ac_mono.data(), ac_window, min_p, max_p);
+      m_CorrPeriodFloat = m_CorrPeriodSamples; // autocorr gives integer for now
     }
   }
 
@@ -385,44 +393,20 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   if (r_max == 0)
     return;
 
-  // Determine support-point period indices (at most 10 points)
-  std::vector<unsigned> sample_periods;
+  // ── Adaptive support-point placement ────────────────────────────────
+  // Phase 1 (dense): sample every DENSE_STEP periods until r stabilises
+  //   or MAX_DENSE_N periods are sampled.  Stable = last STABLE_WIN
+  //   consecutive best_r values all within stable_thresh (circular).
+  //   Threshold: T/8 for regular pipes, T/6 for mixtures (minimum 4).
+  // Phase 2 (sparse): N_SPARSE points evenly from the end of the dense
+  //   phase to n_total-1.
+  // Phase 3 (gap fill): insert one midpoint between adjacent pairs whose
+  //   best_r values deviate by more than T/4, bounded by MAX_TOTAL.
+  // Short loops (n_total ≤ 30): even distribution (unchanged).
+  // ─────────────────────────────────────────────────────────────────────
+
   unsigned n_total = loop_len / m_CorrPeriodSamples;
-
-  if (n_total <= 30) {
-    // Short loop: distribute evenly from period 3 to n_total-1
-    for (unsigned i = 0; i < 10 && i < n_total; i++) {
-      unsigned p = 3 + i * std::max(1u, (n_total - 3) / 9);
-      if (p < n_total)
-        sample_periods.push_back(p);
-    }
-    std::sort(sample_periods.begin(), sample_periods.end());
-    sample_periods.erase(
-      std::unique(sample_periods.begin(), sample_periods.end()),
-      sample_periods.end());
-  } else {
-    // Block 1 — transient region: 5 points from period 5 to 30
-    const unsigned block1[] = {5, 11, 17, 23, 30};
-    for (unsigned p : block1)
-      if (p < n_total)
-        sample_periods.push_back(p);
-
-    // Block 2 — stationary region: 5 points from period 31 to n_total-1
-    unsigned start = 31;
-    unsigned end   = n_total - 1;
-    for (unsigned i = 0; i < 5; i++) {
-      unsigned p = start + i * (end - start) / 4;
-      if (p < n_total)
-        sample_periods.push_back(p);
-    }
-
-    // Deduplicate: arises when n_total is barely above 30 (end == start)
-    sample_periods.erase(
-      std::unique(sample_periods.begin(), sample_periods.end()),
-      sample_periods.end());
-  }
-
-  if (sample_periods.empty())
+  if (n_total < 4)
     return;
 
   // Downsampling factor: for low-pitched pipes take every ds-th sample.
@@ -436,8 +420,11 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   const unsigned window_len_d = std::max(4u, window_len / ds);
   const unsigned r_max_d      = std::max(1u, r_max / ds);
 
-  // Extract downsampled loop mono (stride = ds)
-  unsigned loop_needed   = std::min(loop_len, sample_periods.back() * m_CorrPeriodSamples);
+  // loop_mono covers n_total-1 so the sparse phase can reach any position.
+  // Same coverage as the previous block-2 approach.
+  unsigned loop_needed = std::min(
+    loop_len,
+    (unsigned)std::round((n_total - 1) * m_CorrPeriodFloat) + window_len);
   unsigned loop_needed_d = loop_needed / ds + 1;
   GOSoundCompressionCache loop_cache;
   loop_cache.Init();
@@ -451,7 +438,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     loop_mono[i] = s / loop_ch;
   }
 
-  // Extract downsampled release mono (stride = ds)
+  // Extract downsampled release mono (stride = ds).
   unsigned release_needed_d = (r_max + window_len) / ds + 1;
   GOSoundCompressionCache rel_cache;
   rel_cache.Init();
@@ -465,30 +452,119 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     release_mono[i] = s / rel_ch;
   }
 
-  // Compute correlation at each support point (in downsampled space)
-  std::vector<CorrPoint> points;
-  points.reserve(sample_periods.size());
-  for (unsigned n : sample_periods) {
-    unsigned crossfade_start = n * m_CorrPeriodSamples;
-    if (crossfade_start < window_len)
-      continue;
-    unsigned p_start_d = (crossfade_start - window_len) / ds;
-    if (p_start_d + window_len_d > loop_needed_d)
-      continue;
-
-    const float *loop_window = loop_mono.data() + p_start_d;
-
-    float    best_score = -2.f;
-    uint16_t best_r     = 0;
+  // Compute CorrPoint at period index n.
+  // Forward window starts at crossfade_start so that release[r] and
+  // attack[crossfade_start] are compared head-to-head.
+  // Returns {crossfade_start, 0} if the window falls outside loop_mono.
+  auto corr_at = [&](unsigned n) -> CorrPoint {
+    const unsigned cs  = (unsigned)std::round(n * m_CorrPeriodFloat);
+    const unsigned p_d = cs / ds;
+    if (p_d + window_len_d > loop_needed_d)
+      return {cs, 0u};
+    const float *lw = loop_mono.data() + p_d;
+    float    best_s = -2.f;
+    uint16_t best_r = 0;
     for (unsigned r_d = 0; r_d < r_max_d; r_d++) {
-      float s = NormalizedDotProduct(loop_window, release_mono.data(), r_d, window_len_d);
-      if (s > best_score) {
-        best_score = s;
-        best_r     = (uint16_t)((r_d * ds) % m_CorrPeriodSamples);
+      float sc
+        = NormalizedDotProduct(lw, release_mono.data(), r_d, window_len_d);
+      if (sc > best_s) {
+        best_s = sc;
+        best_r = (uint16_t)((r_d * ds) % m_CorrPeriodSamples);
       }
     }
-    points.push_back({crossfade_start, best_r});
+    return {cs, best_r};
+  };
+
+  // Circular distance between two best_r values, always in [0, T/2].
+  auto circ_dist = [&](uint16_t a, uint16_t b) -> int {
+    int d = (int)a - (int)b;
+    if (d < 0) d = -d;
+    if (d > (int)m_CorrPeriodSamples / 2)
+      d = (int)m_CorrPeriodSamples - d;
+    return d;
+  };
+
+  std::vector<CorrPoint> points;
+
+  if (n_total <= 30) {
+    // Short loop: distribute evenly from period 3 to n_total-1.
+    std::vector<unsigned> sp;
+    for (unsigned i = 0; i < 10 && i < n_total; i++) {
+      unsigned p = 3 + i * std::max(1u, (n_total - 3) / 9);
+      if (p < n_total)
+        sp.push_back(p);
+    }
+    std::sort(sp.begin(), sp.end());
+    sp.erase(std::unique(sp.begin(), sp.end()), sp.end());
+    for (unsigned p : sp)
+      points.push_back(corr_at(p));
+
+  } else {
+    // Long loop: adaptive algorithm.
+    constexpr unsigned DENSE_STEP  = 6;
+    constexpr unsigned MAX_DENSE_N = 100;
+    constexpr unsigned STABLE_WIN  = 4;
+    constexpr unsigned N_SPARSE    = 5;
+    constexpr unsigned MAX_TOTAL   = 30;
+
+    // Stability threshold: T/8 for regular pipes, T/6 for mixtures.
+    const int stable_thresh = std::max(
+      (int)m_CorrPeriodSamples
+        / (harmonic_number >= CORR_MIXTURE_HARMONIC_THRESHOLD ? 6 : 8),
+      4);
+
+    // Phase 1: dense sampling until r stabilises.
+    for (unsigned n = 5; n < n_total && n <= MAX_DENSE_N; n += DENSE_STEP) {
+      points.push_back(corr_at(n));
+      if ((unsigned)points.size() >= STABLE_WIN) {
+        bool ok = true;
+        for (unsigned k = (unsigned)points.size() - STABLE_WIN;
+             k + 1 < (unsigned)points.size() && ok; ++k)
+          if (circ_dist(points[k].best_r, points[k + 1].best_r)
+              > stable_thresh)
+            ok = false;
+        if (ok)
+          break;
+      }
+    }
+    if (points.empty())
+      points.push_back(corr_at(std::min(5u, n_total - 1)));
+
+    // Phase 2: sparse from last dense period to n_total-1.
+    const unsigned last_n = (unsigned)std::round(
+      points.back().loop_pos / m_CorrPeriodFloat);
+    if (last_n + 1 < n_total) {
+      const unsigned n_rem =
+        std::min(N_SPARSE, MAX_TOTAL - (unsigned)points.size());
+      for (unsigned i = 1; i <= n_rem; i++) {
+        const unsigned n = last_n + i * (n_total - 1 - last_n) / n_rem;
+        if (n > last_n && n < n_total)
+          points.push_back(corr_at(n));
+      }
+    }
+
+    // Phase 3: gap fill — one midpoint per deviating adjacent pair.
+    const int gap_thresh = (int)m_CorrPeriodSamples / 4;
+    unsigned  idx        = 0;
+    while (idx + 1 < points.size() && (unsigned)points.size() < MAX_TOTAL) {
+      if (circ_dist(points[idx].best_r, points[idx + 1].best_r)
+          > gap_thresh) {
+        const unsigned na = (unsigned)std::round(
+          points[idx].loop_pos     / m_CorrPeriodFloat);
+        const unsigned nb = (unsigned)std::round(
+          points[idx + 1].loop_pos / m_CorrPeriodFloat);
+        const unsigned nm = (na + nb) / 2;
+        if (nm > na && nm < nb) {
+          points.insert(points.begin() + idx + 1, corr_at(nm));
+          continue;  // recheck new left pair (idx, idx+1=midpoint)
+        }
+      }
+      ++idx;
+    }
   }
+
+  if (points.empty())
+    return;
 
 #if __has_include("GOLogReleaseAlignEnable.h")
   {
@@ -536,7 +612,10 @@ unsigned GOSoundReleaseAlignTable::GetPositionForCorrelation(
     return 0;
 
   const std::vector<CorrPoint> &m_CorrPoints = *pts;
-  unsigned phi = loop_pos % m_CorrPeriodSamples;
+  // Use float period for accurate phase — avoids drift from integer rounding.
+  const double T_f = (m_CorrPeriodFloat > 0.0) ? m_CorrPeriodFloat
+                                                : (double)m_CorrPeriodSamples;
+  unsigned phi = (unsigned)std::round(std::fmod((double)loop_pos, T_f));
   unsigned r_interp;
 
   if (m_CorrPoints.size() == 1 || loop_pos <= m_CorrPoints.front().loop_pos) {
@@ -616,3 +695,28 @@ unsigned GOSoundReleaseAlignTable::GetPositionFor(
                                            : ampIndex);
   return m_PositionEntries[derivIndex][ampIndex];
 }
+
+#if __has_include("GOLogReleaseAlignVerbose.h")
+void GOSoundReleaseAlignTable::DumpLutPoints(
+  const GOSoundAudioSection *p_Attack, std::ostream &out) const {
+  const std::vector<CorrPoint> *pts = FindLut(p_Attack);
+  if (!pts || pts->empty()) return;
+  for (const auto &cp : *pts)
+    out << "lut," << cp.loop_pos << "," << (unsigned)cp.best_r << "\n";
+}
+
+unsigned GOSoundReleaseAlignTable::CopyLutPoints(
+  const GOSoundAudioSection *p_Attack,
+  uint32_t *out_pos,
+  uint16_t *out_r,
+  unsigned  max_points) const {
+  const std::vector<CorrPoint> *pts = FindLut(p_Attack);
+  if (!pts || pts->empty()) return 0;
+  unsigned n = std::min((unsigned)pts->size(), max_points);
+  for (unsigned i = 0; i < n; i++) {
+    out_pos[i] = (*pts)[i].loop_pos;
+    out_r[i]   = (*pts)[i].best_r;
+  }
+  return n;
+}
+#endif

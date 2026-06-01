@@ -9,6 +9,7 @@
 #define GOSOUNDRELEASEALIGNTABLE_H
 
 #include <cstdint>
+#include <ostream>
 #include <vector>
 
 #include "GOSoundAudioSection.h"
@@ -45,7 +46,8 @@ private:
     std::vector<CorrPoint> points;
   };
   std::vector<AttackLut> m_CorrLuts;
-  uint32_t m_CorrPeriodSamples; // period length in samples (shared across LUTs)
+  uint32_t m_CorrPeriodSamples; // period length in samples (rounded integer)
+  double   m_CorrPeriodFloat;   // exact float period: sample_rate / freq_hz
   uint32_t m_CorrCrossfadeLen;  // crossfade window length in samples
 
   const std::vector<CorrPoint> *FindLut(
@@ -85,6 +87,19 @@ public:
     unsigned loop_pos, const GOSoundAudioSection *p_Attack = nullptr) const;
 
   unsigned GetPeriodSamples() const { return m_CorrPeriodSamples; }
+
+#if __has_include("GOLogReleaseAlignVerbose.h")
+  // Write LUT support points for the given attack to out (for debug logging).
+  void DumpLutPoints(
+    const GOSoundAudioSection *p_Attack, std::ostream &out) const;
+  // Copy LUT points into caller-supplied arrays (no allocation, safe in audio
+  // thread). Returns number of points actually copied (<= max_points).
+  unsigned CopyLutPoints(
+    const GOSoundAudioSection *p_Attack,
+    uint32_t *out_pos,
+    uint16_t *out_r,
+    unsigned  max_points) const;
+#endif
 };
 
 #endif /* GOSOUNDRELEASEALIGNTABLE_H */

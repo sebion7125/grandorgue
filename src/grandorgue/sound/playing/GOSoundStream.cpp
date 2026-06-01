@@ -14,12 +14,18 @@
 #if __has_include("GOLogReleaseAlignEnable.h")
 #define GO_LOG_RELEASE_ALIGN
 #endif
+// Verbose: also dumps raw sample values at the transition point (CSV).
+// Only fires when circ_diff > T/4. Requires GO_LOG_RELEASE_ALIGN.
+#if defined(GO_LOG_RELEASE_ALIGN) && __has_include("GOLogReleaseAlignVerbose.h")
+#define GO_LOG_RELEASE_ALIGN_VERBOSE
+#endif
 
 #ifdef GO_LOG_RELEASE_ALIGN
 #include <atomic>
-#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <thread>
 #endif
@@ -29,17 +35,15 @@
 #include "../GOCrossfadeParam.h"
 
 #ifdef GO_LOG_RELEASE_ALIGN
-struct ReleaseAlignEntry {
-  unsigned loop_pos, period, legacy, corr;
-};
 
-// Ring buffer: audio thread writes, writer thread reads. No locks needed
-// because there is only one writer and one reader, and we tolerate rare
-// missed entries at wrap-around (debug tool).
+struct ReleaseAlignEntry { unsigned loop_pos, period, legacy, corr; };
+
 static constexpr unsigned LOG_RING_SIZE = 1024;
-static ReleaseAlignEntry  s_Ring[LOG_RING_SIZE];
-static std::atomic<unsigned> s_WriteIdx{0};
-static std::atomic<unsigned> s_ReadIdx{0};
+static ReleaseAlignEntry       s_Ring[LOG_RING_SIZE];
+static std::atomic<unsigned>   s_WriteIdx{0};
+static std::atomic<unsigned>   s_ReadIdx{0};
+static std::mutex               s_CvMutex;
+static std::condition_variable  s_Cv;
 
 static std::string GetReleaseAlignLogPath() {
 #ifdef _WIN32
@@ -52,51 +56,161 @@ static std::string GetReleaseAlignLogPath() {
 #endif
 }
 
-// Called once from the writer thread — drains the ring buffer to disk.
-static void WriterThreadFunc() {
-  std::ofstream f(GetReleaseAlignLogPath(), std::ios::app);
-  while (true) {
-    unsigned w = s_WriteIdx.load(std::memory_order_acquire);
-    unsigned r = s_ReadIdx.load(std::memory_order_relaxed);
-    if (r == w) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      continue;
+static void WriterThread() {
+  for (;;) {
+    {
+      std::unique_lock<std::mutex> lk(s_CvMutex);
+      s_Cv.wait(lk, [] { return s_ReadIdx.load() != s_WriteIdx.load(); });
     }
-    const ReleaseAlignEntry &e = s_Ring[r % LOG_RING_SIZE];
-    unsigned phi = e.period ? e.loop_pos % e.period : 0;
-    int diff = (int)e.corr - (int)e.legacy;
-    f << "loop_pos=" << e.loop_pos
-      << " phi=" << phi
-      << " T=" << e.period
-      << " legacy=" << e.legacy
-      << " corr=" << e.corr
-      << " diff=" << diff
-      << "\n";
-    s_ReadIdx.store(r + 1, std::memory_order_release);
+    while (s_ReadIdx.load() != s_WriteIdx.load()) {
+      const auto &e = s_Ring[s_ReadIdx.load() % LOG_RING_SIZE];
+      unsigned phi = e.period ? e.loop_pos % e.period : 0;
+      int diff = (int)e.corr - (int)e.legacy;
+      {
+        std::ofstream f(GetReleaseAlignLogPath(), std::ios::app);
+        f << "loop_pos=" << e.loop_pos
+          << " phi=" << phi
+          << " T=" << e.period
+          << " legacy=" << e.legacy
+          << " corr=" << e.corr
+          << " diff=" << diff
+          << "\n";
+      }
+      s_ReadIdx.fetch_add(1, std::memory_order_release);
+    }
   }
 }
 
-static std::thread s_WriterThread;
+static std::once_flag s_ThreadOnce;
 
-// Called once at startup (first log entry).
-static void EnsureWriterThread() {
-  static std::atomic<bool> started{false};
-  if (!started.exchange(true))
-    s_WriterThread = std::thread(WriterThreadFunc);
-}
-
-// Audio-thread-safe: just writes to the ring buffer, no blocking.
 static void LogReleaseAlign(
-  unsigned loop_pos,
-  unsigned period,
-  unsigned legacy_result,
-  unsigned corr_result) {
-  EnsureWriterThread();
-  unsigned w = s_WriteIdx.load(std::memory_order_relaxed);
-  s_Ring[w % LOG_RING_SIZE] = {loop_pos, period, legacy_result, corr_result};
-  s_WriteIdx.store(w + 1, std::memory_order_release);
+  unsigned loop_pos, unsigned period,
+  unsigned legacy_result, unsigned corr_result) {
+  std::call_once(s_ThreadOnce, [] {
+    std::thread(WriterThread).detach();
+  });
+  unsigned idx = s_WriteIdx.fetch_add(1, std::memory_order_relaxed);
+  s_Ring[idx % LOG_RING_SIZE] = {loop_pos, period, legacy_result, corr_result};
+  s_Cv.notify_one();
 }
+
+#ifdef GO_LOG_RELEASE_ALIGN_VERBOSE
+
+static constexpr unsigned VERBOSE_WINDOW    = 512;
+static constexpr unsigned VERBOSE_RING_SIZE = 32;
+static constexpr unsigned VERBOSE_MAX_LUT   = 30;
+
+static std::string GetReleaseAlignVerbosePath() {
+#ifdef _WIN32
+  const char *tmp = std::getenv("TEMP");
+  if (!tmp) tmp = std::getenv("TMP");
+  if (!tmp) tmp = "C:\\";
+  return std::string(tmp) + "\\go_release_align_verbose.csv";
+#else
+  return "/tmp/go_release_align_verbose.csv";
 #endif
+}
+
+// Plain-old-data ring entry: only integer copies in the audio thread,
+// all string formatting happens in the writer thread.
+struct VerboseEntry {
+  unsigned loop_pos, period, legacy, corr;
+  uint32_t lut_pos[VERBOSE_MAX_LUT];
+  uint16_t lut_r[VERBOSE_MAX_LUT];
+  unsigned n_lut;
+  int      atk[VERBOSE_WINDOW];
+  int      leg[VERBOSE_WINDOW];
+  int      cor[VERBOSE_WINDOW];
+  unsigned n_atk, n_leg, n_cor;
+};
+
+static VerboseEntry           s_VerbRing[VERBOSE_RING_SIZE];
+static std::atomic<unsigned>  s_VerbWriteIdx{0};
+static std::atomic<unsigned>  s_VerbReadIdx{0};
+static std::mutex              s_VerbCvMutex;
+static std::condition_variable s_VerbCv;
+static std::once_flag          s_VerbThreadOnce;
+
+static void VerboseWriterThread() {
+  for (;;) {
+    {
+      std::unique_lock<std::mutex> lk(s_VerbCvMutex);
+      s_VerbCv.wait(
+        lk, [] { return s_VerbReadIdx.load() != s_VerbWriteIdx.load(); });
+    }
+    while (s_VerbReadIdx.load() != s_VerbWriteIdx.load()) {
+      const VerboseEntry &e = s_VerbRing[s_VerbReadIdx.load() % VERBOSE_RING_SIZE];
+      unsigned lin = e.corr > e.legacy ? e.corr - e.legacy : e.legacy - e.corr;
+      unsigned circ_diff = (lin < e.period - lin) ? lin : e.period - lin;
+      {
+        std::ofstream f(GetReleaseAlignVerbosePath(), std::ios::app);
+        f << "# vtrans loop_pos=" << e.loop_pos
+          << " phi=" << e.loop_pos % e.period
+          << " T=" << e.period
+          << " legacy=" << e.legacy
+          << " corr=" << e.corr
+          << " circ_diff=" << circ_diff << "\n";
+        for (unsigned i = 0; i < e.n_lut; i++)
+          f << "lut," << e.lut_pos[i] << "," << (unsigned)e.lut_r[i] << "\n";
+        for (unsigned i = 0; i < e.n_atk; i++)
+          f << "atk," << e.loop_pos << "," << i << "," << e.atk[i] << "\n";
+        for (unsigned i = 0; i < e.n_leg; i++)
+          f << "rel_leg," << e.loop_pos << "," << i << "," << e.leg[i] << "\n";
+        for (unsigned i = 0; i < e.n_cor; i++)
+          f << "rel_corr," << e.loop_pos << "," << i << "," << e.cor[i] << "\n";
+      }
+      s_VerbReadIdx.fetch_add(1, std::memory_order_release);
+    }
+  }
+}
+
+static void LogReleaseAlignVerbose(
+  unsigned loop_pos, unsigned period,
+  unsigned legacy_result, unsigned corr_result,
+  const GOSoundAudioSection *atk,
+  const GOSoundAudioSection *rel,
+  const GOSoundReleaseAlignTable *aligner) {
+  if (!period) return;
+  std::call_once(
+    s_VerbThreadOnce, [] { std::thread(VerboseWriterThread).detach(); });
+
+  // Drop silently if ring is full.
+  if (s_VerbWriteIdx.load(std::memory_order_relaxed)
+        - s_VerbReadIdx.load(std::memory_order_relaxed)
+      >= VERBOSE_RING_SIZE)
+    return;
+
+  unsigned idx = s_VerbWriteIdx.fetch_add(1, std::memory_order_relaxed);
+  VerboseEntry &e = s_VerbRing[idx % VERBOSE_RING_SIZE];
+
+  // Audio thread: integer copies only, no formatting, no file I/O.
+  e.loop_pos = loop_pos;
+  e.period   = period;
+  e.legacy   = legacy_result;
+  e.corr     = corr_result;
+  e.n_lut    = aligner
+    ? aligner->CopyLutPoints(atk, e.lut_pos, e.lut_r, VERBOSE_MAX_LUT)
+    : 0u;
+
+  const unsigned atk_len = atk->GetLength();
+  const unsigned rel_len = rel->GetLength();
+  // Use one cache per source so compressed sections decompress sequentially
+  // (O(start_pos + window)) instead of re-starting from 0 for every sample
+  // (O(start_pos × window)).
+  GOSoundCompressionCache ca, cl, cc;
+  ca.Init(); cl.Init(); cc.Init();
+  e.n_atk = e.n_leg = e.n_cor = 0;
+  for (unsigned i = 0; i < VERBOSE_WINDOW; i++) {
+    if (loop_pos      + i < atk_len) e.atk[e.n_atk++] = atk->GetSample(loop_pos      + i, 0, &ca);
+    if (legacy_result + i < rel_len) e.leg[e.n_leg++] = rel->GetSample(legacy_result  + i, 0, &cl);
+    if (corr_result   + i < rel_len) e.cor[e.n_cor++] = rel->GetSample(corr_result    + i, 0, &cc);
+  }
+
+  s_VerbCv.notify_one();
+}
+
+#endif  // GO_LOG_RELEASE_ALIGN_VERBOSE
+#endif  // GO_LOG_RELEASE_ALIGN
 
 /* Block reading functions */
 
@@ -404,6 +518,11 @@ void GOSoundStream::InitAlignedStream(
     unsigned corr_result   = releaseAligner->GetPositionForCorrelation(loop_pos, existing_stream->audio_section);
     LogReleaseAlign(
       loop_pos, releaseAligner->GetPeriodSamples(), legacy_result, corr_result);
+#ifdef GO_LOG_RELEASE_ALIGN_VERBOSE
+    LogReleaseAlignVerbose(
+      loop_pos, releaseAligner->GetPeriodSamples(), legacy_result, corr_result,
+      existing_stream->audio_section, pSection, releaseAligner);
+#endif
     startIndex = useCorr ? corr_result : legacy_result;
 #else
     if (useCorr) {

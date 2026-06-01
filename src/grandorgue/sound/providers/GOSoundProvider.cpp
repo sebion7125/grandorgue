@@ -31,8 +31,8 @@
 void GOSoundProvider::UpdateCacheHash(GOHash &hash) {
   hash.Update(sizeof(AttackSelector));
   hash.Update(sizeof(ReleaseSelector));
-  // Bump when the cache format changes (v3: per-attack correlation LUTs)
-  static const uint8_t CACHE_FORMAT_VERSION = 3;
+  // Bump when the cache format changes (v5: float period T for phase accuracy)
+  static const uint8_t CACHE_FORMAT_VERSION = 6;
   hash.Update(CACHE_FORMAT_VERSION);
 }
 
