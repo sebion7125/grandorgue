@@ -452,15 +452,21 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     release_mono[i] = s / rel_ch;
   }
 
-  // Compute CorrPoint at period index n.
-  // Forward window starts at crossfade_start so that release[r] and
-  // attack[crossfade_start] are compared head-to-head.
-  // Returns {crossfade_start, 0} if the window falls outside loop_mono.
-  auto corr_at = [&](unsigned n) -> CorrPoint {
+  // Temporary scored point — score not stored in LUT, only used during
+  // branch-consensus correction within this function.
+  struct ScoredPoint {
+    unsigned loop_pos;
+    uint16_t best_r;
+    float    score;
+  };
+
+  // Compute ScoredPoint at period index n (full search over [0, r_max_d)).
+  // Returns {cs, 0, -2} if the window falls outside loop_mono.
+  auto corr_at = [&](unsigned n) -> ScoredPoint {
     const unsigned cs  = (unsigned)std::round(n * m_CorrPeriodFloat);
     const unsigned p_d = cs / ds;
     if (p_d + window_len_d > loop_needed_d)
-      return {cs, 0u};
+      return {cs, 0u, -2.f};
     const float *lw = loop_mono.data() + p_d;
     float    best_s = -2.f;
     uint16_t best_r = 0;
@@ -472,7 +478,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
         best_r = (uint16_t)((r_d * ds) % m_CorrPeriodSamples);
       }
     }
-    return {cs, best_r};
+    return {cs, best_r, best_s};
   };
 
   // Circular distance between two best_r values, always in [0, T/2].
@@ -496,11 +502,51 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     }
     std::sort(sp.begin(), sp.end());
     sp.erase(std::unique(sp.begin(), sp.end()), sp.end());
+
+    std::vector<ScoredPoint> spoints;
     for (unsigned p : sp)
-      points.push_back(corr_at(p));
+      spoints.push_back(corr_at(p));
+
+    // Consensus: anchor on the highest-score point.
+    // Circular mean is unreliable when points split evenly between branches.
+    if (spoints.size() >= 2) {
+      const int st = std::max(
+        (int)m_CorrPeriodSamples
+          / (harmonic_number >= CORR_MIXTURE_HARMONIC_THRESHOLD ? 6 : 8),
+        4);
+      float best_sc = -2.f;
+      uint16_t consensus_r = spoints[0].best_r;
+      for (const ScoredPoint &s : spoints)
+        if (s.score > best_sc) { best_sc = s.score; consensus_r = s.best_r; }
+      const int dev_thresh = (int)m_CorrPeriodSamples / 4;
+      const int search_d   = st / (int)ds;
+      const int crd        = (int)consensus_r / (int)ds;
+      for (ScoredPoint &s : spoints) {
+        if (s.score < -1.f) continue;
+        if (circ_dist(s.best_r, consensus_r) <= dev_thresh) continue;
+        const unsigned p_d = s.loop_pos / ds;
+        if (p_d + window_len_d > loop_needed_d) continue;
+        const float *lw = loop_mono.data() + p_d;
+        float alt_s = -2.f; uint16_t alt_r = consensus_r;
+        for (int dr = -search_d; dr <= search_d; dr++) {
+          const int r_d = crd + dr;
+          if (r_d < 0 || r_d >= (int)r_max_d) continue;
+          float sc = NormalizedDotProduct(
+            lw, release_mono.data(), (unsigned)r_d, window_len_d);
+          if (sc > alt_s) {
+            alt_s = sc;
+            alt_r = (uint16_t)(((unsigned)r_d * ds) % m_CorrPeriodSamples);
+          }
+        }
+        if (alt_s > 0.f) { s.best_r = alt_r; s.score = alt_s; }
+      }
+    }
+
+    for (const auto &sp2 : spoints)
+      points.push_back({sp2.loop_pos, sp2.best_r});
 
   } else {
-    // Long loop: adaptive algorithm.
+    // Long loop: adaptive algorithm with branch-consensus correction.
     constexpr unsigned DENSE_STEP  = 6;
     constexpr unsigned MAX_DENSE_N = 100;
     constexpr unsigned STABLE_WIN  = 4;
@@ -513,54 +559,93 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
         / (harmonic_number >= CORR_MIXTURE_HARMONIC_THRESHOLD ? 6 : 8),
       4);
 
+    std::vector<ScoredPoint> spoints;
+    unsigned stable_win_end = (unsigned)-1;
+
     // Phase 1: dense sampling until r stabilises.
     for (unsigned n = 5; n < n_total && n <= MAX_DENSE_N; n += DENSE_STEP) {
-      points.push_back(corr_at(n));
-      if ((unsigned)points.size() >= STABLE_WIN) {
+      spoints.push_back(corr_at(n));
+      if ((unsigned)spoints.size() >= STABLE_WIN) {
         bool ok = true;
-        for (unsigned k = (unsigned)points.size() - STABLE_WIN;
-             k + 1 < (unsigned)points.size() && ok; ++k)
-          if (circ_dist(points[k].best_r, points[k + 1].best_r)
+        for (unsigned k = (unsigned)spoints.size() - STABLE_WIN;
+             k + 1 < (unsigned)spoints.size() && ok; ++k)
+          if (circ_dist(spoints[k].best_r, spoints[k + 1].best_r)
               > stable_thresh)
             ok = false;
-        if (ok)
+        if (ok) {
+          stable_win_end = (unsigned)spoints.size() - 1;
           break;
+        }
       }
     }
-    if (points.empty())
-      points.push_back(corr_at(std::min(5u, n_total - 1)));
+    if (spoints.empty())
+      spoints.push_back(corr_at(std::min(5u, n_total - 1)));
 
     // Phase 2: sparse from last dense period to n_total-1.
     const unsigned last_n = (unsigned)std::round(
-      points.back().loop_pos / m_CorrPeriodFloat);
+      spoints.back().loop_pos / m_CorrPeriodFloat);
     if (last_n + 1 < n_total) {
       const unsigned n_rem =
-        std::min(N_SPARSE, MAX_TOTAL - (unsigned)points.size());
+        std::min(N_SPARSE, MAX_TOTAL - (unsigned)spoints.size());
       for (unsigned i = 1; i <= n_rem; i++) {
         const unsigned n = last_n + i * (n_total - 1 - last_n) / n_rem;
         if (n > last_n && n < n_total)
-          points.push_back(corr_at(n));
+          spoints.push_back(corr_at(n));
       }
     }
 
     // Phase 3: gap fill — one midpoint per deviating adjacent pair.
     const int gap_thresh = (int)m_CorrPeriodSamples / 4;
     unsigned  idx        = 0;
-    while (idx + 1 < points.size() && (unsigned)points.size() < MAX_TOTAL) {
-      if (circ_dist(points[idx].best_r, points[idx + 1].best_r)
+    while (idx + 1 < spoints.size() && (unsigned)spoints.size() < MAX_TOTAL) {
+      if (circ_dist(spoints[idx].best_r, spoints[idx + 1].best_r)
           > gap_thresh) {
         const unsigned na = (unsigned)std::round(
-          points[idx].loop_pos     / m_CorrPeriodFloat);
+          spoints[idx].loop_pos     / m_CorrPeriodFloat);
         const unsigned nb = (unsigned)std::round(
-          points[idx + 1].loop_pos / m_CorrPeriodFloat);
+          spoints[idx + 1].loop_pos / m_CorrPeriodFloat);
         const unsigned nm = (na + nb) / 2;
         if (nm > na && nm < nb) {
-          points.insert(points.begin() + idx + 1, corr_at(nm));
+          spoints.insert(spoints.begin() + idx + 1, corr_at(nm));
           continue;  // recheck new left pair (idx, idx+1=midpoint)
         }
       }
       ++idx;
     }
+
+    // Branch-consensus correction: bimodal/trimodal correlation (strong 2nd
+    // harmonic → ~T/2 spacing, Quinte/3rd → ~T/3) can make best_r oscillate.
+    // stable_thresh is the safe search radius: T/8 stays within the T/2-wide
+    // basin (2 branches), T/6 within the T/3 basin (3 branches, Quinte).
+    // ds>1 only when T≥500, where stable_thresh≥62>>ds, so search_d≥1 always.
+    if (stable_win_end != (unsigned)-1) {
+      const uint16_t consensus_r = spoints[stable_win_end].best_r;
+      const int      dev_thresh  = (int)m_CorrPeriodSamples / 4;
+      const int      search_d    = stable_thresh / (int)ds;
+      const int      crd         = (int)consensus_r / (int)ds;
+      for (ScoredPoint &s : spoints) {
+        if (s.score < -1.f) continue;
+        if (circ_dist(s.best_r, consensus_r) <= dev_thresh) continue;
+        const unsigned p_d = s.loop_pos / ds;
+        if (p_d + window_len_d > loop_needed_d) continue;
+        const float *lw = loop_mono.data() + p_d;
+        float alt_s = -2.f; uint16_t alt_r = consensus_r;
+        for (int dr = -search_d; dr <= search_d; dr++) {
+          const int r_d = crd + dr;
+          if (r_d < 0 || r_d >= (int)r_max_d) continue;
+          float sc = NormalizedDotProduct(
+            lw, release_mono.data(), (unsigned)r_d, window_len_d);
+          if (sc > alt_s) {
+            alt_s = sc;
+            alt_r = (uint16_t)(((unsigned)r_d * ds) % m_CorrPeriodSamples);
+          }
+        }
+        if (alt_s > 0.f) { s.best_r = alt_r; s.score = alt_s; }
+      }
+    }
+
+    for (const auto &sp2 : spoints)
+      points.push_back({sp2.loop_pos, sp2.best_r});
   }
 
   if (points.empty())
@@ -643,12 +728,18 @@ unsigned GOSoundReleaseAlignTable::GetPositionForCorrelation(
     double t = (double)(loop_pos - p0.loop_pos)
              / (double)(p1.loop_pos - p0.loop_pos);
 
-    int r_signed = (int)p0.best_r + (int)std::round(t * diff);
-
-    // Fold into [0, T) — r_signed can go slightly negative when diff < 0
-    r_interp = (unsigned)((r_signed % (int)m_CorrPeriodSamples
-                           + (int)m_CorrPeriodSamples)
-                          % (int)m_CorrPeriodSamples);
+    // Residual branch-jump > T/4: step function instead of interpolation.
+    // Interpolating between branches produces values on neither branch —
+    // a hard midpoint-switch is always better than a meaningless average.
+    if (std::abs(diff) > (int)m_CorrPeriodSamples / 4) {
+      r_interp = (t < 0.5) ? p0.best_r : p1.best_r;
+    } else {
+      int r_signed = (int)p0.best_r + (int)std::round(t * diff);
+      // Fold into [0, T) — r_signed can go slightly negative when diff < 0
+      r_interp = (unsigned)((r_signed % (int)m_CorrPeriodSamples
+                             + (int)m_CorrPeriodSamples)
+                            % (int)m_CorrPeriodSamples);
+    }
   }
 
   // Fold into [0, T): r_interp and phi are both in [0, T), sum in [0, 2T).
