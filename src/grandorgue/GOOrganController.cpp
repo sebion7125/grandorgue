@@ -537,6 +537,24 @@ bool GOOrganController::ApplyLutCacheNow() {
   return true;
 }
 
+wxString GOOrganController::GetLutCachePath() const {
+  return GOLutCacheWriter::MakePath(m_config.OrganCachePath(), m_hash);
+}
+
+void GOOrganController::ClearAllCachedLuts() {
+  for (GOCacheObject *obj : GetCacheObjects()) {
+    GOSoundingPipe *pipe = dynamic_cast<GOSoundingPipe *>(obj);
+    if (!pipe) continue;
+    for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
+      const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
+      if (!sec) continue;
+      GOSoundReleaseAlignTable *aligner = sec->GetReleaseAligner();
+      if (aligner)
+        aligner->ClearCachedLut();
+    }
+  }
+}
+
 void GOOrganController::DeleteLutCache() {
   const wxString path
     = GOLutCacheWriter::MakePath(m_config.OrganCachePath(), GetOrganHash());

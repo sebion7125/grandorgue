@@ -27,8 +27,10 @@ public:
 private:
   GOOrganController *p_controller;
   GOSoundSystem     &r_soundSystem;
-  wxStaticText      *m_statusLabel;
+  wxStaticText      *m_cacheStatusLabel; // shows current .golut file state
+  wxStaticText      *m_statusLabel;      // shows result of last action
 
+  void UpdateCacheStatus();             // refresh m_cacheStatusLabel from disk
   void OnGenerate(wxCommandEvent &event);
   void OnDelete(wxCommandEvent &event);
 

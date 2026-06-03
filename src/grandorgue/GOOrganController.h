@@ -178,6 +178,9 @@ public:
   bool CachePresent() const { return wxFileExists(m_CacheFilename); }
   bool IsCacheable() const { return m_Cacheable; }
   unsigned GetLutReleaseCount() const { return m_lutReleaseCount; }
+  // Public accessors for LUT cache support.
+  const wxString &GetOdfHash() const { return m_ODFHash; }
+  wxString        GetLutCachePath() const;
   // Assign sequential parse indices to all release sections of all pipes.
   // Returns the total count (stored in m_lutReleaseCount).
   unsigned EnumerateReleaseParseIndices();
@@ -189,6 +192,11 @@ public:
 
   // Delete the .golut cache file for the current organ (if present).
   void DeleteLutCache();
+
+  // Remove cache-injected LUTs from all in-memory aligners so that Legacy
+  // alignment is used until the next organ load.
+  // Must be called inside GOSoundSystem::WithOrganEngineQuiesced.
+  void ClearAllCachedLuts();
 
   // Load the .golut cache from disk and immediately apply it to the
   // in-memory aligners.  Must be called with the audio engine quiesced

@@ -109,6 +109,10 @@ public:
   // No-op if m_CorrPeriodSamples is not yet set or points is empty.
   void OverrideCorrLutsFromCache(std::vector<CorrPoint> points);
 
+  // If this aligner holds a cache-injected LUT (single entry, p_Attack=nullptr),
+  // remove it so that Legacy alignment is used until the next organ load.
+  void ClearCachedLut();
+
 #if __has_include("GOLogReleaseAlignVerbose.h")
   // Write LUT support points for the given attack to out (for debug logging).
   void DumpLutPoints(

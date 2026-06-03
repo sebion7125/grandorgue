@@ -860,3 +860,8 @@ void GOSoundReleaseAlignTable::OverrideCorrLutsFromCache(
   m_CorrLuts.clear();
   m_CorrLuts.push_back({nullptr, std::move(points)});
 }
+
+void GOSoundReleaseAlignTable::ClearCachedLut() {
+  if (m_CorrLuts.size() == 1 && m_CorrLuts[0].p_Attack == nullptr)
+    m_CorrLuts.clear();
+}
