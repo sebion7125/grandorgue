@@ -95,6 +95,15 @@ public:
 
   unsigned GetPeriodSamples() const { return m_CorrPeriodSamples; }
 
+  // Returns true if at least one correlation LUT is present.
+  bool HasCorrLut() const { return !m_CorrLuts.empty(); }
+
+  // Returns the points of the first LUT, or nullptr if none.
+  // Used by the cache generator to extract quality-filtered LUT data.
+  const std::vector<CorrPoint> *GetFirstLutPoints() const {
+    return m_CorrLuts.empty() ? nullptr : &m_CorrLuts[0].points;
+  }
+
   // Replace any existing correlation LUTs with a single cached LUT that
   // applies to all attacks (p_Attack = nullptr → FindLut() fallback).
   // No-op if m_CorrPeriodSamples is not yet set or points is empty.

@@ -181,6 +181,11 @@ public:
   // Assign sequential parse indices to all release sections of all pipes.
   // Returns the total count (stored in m_lutReleaseCount).
   unsigned EnumerateReleaseParseIndices();
+
+  // Build a .golut cache from the quality-filtered LUTs that were computed
+  // during the last Load().  Returns true on success, sets errorMsg on failure.
+  // Safe to call from the GUI thread after Load(); no audio thread races.
+  bool GenerateLutCache(wxString &errorMsg);
   bool UpdateCache(GOProgressDialog *dlg, bool compress);
   void DeleteCache();
   void DeleteSettings();

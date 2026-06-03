@@ -499,6 +499,52 @@ wxString GOOrganController::GenerateCacheFileName() {
     + GOStdFileName::composeCacheFileName(GetOrganHash(), m_config.Preset());
 }
 
+bool GOOrganController::GenerateLutCache(wxString &errorMsg) {
+  if (m_lutReleaseCount == 0) {
+    errorMsg = _("No releases indexed. Load an organ first.");
+    return false;
+  }
+
+  std::vector<int32_t>    releaseMap(m_lutReleaseCount, -1);
+  std::vector<GOLutEntry> luts;
+
+  for (GOCacheObject *obj : GetCacheObjects()) {
+    GOSoundingPipe *pipe = dynamic_cast<GOSoundingPipe *>(obj);
+    if (!pipe) continue;
+    for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
+      const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
+      if (!sec) continue;
+      const unsigned parseIdx = sec->GetReleaseParseIndex();
+      if (parseIdx >= m_lutReleaseCount) continue;
+      const GOSoundReleaseAlignTable *aligner = sec->GetReleaseAligner();
+      if (!aligner || !aligner->HasCorrLut()) continue;
+      const std::vector<GOSoundReleaseAlignTable::CorrPoint> *pts
+        = aligner->GetFirstLutPoints();
+      if (!pts || pts->empty()) continue;
+
+      GOLutEntry entry;
+      entry.reserve(pts->size());
+      for (const auto &cp : *pts)
+        entry.push_back({cp.loop_pos, cp.best_r});
+
+      releaseMap[parseIdx] = (int32_t)luts.size();
+      luts.push_back(std::move(entry));
+    }
+  }
+
+  const wxString path
+    = GOLutCacheWriter::MakePath(m_config.OrganCachePath(), GetOrganHash());
+
+  GOLutGeneratorCriteria criteria; // default thresholds matching Python v47
+  if (!GOLutCacheWriter::Write(
+        path, m_ODFHash, m_lutReleaseCount, releaseMap, luts, criteria)) {
+    errorMsg = wxString::Format(
+      _("Failed to write LUT cache to %s"), path);
+    return false;
+  }
+  return true;
+}
+
 unsigned GOOrganController::EnumerateReleaseParseIndices() {
   unsigned counter = 0;
   for (GOCacheObject *obj : GetCacheObjects()) {
