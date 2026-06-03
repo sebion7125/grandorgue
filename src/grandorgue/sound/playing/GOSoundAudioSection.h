@@ -275,8 +275,10 @@ public:
   void SetupStreamAlignment(
     const std::vector<const GOSoundAudioSection *> &joinables,
     unsigned start_index,
-    float sample_freq_hz = 440.f,
-    unsigned harmonic_number = 8);
+    float    sample_freq_hz    = 440.f,
+    unsigned harmonic_number   = 8,
+    unsigned min_key_press_ms  = 0,
+    unsigned max_key_press_ms  = 0);
 
   void AssignAttackLutPointers(
     const std::vector<const GOSoundAudioSection *> &attacks);
