@@ -1361,7 +1361,7 @@ void GOFrame::OnUpdateLutCache(wxUpdateUIEvent &event) {
 
 void GOFrame::OnLutCacheGenerate(wxCommandEvent &) {
   if (!p_OrganController) return;
-  GOLutCacheDlg dlg(this, p_OrganController);
+  GOLutCacheDlg dlg(this, p_OrganController, r_SoundSystem);
   dlg.ShowModal();
 }
 

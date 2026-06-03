@@ -10,17 +10,23 @@
 #include <wx/dialog.h>
 
 class GOOrganController;
+class GOSoundSystem;
 class wxStaticText;
 
 // Dialog for generating and deleting the Release Alignment LUT cache.
 // The generation runs synchronously in the GUI thread; a progress bar
-// is shown via wxProgressDialog.
+// is shown via wxProgressDialog.  After generation, the cache is applied
+// immediately via GOSoundSystem::WithOrganEngineQuiesced (no audio glitch).
 class GOLutCacheDlg : public wxDialog {
 public:
-  GOLutCacheDlg(wxWindow *parent, GOOrganController *controller);
+  GOLutCacheDlg(
+    wxWindow          *parent,
+    GOOrganController *controller,
+    GOSoundSystem     &soundSystem);
 
 private:
   GOOrganController *p_controller;
+  GOSoundSystem     &r_soundSystem;
   wxStaticText      *m_statusLabel;
 
   void OnGenerate(wxCommandEvent &event);

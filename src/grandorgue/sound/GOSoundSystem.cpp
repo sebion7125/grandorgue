@@ -267,6 +267,22 @@ void GOSoundSystem::AssureSoundIsClosed() {
     CloseSound();
 }
 
+void GOSoundSystem::WithOrganEngineQuiesced(const std::function<void()> &action) {
+  GOMutexLocker locker(m_lock);
+  GOMultiMutexLocker multi;
+  for (unsigned i = 0; i < m_AudioOutputs.size(); i++)
+    multi.Add(m_AudioOutputs[i].mutex);
+
+  if (m_OrganController) {
+    m_SoundEngine.GetScheduler().PauseGivingWork();
+    for (GOSoundThread *thread : m_Threads)
+      thread->WaitForIdle();
+  }
+  action();
+  if (m_OrganController)
+    m_SoundEngine.GetScheduler().ResumeGivingWork();
+}
+
 void GOSoundSystem::AssignOrganFile(GOOrganController *organController) {
   if (organController == m_OrganController)
     return;
