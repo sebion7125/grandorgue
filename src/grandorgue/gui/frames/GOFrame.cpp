@@ -32,6 +32,7 @@
 #include "config/GOConfig.h"
 #include "config/GORegisteredOrgan.h"
 #include "files/GOStdFileName.h"
+#include "gui/dialogs/GOLutCacheDlg.h"
 #include "gui/dialogs/GONewReleaseDialog.h"
 #include "gui/dialogs/GOProgressDialog.h"
 #include "gui/dialogs/GOPropertiesDialog.h"
@@ -95,6 +96,10 @@ EVT_MENU(ID_AUDIO_MEMSET, GOFrame::OnAudioMemset)
 EVT_MENU(ID_AUDIO_STATE, GOFrame::OnAudioState)
 EVT_MENU_RANGE(ID_Crossfade_Linear, ID_Crossfade_Custom, GOFrame::OnSetCrossfade)
 EVT_MENU_RANGE(ID_ReleaseAlign_Legacy, ID_ReleaseAlign_Correlation, GOFrame::OnSetReleaseAlign)
+EVT_MENU(ID_LUT_CACHE_GENERATE, GOFrame::OnLutCacheGenerate)
+EVT_MENU(ID_LUT_CACHE_DELETE,   GOFrame::OnLutCacheDelete)
+EVT_UPDATE_UI(ID_LUT_CACHE_GENERATE, GOFrame::OnUpdateLutCache)
+EVT_UPDATE_UI(ID_LUT_CACHE_DELETE,   GOFrame::OnUpdateLutCache)
 EVT_MENU(ID_SETTINGS, GOFrame::OnSettings)
 EVT_MENU(ID_MIDI_LOAD, GOFrame::OnMidiLoad)
 EVT_MENU(wxID_HELP, GOFrame::OnHelp)
@@ -276,6 +281,11 @@ GOFrame::GOFrame(
     ID_ReleaseAlign_Legacy,      _("Legacy (instantaneous values)\tF2"));
   m_releasealign_menu->AppendRadioItem(
     ID_ReleaseAlign_Correlation, _("Correlation (new)\tF3"));
+  m_releasealign_menu->AppendSeparator();
+  m_releasealign_menu->Append(
+    ID_LUT_CACHE_GENERATE, _("Generate LUT Cache…"), wxEmptyString, wxITEM_NORMAL);
+  m_releasealign_menu->Append(
+    ID_LUT_CACHE_DELETE,   _("Delete LUT Cache"),    wxEmptyString, wxITEM_NORMAL);
   m_audio_menu->AppendSubMenu(m_releasealign_menu, _("&Release Alignment"));
 
   {
@@ -1343,6 +1353,21 @@ void GOFrame::OnSetReleaseAlign(wxCommandEvent &e) {
   SetReleaseAlignMode(m);
   // The LUT is computed at load time and is already in memory.
   // The switch takes effect on the next key-off event.
+}
+
+void GOFrame::OnUpdateLutCache(wxUpdateUIEvent &event) {
+  event.Enable(p_OrganController != nullptr);
+}
+
+void GOFrame::OnLutCacheGenerate(wxCommandEvent &) {
+  if (!p_OrganController) return;
+  GOLutCacheDlg dlg(this, p_OrganController);
+  dlg.ShowModal();
+}
+
+void GOFrame::OnLutCacheDelete(wxCommandEvent &) {
+  if (p_OrganController)
+    p_OrganController->DeleteLutCache();
 }
 
 void GOFrame::OnOrganSettings(wxCommandEvent &event) {

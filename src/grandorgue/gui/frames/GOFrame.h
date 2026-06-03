@@ -33,6 +33,8 @@ enum {
   ID_Crossfade_Custom,
   ID_ReleaseAlign_Legacy,
   ID_ReleaseAlign_Correlation,
+  ID_LUT_CACHE_GENERATE,
+  ID_LUT_CACHE_DELETE,
 };
 
 class GOApp;
@@ -147,6 +149,9 @@ private:
   void OnAudioState(wxCommandEvent &event);
   void OnSetCrossfade(wxCommandEvent &event);
   void OnSetReleaseAlign(wxCommandEvent &event);
+  void OnLutCacheGenerate(wxCommandEvent &event);
+  void OnLutCacheDelete(wxCommandEvent &event);
+  void OnUpdateLutCache(wxUpdateUIEvent &event);
 
   void SetEventAfterSettings(
     wxEventType eventType, int eventId, GOOrgan *pOrganFile = NULL);

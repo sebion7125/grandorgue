@@ -186,6 +186,9 @@ public:
   // during the last Load().  Returns true on success, sets errorMsg on failure.
   // Safe to call from the GUI thread after Load(); no audio thread races.
   bool GenerateLutCache(wxString &errorMsg);
+
+  // Delete the .golut cache file for the current organ (if present).
+  void DeleteLutCache();
   bool UpdateCache(GOProgressDialog *dlg, bool compress);
   void DeleteCache();
   void DeleteSettings();
