@@ -70,6 +70,7 @@
 #include "model/GOTremulant.h"
 #include "sound/GOCrossfadeParam.h"
 #include "sound/GOSoundOrganEngine.h"
+#include "sound/playing/GOLutCacheFile.h"
 #include "sound/playing/GOSoundReleaseAlignTable.h"
 #include "temperaments/GOTemperament.h"
 #include "yaml/GOYamlModel.h"
@@ -977,8 +978,43 @@ wxString GOOrganController::Load(
 
       // Assign sequential parse indices to all release sections.
       // The resulting count is stored in m_lutReleaseCount and used as
-      // releaseCount in the LUT cache file header (Phase 3+).
+      // releaseCount in the LUT cache file header.
       EnumerateReleaseParseIndices();
+
+      // Phase 3: Apply pre-computed LUT cache if available.
+      // Silently ignored on any mismatch (wrong ODF, version, count).
+      // Safe: PreparePlayback has not been called yet, no audio thread active.
+      {
+        const wxString lutPath = GOLutCacheWriter::MakePath(
+          m_config.OrganCachePath(), GetOrganHash());
+        GOLutCacheReader lutReader;
+        if (lutReader.Load(lutPath, m_ODFHash, m_lutReleaseCount)) {
+          const std::vector<int32_t>    &releaseMap = lutReader.GetReleaseMap();
+          const std::vector<GOLutEntry> &lutEntries = lutReader.GetLuts();
+          for (GOCacheObject *cobj : GetCacheObjects()) {
+            GOSoundingPipe *pipe = dynamic_cast<GOSoundingPipe *>(cobj);
+            if (!pipe) continue;
+            for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
+              const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
+              if (!sec) continue;
+              const unsigned parseIdx = sec->GetReleaseParseIndex();
+              if (parseIdx >= (unsigned)releaseMap.size()) continue;
+              const int32_t lutIdx = releaseMap[parseIdx];
+              if (lutIdx < 0) continue;
+              GOSoundReleaseAlignTable *aligner = sec->GetReleaseAligner();
+              if (!aligner) continue;
+              // Convert GOLutPoint → CorrPoint and inject into the aligner,
+              // replacing whatever the live computation produced.
+              const GOLutEntry &entry = lutEntries[(unsigned)lutIdx];
+              std::vector<GOSoundReleaseAlignTable::CorrPoint> pts;
+              pts.reserve(entry.size());
+              for (const GOLutPoint &pt : entry)
+                pts.push_back({pt.loop_pos, pt.best_r});
+              aligner->OverrideCorrLutsFromCache(std::move(pts));
+            }
+          }
+        }
+      }
 
     } catch (const GOOutOfMemory &e) {
         GOMessageBox(

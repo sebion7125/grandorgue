@@ -27,6 +27,14 @@ class GOCacheWriter;
 static constexpr unsigned CORR_MIXTURE_HARMONIC_THRESHOLD = 48;
 
 class GOSoundReleaseAlignTable {
+public:
+  // Public so callers (LUT cache loader, generator) can build point lists
+  // without going through ComputeCorrelationLut.
+  struct CorrPoint {
+    uint32_t loop_pos; // absolute sample position in loop (= n * period_samples)
+    uint16_t best_r;   // best release offset r* in samples, in [0, T)
+  };
+
 private:
   // ── Legacy (unchanged) ──────────────────────────────────────────────────
   int m_PhaseAlignMaxAmplitude;
@@ -34,13 +42,8 @@ private:
   int m_PositionEntries[PHASE_ALIGN_DERIVATIVES][PHASE_ALIGN_AMPLITUDES];
 
   // ── Sparse correlation LUT ──────────────────────────────────────────────
-  // Support points for one attack variant.
-  struct CorrPoint {
-    uint32_t loop_pos; // absolute sample position in loop (= n * period_samples)
-    uint16_t best_r;   // best release offset r* in samples, in [0, T)
-  };
   // One LUT per attack joinable; p_Attack is the runtime pointer used for
-  // lookup (null after cache load until AssignAttackPointers is called).
+  // lookup (null = applies to all attacks / loaded from cache).
   struct AttackLut {
     const GOSoundAudioSection *p_Attack = nullptr;
     std::vector<CorrPoint> points;
@@ -91,6 +94,11 @@ public:
     unsigned loop_pos, const GOSoundAudioSection *p_Attack = nullptr) const;
 
   unsigned GetPeriodSamples() const { return m_CorrPeriodSamples; }
+
+  // Replace any existing correlation LUTs with a single cached LUT that
+  // applies to all attacks (p_Attack = nullptr → FindLut() fallback).
+  // No-op if m_CorrPeriodSamples is not yet set or points is empty.
+  void OverrideCorrLutsFromCache(std::vector<CorrPoint> points);
 
 #if __has_include("GOLogReleaseAlignVerbose.h")
   // Write LUT support points for the given attack to out (for debug logging).

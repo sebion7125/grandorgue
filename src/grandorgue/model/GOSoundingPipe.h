@@ -135,6 +135,9 @@ public:
   unsigned GetReleaseCount() const {
     return m_SoundProvider.GetReleaseCount();
   }
+  const GOSoundAudioSection *GetReleaseSection(unsigned i) const {
+    return m_SoundProvider.GetReleaseSection(i);
+  }
 };
 
 #endif
