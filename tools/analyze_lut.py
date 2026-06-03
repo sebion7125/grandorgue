@@ -2873,7 +2873,59 @@ class LUTAnalyzerApp(tk.Tk):
 
 # ─── Einstiegspunkt ───────────────────────────────────────────────────────────
 
+def export_csv_batch(organ_path: str, output_path: str = None):
+    """
+    Batch mode for Phase 8 GO comparison.
+    Analyses all releases of an organ file and exports LUT points as CSV:
+      release_idx, point_idx, loop_pos, best_r
+    Releases with legacy_fallback (drift, instability, bad quality) are omitted —
+    matching GO's behaviour (releaseMap[i] = -1 for those).
+
+    Compare with GO output:
+      python3 analyze_lut_v48.py organ.organ --export-csv py.csv
+      python3 read_golut.py organ.release-align.golut --csv > go.csv
+      diff py.csv go.csv
+    """
+    import concurrent.futures
+
+    print(f"Parsing {organ_path} …", file=sys.stderr)
+    pipes = parse_organ_file(organ_path)
+    print(f"  {len(pipes)} release descriptors found", file=sys.stderr)
+
+    print("Analysing …", file=sys.stderr)
+    max_workers = max(1, (os.cpu_count() or 2) - 1)
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
+        results = list(ex.map(analyze_pipe, pipes))
+
+    out = open(output_path, 'w', newline='') if output_path else sys.stdout
+    try:
+        out.write("release_idx,point_idx,loop_pos,best_r\n")
+        n_cached = 0
+        for release_idx, pa in enumerate(results):
+            # Skip releases that GO would mark as no-LUT
+            if pa.legacy_fallback or not pa.lut_points:
+                continue
+            n_cached += 1
+            for pt_idx, pt in enumerate(pa.lut_points):
+                out.write(f"{release_idx},{pt_idx},{pt.loop_pos},{pt.best_r}\n")
+    finally:
+        if output_path:
+            out.close()
+
+    print(
+        f"Exported {n_cached} cached / {len(results)} total releases.",
+        file=sys.stderr)
+    if output_path:
+        print(f"Written to {output_path}", file=sys.stderr)
+
+
 def main():
+    # CLI batch mode: analyze_lut_v48.py <organ> --export-csv [output.csv]
+    if len(sys.argv) >= 3 and sys.argv[2] == '--export-csv':
+        out = sys.argv[3] if len(sys.argv) > 3 else None
+        export_csv_batch(sys.argv[1], out)
+        return
+
     initial = sys.argv[1] if len(sys.argv) > 1 else None
     app = LUTAnalyzerApp(initial_organ=initial)
     app.mainloop()
