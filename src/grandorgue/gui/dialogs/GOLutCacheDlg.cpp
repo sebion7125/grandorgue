@@ -16,6 +16,7 @@
 
 #include "GOEvent.h"
 #include "GOOrganController.h"
+#include "sound/GOSoundSystem.h"
 #include "sound/playing/GOLutCacheFile.h"
 
 enum {
@@ -28,7 +29,10 @@ wxBEGIN_EVENT_TABLE(GOLutCacheDlg, wxDialog)
   EVT_BUTTON(ID_BTN_DELETE,   GOLutCacheDlg::OnDelete)
 wxEND_EVENT_TABLE()
 
-GOLutCacheDlg::GOLutCacheDlg(wxWindow *parent, GOOrganController *controller)
+GOLutCacheDlg::GOLutCacheDlg(
+  wxWindow          *parent,
+  GOOrganController *controller,
+  GOSoundSystem     &soundSystem)
   : wxDialog(
       parent,
       wxID_ANY,
@@ -37,6 +41,7 @@ GOLutCacheDlg::GOLutCacheDlg(wxWindow *parent, GOOrganController *controller)
       wxDefaultSize,
       wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
     p_controller(controller),
+    r_soundSystem(soundSystem),
     m_statusLabel(nullptr) {
 
   wxBoxSizer *topSizer = new wxBoxSizer(wxVERTICAL);
@@ -112,13 +117,19 @@ void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
   const bool ok = p_controller->GenerateLutCache(errorMsg);
 
   if (ok) {
-    m_statusLabel->SetLabel(
-      wxString::Format(_("Cache generated: %u releases cached."),
-                       p_controller->GetLutReleaseCount()));
+    // Immediate activation: apply cache to in-memory aligners while the
+    // audio engine is quiesced (worker threads idle, no data race).
+    bool applied = false;
+    r_soundSystem.WithOrganEngineQuiesced([this, &applied]() {
+      applied = p_controller->ApplyLutCacheNow();
+    });
+
+    const wxString status = applied
+      ? _("Cache generated and activated immediately.")
+      : _("Cache generated. Will be used on next organ load.");
+    m_statusLabel->SetLabel(status);
     m_statusLabel->SetForegroundColour(*wxBLACK);
-    GOMessageBox(
-      _("Release Alignment LUT cache generated successfully."),
-      _("LUT Cache"), wxOK | wxICON_INFORMATION, this);
+    GOMessageBox(status, _("LUT Cache"), wxOK | wxICON_INFORMATION, this);
   } else {
     m_statusLabel->SetLabel(wxString::Format(_("Error: %s"), errorMsg));
     m_statusLabel->SetForegroundColour(*wxRED);

@@ -499,6 +499,44 @@ wxString GOOrganController::GenerateCacheFileName() {
     + GOStdFileName::composeCacheFileName(GetOrganHash(), m_config.Preset());
 }
 
+// Shared body for Phase 3 (Load) and Phase 6 (ApplyLutCacheNow).
+static void ApplyLutReaderToOrgan(
+  const GOLutCacheReader             &reader,
+  const std::vector<GOCacheObject *> &cacheObjects) {
+  const std::vector<int32_t>    &releaseMap = reader.GetReleaseMap();
+  const std::vector<GOLutEntry> &lutEntries = reader.GetLuts();
+  for (GOCacheObject *obj : cacheObjects) {
+    GOSoundingPipe *pipe = dynamic_cast<GOSoundingPipe *>(obj);
+    if (!pipe) continue;
+    for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
+      const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
+      if (!sec) continue;
+      const unsigned parseIdx = sec->GetReleaseParseIndex();
+      if (parseIdx >= (unsigned)releaseMap.size()) continue;
+      const int32_t lutIdx = releaseMap[parseIdx];
+      if (lutIdx < 0) continue;
+      GOSoundReleaseAlignTable *aligner = sec->GetReleaseAligner();
+      if (!aligner) continue;
+      const GOLutEntry &entry = lutEntries[(unsigned)lutIdx];
+      std::vector<GOSoundReleaseAlignTable::CorrPoint> pts;
+      pts.reserve(entry.size());
+      for (const GOLutPoint &pt : entry)
+        pts.push_back({pt.loop_pos, pt.best_r});
+      aligner->OverrideCorrLutsFromCache(std::move(pts));
+    }
+  }
+}
+
+bool GOOrganController::ApplyLutCacheNow() {
+  const wxString path
+    = GOLutCacheWriter::MakePath(m_config.OrganCachePath(), GetOrganHash());
+  GOLutCacheReader reader;
+  if (!reader.Load(path, m_ODFHash, m_lutReleaseCount))
+    return false;
+  ApplyLutReaderToOrgan(reader, GetCacheObjects());
+  return true;
+}
+
 void GOOrganController::DeleteLutCache() {
   const wxString path
     = GOLutCacheWriter::MakePath(m_config.OrganCachePath(), GetOrganHash());
@@ -1041,32 +1079,8 @@ wxString GOOrganController::Load(
         const wxString lutPath = GOLutCacheWriter::MakePath(
           m_config.OrganCachePath(), GetOrganHash());
         GOLutCacheReader lutReader;
-        if (lutReader.Load(lutPath, m_ODFHash, m_lutReleaseCount)) {
-          const std::vector<int32_t>    &releaseMap = lutReader.GetReleaseMap();
-          const std::vector<GOLutEntry> &lutEntries = lutReader.GetLuts();
-          for (GOCacheObject *cobj : GetCacheObjects()) {
-            GOSoundingPipe *pipe = dynamic_cast<GOSoundingPipe *>(cobj);
-            if (!pipe) continue;
-            for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
-              const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
-              if (!sec) continue;
-              const unsigned parseIdx = sec->GetReleaseParseIndex();
-              if (parseIdx >= (unsigned)releaseMap.size()) continue;
-              const int32_t lutIdx = releaseMap[parseIdx];
-              if (lutIdx < 0) continue;
-              GOSoundReleaseAlignTable *aligner = sec->GetReleaseAligner();
-              if (!aligner) continue;
-              // Convert GOLutPoint → CorrPoint and inject into the aligner,
-              // replacing whatever the live computation produced.
-              const GOLutEntry &entry = lutEntries[(unsigned)lutIdx];
-              std::vector<GOSoundReleaseAlignTable::CorrPoint> pts;
-              pts.reserve(entry.size());
-              for (const GOLutPoint &pt : entry)
-                pts.push_back({pt.loop_pos, pt.best_r});
-              aligner->OverrideCorrLutsFromCache(std::move(pts));
-            }
-          }
-        }
+        if (lutReader.Load(lutPath, m_ODFHash, m_lutReleaseCount))
+          ApplyLutReaderToOrgan(lutReader, GetCacheObjects());
       }
 
     } catch (const GOOutOfMemory &e) {

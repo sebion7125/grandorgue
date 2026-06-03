@@ -8,6 +8,7 @@
 #ifndef GOSOUNDSYSTEM_H
 #define GOSOUNDSYSTEM_H
 
+#include <functional>
 #include <map>
 #include <vector>
 
@@ -126,6 +127,11 @@ public:
 
   bool AssureSoundIsOpen();
   void AssureSoundIsClosed();
+
+  // Pause all audio worker threads (without closing audio ports), execute
+  // action(), then resume.  Safe for in-memory updates of shared organ data
+  // (e.g. LUT cache override) while audio is running.
+  void WithOrganEngineQuiesced(const std::function<void()> &action);
 
   wxString getLastErrorMessage() const { return m_LastErrorMessage; }
   wxString getState();

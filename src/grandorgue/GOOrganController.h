@@ -189,6 +189,12 @@ public:
 
   // Delete the .golut cache file for the current organ (if present).
   void DeleteLutCache();
+
+  // Load the .golut cache from disk and immediately apply it to the
+  // in-memory aligners.  Must be called with the audio engine quiesced
+  // (e.g. inside GOSoundSystem::WithOrganEngineQuiesced).
+  // Returns true if the cache was loaded and applied.
+  bool ApplyLutCacheNow();
   bool UpdateCache(GOProgressDialog *dlg, bool compress);
   void DeleteCache();
   void DeleteSettings();
