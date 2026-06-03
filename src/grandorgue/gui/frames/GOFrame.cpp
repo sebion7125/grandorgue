@@ -1366,8 +1366,11 @@ void GOFrame::OnLutCacheGenerate(wxCommandEvent &) {
 }
 
 void GOFrame::OnLutCacheDelete(wxCommandEvent &) {
-  if (p_OrganController)
-    p_OrganController->DeleteLutCache();
+  if (!p_OrganController) return;
+  p_OrganController->DeleteLutCache();
+  r_SoundSystem.WithOrganEngineQuiesced([this]() {
+    p_OrganController->ClearAllCachedLuts();
+  });
 }
 
 void GOFrame::OnOrganSettings(wxCommandEvent &event) {

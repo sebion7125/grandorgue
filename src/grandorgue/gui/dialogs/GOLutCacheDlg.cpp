@@ -7,11 +7,13 @@
 #include "GOLutCacheDlg.h"
 
 #include <wx/button.h>
+#include <wx/filename.h>
 #include <wx/intl.h>
 #include <wx/msgdlg.h>
 #include <wx/progdlg.h>
 #include <wx/settings.h>
 #include <wx/sizer.h>
+#include <wx/statline.h>
 #include <wx/stattext.h>
 
 #include "GOEvent.h"
@@ -42,9 +44,20 @@ GOLutCacheDlg::GOLutCacheDlg(
       wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
     p_controller(controller),
     r_soundSystem(soundSystem),
+    m_cacheStatusLabel(nullptr),
     m_statusLabel(nullptr) {
 
   wxBoxSizer *topSizer = new wxBoxSizer(wxVERTICAL);
+
+  // ── Current cache status ──────────────────────────────────────────────────
+  topSizer->Add(
+    new wxStaticText(this, wxID_ANY, _("Current cache status:")),
+    0, wxLEFT | wxTOP | wxRIGHT, 10);
+  m_cacheStatusLabel = new wxStaticText(this, wxID_ANY, wxEmptyString);
+  topSizer->Add(m_cacheStatusLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+  UpdateCacheStatus();
+
+  topSizer->Add(new wxStaticLine(this), 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
 
   // ── Info text ─────────────────────────────────────────────────────────────
   topSizer->Add(
@@ -81,7 +94,7 @@ GOLutCacheDlg::GOLutCacheDlg(
   hint->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
   topSizer->Add(hint, 0, wxALL, 10);
 
-  // ── Status label ──────────────────────────────────────────────────────────
+  // ── Action status label ───────────────────────────────────────────────────
   m_statusLabel = new wxStaticText(this, wxID_ANY, wxEmptyString);
   topSizer->Add(m_statusLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
 
@@ -101,6 +114,43 @@ GOLutCacheDlg::GOLutCacheDlg(
 
   SetSizerAndFit(topSizer);
   SetEscapeId(wxID_CLOSE);
+}
+
+void GOLutCacheDlg::UpdateCacheStatus() {
+  if (!m_cacheStatusLabel || !p_controller) return;
+
+  const wxString path = p_controller->GetLutCachePath();
+
+  if (!wxFileExists(path)) {
+    m_cacheStatusLabel->SetLabel(_("   Not present"));
+    m_cacheStatusLabel->SetForegroundColour(
+      wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
+    return;
+  }
+
+  GOLutCacheReader reader;
+  const bool valid = reader.Load(
+    path, p_controller->GetOdfHash(), p_controller->GetLutReleaseCount());
+
+  if (!valid) {
+    m_cacheStatusLabel->SetLabel(
+      _("   Invalid (ODF changed, version mismatch, or corrupted)"));
+    m_cacheStatusLabel->SetForegroundColour(*wxRED);
+    return;
+  }
+
+  // Count cached entries
+  unsigned cached = 0;
+  for (int32_t idx : reader.GetReleaseMap())
+    if (idx >= 0) cached++;
+
+  wxFileOffset sz = wxFileName::GetSize(path).GetLo();
+  m_cacheStatusLabel->SetLabel(wxString::Format(
+    _("   Valid — %u of %u releases cached, %.1f KB"),
+    cached,
+    p_controller->GetLutReleaseCount(),
+    sz / 1024.0));
+  m_cacheStatusLabel->SetForegroundColour(*wxBLACK);
 }
 
 void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
@@ -129,6 +179,7 @@ void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
       : _("Cache generated. Will be used on next organ load.");
     m_statusLabel->SetLabel(status);
     m_statusLabel->SetForegroundColour(*wxBLACK);
+    UpdateCacheStatus();
     GOMessageBox(status, _("LUT Cache"), wxOK | wxICON_INFORMATION, this);
   } else {
     m_statusLabel->SetLabel(wxString::Format(_("Error: %s"), errorMsg));
@@ -143,7 +194,12 @@ void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
 void GOLutCacheDlg::OnDelete(wxCommandEvent &) {
   if (!p_controller) return;
   p_controller->DeleteLutCache();
-  m_statusLabel->SetLabel(_("Cache deleted."));
+  r_soundSystem.WithOrganEngineQuiesced([this]() {
+    p_controller->ClearAllCachedLuts();
+  });
+  m_statusLabel->SetLabel(
+    _("Cache deleted. Live computation active until next reload."));
   m_statusLabel->SetForegroundColour(*wxBLACK);
+  UpdateCacheStatus();
   Layout();
 }
