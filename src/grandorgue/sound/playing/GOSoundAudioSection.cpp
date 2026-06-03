@@ -39,6 +39,7 @@ GOSoundAudioSection::GOSoundAudioSection(GOMemoryPool &pool)
   : m_data(NULL),
     m_ReleaseAligner(NULL),
     m_ReleaseStartSegment(0),
+    m_releaseParseIndex((unsigned)-1),
     m_Pool(pool) {
   ClearData();
 }
