@@ -499,6 +499,13 @@ wxString GOOrganController::GenerateCacheFileName() {
     + GOStdFileName::composeCacheFileName(GetOrganHash(), m_config.Preset());
 }
 
+void GOOrganController::DeleteLutCache() {
+  const wxString path
+    = GOLutCacheWriter::MakePath(m_config.OrganCachePath(), GetOrganHash());
+  if (wxFileExists(path))
+    wxRemoveFile(path);
+}
+
 bool GOOrganController::GenerateLutCache(wxString &errorMsg) {
   if (m_lutReleaseCount == 0) {
     errorMsg = _("No releases indexed. Load an organ first.");
