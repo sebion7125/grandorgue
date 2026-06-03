@@ -33,7 +33,6 @@ CLAUDE.md
 .cache/
 .cache/clangd/
 .vscode/
-.vscode/settings.json
 
 # Local Claude assistant settings
 .claude/settings.json
