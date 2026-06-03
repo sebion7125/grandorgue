@@ -206,6 +206,7 @@ sound/buffer/GOSoundBufferManaged.cpp
 sound/playing/GOSoundAudioSection.cpp
 sound/playing/GOSoundFader.cpp
 sound/playing/GOSoundFilter.cpp
+sound/playing/GOLutCacheFile.cpp
 sound/playing/GOSoundReleaseAlignTable.cpp
 sound/playing/GOSoundResample.cpp
 sound/playing/GOSoundSamplerPool.cpp
