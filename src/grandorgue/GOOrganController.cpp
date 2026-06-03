@@ -112,6 +112,7 @@ GOOrganController::GOOrganController(GOConfig &config, bool isAppInitialized)
     m_SettingFilename(),
     m_ODFHash(),
     m_Cacheable(false),
+    m_lutReleaseCount(0),
     m_setter(0),
     m_AudioRecorder(NULL),
     m_MidiPlayer(NULL),
@@ -495,6 +496,17 @@ wxString GOOrganController::GenerateSettingFileName() {
 wxString GOOrganController::GenerateCacheFileName() {
   return m_config.OrganCachePath() + wxFileName::GetPathSeparator()
     + GOStdFileName::composeCacheFileName(GetOrganHash(), m_config.Preset());
+}
+
+unsigned GOOrganController::EnumerateReleaseParseIndices() {
+  unsigned counter = 0;
+  for (GOCacheObject *obj : GetCacheObjects()) {
+    GOSoundingPipe *pipe = dynamic_cast<GOSoundingPipe *>(obj);
+    if (pipe)
+      counter = pipe->AssignReleaseParseIndices(counter);
+  }
+  m_lutReleaseCount = counter;
+  return counter;
 }
 
  
@@ -961,8 +973,13 @@ wxString GOOrganController::Load(
           // Despite a possible exception automatic calling ~GOLoadThread from
           // ~ptr_vector stops all additional worker threads
         }
-      __tim_cache_ms = __sw_cache.Time();      
-      
+      __tim_cache_ms = __sw_cache.Time();
+
+      // Assign sequential parse indices to all release sections.
+      // The resulting count is stored in m_lutReleaseCount and used as
+      // releaseCount in the LUT cache file header (Phase 3+).
+      EnumerateReleaseParseIndices();
+
     } catch (const GOOutOfMemory &e) {
         GOMessageBox(
           _("Out of memory - only parts of the organ are loaded. Please "

@@ -67,6 +67,9 @@ private:
   wxString m_SettingFilename;
   wxString m_ODFHash;
   bool m_Cacheable;
+  // Total number of release sections across all pipes, set after each load.
+  // Used as releaseCount in the LUT cache file header.
+  unsigned m_lutReleaseCount;
   GOSetter *m_setter;
   GODivisionalSetter *m_DivisionalSetter;
   GOAudioRecorder *m_AudioRecorder;
@@ -174,6 +177,10 @@ public:
   bool Export(const wxString &cmb);
   bool CachePresent() const { return wxFileExists(m_CacheFilename); }
   bool IsCacheable() const { return m_Cacheable; }
+  unsigned GetLutReleaseCount() const { return m_lutReleaseCount; }
+  // Assign sequential parse indices to all release sections of all pipes.
+  // Returns the total count (stored in m_lutReleaseCount).
+  unsigned EnumerateReleaseParseIndices();
   bool UpdateCache(GOProgressDialog *dlg, bool compress);
   void DeleteCache();
   void DeleteSettings();

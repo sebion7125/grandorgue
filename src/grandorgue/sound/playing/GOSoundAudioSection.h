@@ -94,6 +94,11 @@ private:
   GOSoundReleaseAlignTable *m_ReleaseAligner;
   unsigned m_ReleaseStartSegment;
 
+  // Sequential index assigned across all releases of all pipes after loading.
+  // Used to map GOLutCacheFile releaseMap entries to this section.
+  // UINT_MAX = attack section or not yet indexed.
+  unsigned m_releaseParseIndex;
+
   /* Number of significant bits in the decoded sample data */
   unsigned m_SampleFracBits;
 
@@ -271,6 +276,9 @@ public:
   }
 
   inline bool SupportsStreamAlignment() const { return (m_ReleaseAligner); }
+
+  void     SetReleaseParseIndex(unsigned idx) { m_releaseParseIndex = idx; }
+  unsigned GetReleaseParseIndex() const { return m_releaseParseIndex; }
 
   void SetupStreamAlignment(
     const std::vector<const GOSoundAudioSection *> &joinables,

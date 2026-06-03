@@ -359,3 +359,9 @@ GOSampleStatistic GOSoundProvider::GetStatistic() {
     stat.Cumulate(m_Release[i]->GetStatistic());
   return stat;
 }
+
+unsigned GOSoundProvider::AssignReleaseParseIndices(unsigned startIndex) {
+  for (unsigned i = 0; i < m_Release.size(); i++)
+    m_Release[i]->SetReleaseParseIndex(startIndex + i);
+  return startIndex + (unsigned)m_Release.size();
+}

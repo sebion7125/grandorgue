@@ -126,6 +126,15 @@ public:
     const wxString &filename);
   void Load(GOConfigReader &cfg, const wxString &group, const wxString &prefix)
     override;
+
+  // Assign sequential parse indices to all release sections of this pipe.
+  // Returns the next available index (startIndex + release count).
+  unsigned AssignReleaseParseIndices(unsigned startIndex) {
+    return m_SoundProvider.AssignReleaseParseIndices(startIndex);
+  }
+  unsigned GetReleaseCount() const {
+    return m_SoundProvider.GetReleaseCount();
+  }
 };
 
 #endif
