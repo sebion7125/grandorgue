@@ -112,6 +112,9 @@ public:
   void SetReleaseTail(unsigned releaseTail) { m_ReleaseTail = releaseTail; }
 
   unsigned GetReleaseCount() const { return (unsigned)m_Release.size(); }
+  const GOSoundAudioSection *GetReleaseSection(unsigned i) const {
+    return (i < m_Release.size()) ? m_Release[i] : nullptr;
+  }
 
   // Assign sequential parse indices to all release sections starting at
   // startIndex.  Returns the next available index (= startIndex + release count).

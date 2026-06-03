@@ -852,3 +852,11 @@ unsigned GOSoundReleaseAlignTable::CopyLutPoints(
   return n;
 }
 #endif
+
+void GOSoundReleaseAlignTable::OverrideCorrLutsFromCache(
+  std::vector<CorrPoint> points) {
+  if (m_CorrPeriodSamples == 0 || points.empty())
+    return;
+  m_CorrLuts.clear();
+  m_CorrLuts.push_back({nullptr, std::move(points)});
+}
