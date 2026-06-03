@@ -595,8 +595,10 @@ void GOSoundAudioSection::AssignAttackLutPointers(
 void GOSoundAudioSection::SetupStreamAlignment(
   const std::vector<const GOSoundAudioSection *> &joinables,
   unsigned start_index,
-  float sample_freq_hz,
-  unsigned harmonic_number) {
+  float    sample_freq_hz,
+  unsigned harmonic_number,
+  unsigned min_key_press_ms,
+  unsigned max_key_press_ms) {
   if (m_ReleaseAligner) {
     delete m_ReleaseAligner;
     m_ReleaseAligner = NULL;
@@ -630,7 +632,7 @@ void GOSoundAudioSection::SetupStreamAlignment(
       for (const GOSoundAudioSection *pAttack : joinables)
         m_ReleaseAligner->ComputeCorrelationLut(
           *pAttack, *this, crossfade_samples, m_SampleRate, sample_freq_hz,
-          harmonic_number);
+          harmonic_number, min_key_press_ms, max_key_press_ms);
     }
   }
 }

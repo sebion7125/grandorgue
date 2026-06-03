@@ -163,9 +163,25 @@ void GOSoundProvider::ComputeReleaseAlignmentInfo() {
     for (unsigned i = 0; i < m_Attack.size(); i++)
       if (m_AttackInfo[i].m_WaveTremulantStateFor == k)
         sections.push_back(m_Attack[i]);
-    for (unsigned i = 0; i < m_Release.size(); i++)
-      if (m_ReleaseInfo[i].m_WaveTremulantStateFor == k)
-        m_Release[i]->SetupStreamAlignment(sections, 0, sample_freq_hz, m_HarmonicNumber);
+    for (unsigned i = 0; i < m_Release.size(); i++) {
+      if (m_ReleaseInfo[i].m_WaveTremulantStateFor != k)
+        continue;
+      const unsigned my_max = m_ReleaseInfo[i].max_playback_time;
+      // min_ms = highest max_playback_time in this group that is strictly below my_max.
+      // This works regardless of release sort order.
+      unsigned min_ms = 0;
+      for (unsigned j = 0; j < m_Release.size(); j++) {
+        if (j == i || m_ReleaseInfo[j].m_WaveTremulantStateFor != k)
+          continue;
+        const unsigned their_max = m_ReleaseInfo[j].max_playback_time;
+        if (their_max < my_max && their_max > min_ms)
+          min_ms = their_max;
+      }
+      // max_key_press_ms=0 signals "no limit" (unlimited release).
+      const unsigned max_ms = (my_max == (unsigned)-1) ? 0u : my_max;
+      m_Release[i]->SetupStreamAlignment(
+        sections, 0, sample_freq_hz, m_HarmonicNumber, min_ms, max_ms);
+    }
 
     sections.clear();
     for (unsigned i = 0; i < m_Attack.size(); i++)

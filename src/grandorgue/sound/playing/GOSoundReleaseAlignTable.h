@@ -71,13 +71,17 @@ public:
     int history[BLOCK_HISTORY][MAX_OUTPUT_CHANNELS]) const;
 
   // Append one LUT for the given attack joinable. Call once per joinable.
+  // min_key_press_ms / max_key_press_ms restrict the LUT to the time window
+  // in which this release is actually triggered (0 = no restriction).
   void ComputeCorrelationLut(
     const GOSoundAudioSection &loop,
     const GOSoundAudioSection &release,
     unsigned crossfade_len,
     unsigned sample_rate,
-    float sample_freq_hz,
-    unsigned harmonic_number);
+    float    sample_freq_hz,
+    unsigned harmonic_number,
+    unsigned min_key_press_ms = 0,
+    unsigned max_key_press_ms = 0);
 
   // Restore runtime attack pointers after cache load (in joinable order).
   void AssignAttackPointers(
