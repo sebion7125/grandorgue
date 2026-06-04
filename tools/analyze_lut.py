@@ -48,6 +48,10 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v57: DC-Entfernung vor Hann-Fenster in estimate_period_by_autocorr.
+#      Ohne DC-Removal blaehte der Gleichanteil alle NDP-Werte Richtung 1
+#      auf → YIN fand T/2 statt T. Entspricht ChatGPT-Referenzskript.
+#      Diagnose-Felder cmndf_at_T_half/T/2T im Detail-Panel angezeigt.
 # v56: YIN-CMNDF Periodendetektion: findet erste starke Periodizitaet statt
 #      globalem NDP-Maximum — loest T/2-Problem fuer Mixturen mit gerader Harmonik.
 #      Fallback auf Lag-Penalty-NDP wenn kein YIN-Valley gefunden.
@@ -124,6 +128,11 @@ class PipeAnalysis:
     is_shortest_release: bool = False  # True für das Release mit kleinster max_key_press_ms
     min_sample:   int   = 0
     max_sample:   Optional[int] = None
+
+    # YIN diagnostics: CMNDF values at T/2, T, 2T (NaN if not computed)
+    cmndf_at_T_half: float = float('nan')
+    cmndf_at_T:      float = float('nan')
+    cmndf_at_2T:     float = float('nan')
 
     drift_mode: bool = False
     drift_per_period: float = 0.0
@@ -447,9 +456,11 @@ def estimate_period_by_autocorr(samples: np.ndarray,
     if N < max_period * 2:
         return min_period
 
-    # Hann window
+    # DC removal then Hann window (matches ChatGPT reference: seg -= mean before FFT).
+    # Removing DC prevents the mean offset from inflating sub-harmonic ACF peaks.
+    s    = samples.astype(np.float32) - float(np.mean(samples))
     hann = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(N) / (N - 1)))
-    x    = samples.astype(np.float32) * hann.astype(np.float32)
+    x    = s * hann.astype(np.float32)
     W    = N - max_period
     ref_n = x[:W] / (np.linalg.norm(x[:W]) + 1e-12)
 
@@ -481,10 +492,24 @@ def estimate_period_by_autocorr(samples: np.ndarray,
         elif in_valley:
             break
     if in_valley:
-        return yin_lag
+        result = yin_lag
+    else:
+        # Fallback: penalised NDP
+        result = int(lags[np.argmax(ndp_arr * (1.0 - 0.10 * lags / max_period))])
 
-    # Fallback: penalised NDP
-    return int(lags[np.argmax(ndp_arr * (1.0 - 0.10 * lags / max_period))])
+    # Diagnostic: CMNDF values at T/2, T, 2T for the RETURNED period.
+    def _cmndf_at(lag: int) -> float:
+        if lag < min_period or lag > max_period:
+            return float('nan')
+        i = lag - min_period
+        return float(cmndf[i]) if 0 <= i < len(cmndf) else float('nan')
+
+    diag = {
+        'cmndf_half': _cmndf_at(result // 2),
+        'cmndf_T':    _cmndf_at(result),
+        'cmndf_2T':   _cmndf_at(result * 2),
+    }
+    return result, diag
 
 
 # ─── LUT-Algorithmus (Python-Nachbau) ────────────────────────────────────────
@@ -874,9 +899,13 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
                 ac_window = max_p * 8
                 autocorr_region = atk_mono[loop_mid:loop_mid + ac_window]
                 if len(autocorr_region) >= max_p * 2:
-                    pa.T_int   = estimate_period_by_autocorr(
+                    t_est, diag = estimate_period_by_autocorr(
                         autocorr_region, min_p, max_p)
-                    pa.T_float = float(pa.T_int)
+                    pa.T_int          = t_est
+                    pa.T_float        = float(t_est)
+                    pa.cmndf_at_T_half = diag['cmndf_half']
+                    pa.cmndf_at_T      = diag['cmndf_T']
+                    pa.cmndf_at_2T     = diag['cmndf_2T']
 
         pa.n_total  = pa.loop_len // pa.T_int
 
@@ -2585,7 +2614,9 @@ class LUTAnalyzerApp(tk.Tk):
             info = f"❌ Fehler: {pa.error}"
         else:
             info_parts = [
-                f"T_float={pa.T_float:.2f}  T_int={pa.T_int}  SR={pa.sample_rate}Hz",
+                f"T_float={pa.T_float:.2f}  T_int={pa.T_int}  SR={pa.sample_rate}Hz"
+                + (f"  CMNDF: T/2={pa.cmndf_at_T_half:.3f}  T={pa.cmndf_at_T:.3f}  2T={pa.cmndf_at_2T:.3f}"
+                   if not (pa.cmndf_at_T_half != pa.cmndf_at_T_half) else ""),  # nan check
                 f"Loop: {pa.loop_start}–{pa.loop_end}  ({pa.loop_len} Samples, {pa.n_total} Perioden)",
                 f"Stabilisiert: {'Drift bei n=' + str(pa.stable_at_n) if pa.drift_mode else ('ja bei n=' + str(pa.stable_at_n) if pa.stabilized else '⚠ nein')}",
                 f"Drift: {pa.drift_per_period:.3f} Samples/Periode  Residuum={pa.drift_residual:.2f}  max_gap_n={pa.max_interp_gap_n}",
@@ -2920,7 +2951,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
     matching GO's behaviour (releaseMap[i] = -1 for those).
 
     Compare with GO output:
-      python3 analyze_lut_v56.py organ.organ --export-csv py.csv
+      python3 analyze_lut_v57.py organ.organ --export-csv py.csv
       python3 read_golut.py organ.release-align.golut --csv > go.csv
       diff py.csv go.csv
     """
@@ -2958,7 +2989,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
 
 
 def main():
-    # CLI batch mode: analyze_lut_v56.py <organ> --export-csv [output.csv]
+    # CLI batch mode: analyze_lut_v57.py <organ> --export-csv [output.csv]
     if len(sys.argv) >= 3 and sys.argv[2] == '--export-csv':
         out = sys.argv[3] if len(sys.argv) > 3 else None
         export_csv_batch(sys.argv[1], out)
