@@ -147,6 +147,10 @@ public:
   TryPermissiveLutForRelease(unsigned releaseIdx) const {
     return m_SoundProvider.TryPermissiveLutForRelease(releaseIdx);
   }
+  std::vector<GOSoundReleaseAlignTable::CorrPoint>
+  TryExhaustiveLutForRelease(unsigned releaseIdx) const {
+    return m_SoundProvider.TryExhaustiveLutForRelease(releaseIdx);
+  }
 };
 
 #endif

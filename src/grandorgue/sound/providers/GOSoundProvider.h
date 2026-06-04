@@ -120,12 +120,18 @@ public:
   // startIndex.  Returns the next available index (= startIndex + release count).
   unsigned AssignReleaseParseIndices(unsigned startIndex);
 
-  // For force-all cache generation: compute a permissive LUT for a release
-  // that has no quality-filtered LUT (HasCorrLut()==false on its aligner).
-  // Returns the best-effort CorrPoints, or empty if nothing can be computed.
+  // Compute a permissive (no quality-guards) LUT for a release.
+  // Used by the non-force generator path for legacy-fallback releases.
   // Does NOT modify the live in-memory aligner.
   std::vector<GOSoundReleaseAlignTable::CorrPoint>
   TryPermissiveLutForRelease(unsigned releaseIdx) const;
+
+  // Compute an exhaustive LUT for a release: corr_at() for every period
+  // n in [n_start, n_end), no quality guards, no MAX_TOTAL cap.
+  // Used by the force-all generator to produce complete coverage.
+  // Does NOT modify the live in-memory aligner.
+  std::vector<GOSoundReleaseAlignTable::CorrPoint>
+  TryExhaustiveLutForRelease(unsigned releaseIdx) const;
 
   unsigned GetMidiKeyNumber() const;
   float GetMidiPitchFract() const;

@@ -317,7 +317,9 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   unsigned harmonic_number,
   unsigned min_key_press_ms,
   unsigned max_key_press_ms,
-  bool     permissive) {
+  bool     permissive,
+  bool     exhaustive) {
+  if (exhaustive) permissive = true; // exhaustive implies permissive
 #if __has_include("GOLogReleaseAlignEnable.h")
   const auto t0 = std::chrono::high_resolution_clock::now();
 #endif
@@ -516,6 +518,20 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
 
   std::vector<ScoredPoint> spoints;
 
+  // ── Exhaustive mode: full scan of all n in [n_start, n_end) ──────────────
+  // Used by the force-all generator to produce a complete lookup table that
+  // covers every key-press duration.  No adaptive sampling, no quality guards,
+  // no MAX_TOTAL cap.  Callers are responsible for the larger cache size.
+  if (exhaustive) {
+    for (unsigned n = n_start; n < n_end; n++) {
+      ScoredPoint sp = corr_at(n);
+      if (sp.score > -1.5f) spoints.push_back(sp);
+    }
+    if (spoints.empty()) return;
+    // Skip all quality checks and fall through to CorrPoint conversion.
+    goto lut_commit;
+  }
+
   // ── Short loop (n_total ≤ 30) ─────────────────────────────────────────────
   if (n_total <= 30) {
     const unsigned span = (n_end > n_start) ? n_end - n_start : 0u;
@@ -693,6 +709,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     }
   }
 
+lut_commit:
   // Convert to CorrPoint and append LUT entry.
   std::vector<CorrPoint> points;
   points.reserve(spoints.size());
