@@ -125,9 +125,12 @@ void GOLutCacheDlg::UpdateCacheStatus() {
     return;
   }
 
+  // headerOnly=true: reads ~104 bytes only, avoids loading the full file
+  // just for the status display.  The LUT data is already in RAM from Load().
   GOLutCacheReader reader;
   const bool valid = reader.Load(
-    path, p_controller->GetOdfHash(), p_controller->GetLutReleaseCount());
+    path, p_controller->GetOdfHash(), p_controller->GetLutReleaseCount(),
+    /*headerOnly=*/true);
 
   if (!valid) {
     m_cacheStatusLabel->SetLabel(
@@ -136,15 +139,10 @@ void GOLutCacheDlg::UpdateCacheStatus() {
     return;
   }
 
-  // Count cached entries
-  unsigned cached = 0;
-  for (int32_t idx : reader.GetReleaseMap())
-    if (idx >= 0) cached++;
-
   wxFileOffset sz = wxFileName::GetSize(path).GetLo();
   m_cacheStatusLabel->SetLabel(wxString::Format(
     _("   Valid - %u of %u releases cached, %.1f KB"),
-    cached,
+    reader.GetLutCount(),
     p_controller->GetLutReleaseCount(),
     sz / 1024.0));
   m_cacheStatusLabel->SetForegroundColour(*wxBLACK);

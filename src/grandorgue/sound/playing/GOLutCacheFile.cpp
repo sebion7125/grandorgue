@@ -116,8 +116,10 @@ bool GOLutCacheWriter::Write(
 bool GOLutCacheReader::Load(
   const wxString &path,
   const wxString &expectedOdfHash,
-  uint32_t        expectedReleaseCount) {
-  m_valid = false;
+  uint32_t        expectedReleaseCount,
+  bool            headerOnly) {
+  m_valid    = false;
+  m_lutCount = 0;
   m_releaseMap.clear();
   m_luts.clear();
 
@@ -148,9 +150,16 @@ bool GOLutCacheReader::Load(
   if (!ReadAll(f, &releaseCount, sizeof(releaseCount))) return false;
   if (!ReadAll(f, &lutCount,     sizeof(lutCount)))     return false;
   if (releaseCount != expectedReleaseCount) return false;
-  // lutCount can't exceed the number of releases; also guard against corrupt
-  // files that would cause huge allocations.
   if (lutCount > releaseCount) return false;
+
+  m_lutCount = lutCount;
+
+  // headerOnly: header validated, counts available — skip the bulk data.
+  // Used by the dialog status display to avoid reading the full file.
+  if (headerOnly) {
+    m_valid = true;
+    return true;
+  }
 
   // Generator criteria (read but not validated — diagnostics only)
   if (!ReadAll(f, &m_criteria.minScore,             sizeof(m_criteria.minScore)))             return false;
