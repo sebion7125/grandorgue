@@ -41,70 +41,69 @@ bool GOLutCacheWriter::Write(
   const std::vector<GOLutEntry> &luts,
   const GOLutGeneratorCriteria &criteria) {
 
-  const wxString tmpPath = path + wxT(".tmp");
+  if (releaseMap.size() != releaseCount) return false;
 
-  wxFile f;
-  if (!f.Open(tmpPath, wxFile::write))
-    return false;
-
-  // Helper that closes+removes the tmp file on failure.
-  auto fail = [&]() -> bool {
-    f.Close();
-    wxRemoveFile(tmpPath);
-    return false;
-  };
-
-  // ── Header ──────────────────────────────────────────────────────────────────
-  if (!WriteAll(f, GOLUT_MAGIC, sizeof(GOLUT_MAGIC))) return fail();
-
-  const uint32_t fmtVer  = GOLUT_FORMAT_VERSION;
-  const uint32_t algVer  = GOLUT_ALGORITHM_VERSION;
+  // ── Serialize entirely into memory, then write in one call ────────────────
+  // The previous per-field WriteAll() approach made millions of syscalls for
+  // large caches.  Serialise into a buffer and write once.
   const uint32_t lutCount = (uint32_t)luts.size();
 
-  if (!WriteAll(f, &fmtVer,       sizeof(fmtVer)))      return fail();
-  if (!WriteAll(f, &algVer,       sizeof(algVer)))       return fail();
-
-  // odfHash: fixed 64-byte null-terminated UTF-8 field
   char hashField[GOLUT_HASH_FIELD] = {};
   const wxScopedCharBuffer utf8 = odfHash.utf8_str();
-  if (utf8.length() >= GOLUT_HASH_FIELD) return fail(); // hash too long
+  if (utf8.length() >= GOLUT_HASH_FIELD) return false;
   strncpy(hashField, utf8.data(), GOLUT_HASH_FIELD - 1);
-  if (!WriteAll(f, hashField, GOLUT_HASH_FIELD))         return fail();
 
-  // Validate releaseMap size before writing to avoid out-of-bounds read.
-  if (releaseMap.size() != releaseCount) return fail();
+  // Pre-calculate buffer size to avoid reallocations.
+  size_t bufSize = sizeof(GOLUT_MAGIC)
+    + 4 + 4 + GOLUT_HASH_FIELD + 4 + 4  // versions + hash + counts
+    + sizeof(criteria.minScore) + sizeof(criteria.minCoherence)
+    + sizeof(criteria.maxGapFills) + sizeof(criteria.requireStabilization)
+    + sizeof(criteria.useDriftFallback) + sizeof(criteria._pad)
+    + (size_t)releaseCount * sizeof(int32_t);
+  for (const auto &e : luts)
+    bufSize += sizeof(uint32_t)
+              + e.size() * (sizeof(uint32_t) + sizeof(uint16_t));
 
-  if (!WriteAll(f, &releaseCount, sizeof(releaseCount))) return fail();
-  if (!WriteAll(f, &lutCount,     sizeof(lutCount)))     return fail();
+  std::vector<uint8_t> buf;
+  buf.reserve(bufSize);
 
-  // Generator criteria
-  if (!WriteAll(f, &criteria.minScore,             sizeof(criteria.minScore)))             return fail();
-  if (!WriteAll(f, &criteria.minCoherence,         sizeof(criteria.minCoherence)))         return fail();
-  if (!WriteAll(f, &criteria.maxGapFills,          sizeof(criteria.maxGapFills)))          return fail();
-  if (!WriteAll(f, &criteria.requireStabilization, sizeof(criteria.requireStabilization))) return fail();
-  if (!WriteAll(f, &criteria.useDriftFallback,     sizeof(criteria.useDriftFallback)))     return fail();
-  if (!WriteAll(f, criteria._pad, sizeof(criteria._pad))) return fail();
+  auto put = [&](const void *src, size_t n) {
+    const auto *p = static_cast<const uint8_t *>(src);
+    buf.insert(buf.end(), p, p + n);
+  };
+  auto putU32 = [&](uint32_t v) { put(&v, 4); };
 
-  // ── ReleaseMap ──────────────────────────────────────────────────────────────
+  put(GOLUT_MAGIC, sizeof(GOLUT_MAGIC));
+  putU32(GOLUT_FORMAT_VERSION);
+  putU32(GOLUT_ALGORITHM_VERSION);
+  put(hashField, GOLUT_HASH_FIELD);
+  putU32(releaseCount);
+  putU32(lutCount);
+  put(&criteria.minScore,             sizeof(criteria.minScore));
+  put(&criteria.minCoherence,         sizeof(criteria.minCoherence));
+  put(&criteria.maxGapFills,          sizeof(criteria.maxGapFills));
+  put(&criteria.requireStabilization, sizeof(criteria.requireStabilization));
+  put(&criteria.useDriftFallback,     sizeof(criteria.useDriftFallback));
+  put(criteria._pad,                  sizeof(criteria._pad));
   if (releaseCount > 0)
-    if (!WriteAll(f, releaseMap.data(), releaseCount * sizeof(int32_t)))
-      return fail();
-
-  // ── LUT entries ─────────────────────────────────────────────────────────────
-  for (const GOLutEntry &entry : luts) {
+    put(releaseMap.data(), (size_t)releaseCount * sizeof(int32_t));
+  for (const auto &entry : luts) {
     const uint32_t n = (uint32_t)entry.size();
-    if (!WriteAll(f, &n, sizeof(n))) return fail();
-    for (const GOLutPoint &pt : entry) {
-      if (!WriteAll(f, &pt.loop_pos, sizeof(pt.loop_pos))) return fail();
-      if (!WriteAll(f, &pt.best_r,   sizeof(pt.best_r)))   return fail();
+    putU32(n);
+    for (const auto &pt : entry) {
+      put(&pt.loop_pos, sizeof(pt.loop_pos));
+      put(&pt.best_r,   sizeof(pt.best_r));
     }
   }
 
+  // Write tmp file in one shot, then atomically rename.
+  const wxString tmpPath = path + wxT(".tmp");
+  wxFile f;
+  if (!f.Open(tmpPath, wxFile::write)) return false;
+  const bool ok = (f.Write(buf.data(), buf.size()) == (wxFileOffset)buf.size());
   f.Close();
+  if (!ok) { wxRemoveFile(tmpPath); return false; }
 
-  // Atomic replace: on POSIX wxRenameFile(overwrite=true) calls rename(2)
-  // which replaces the destination atomically — the old cache is never
-  // absent.  On Windows this is best-effort (delete+rename, not atomic).
   if (!wxRenameFile(tmpPath, path, true)) {
     wxRemoveFile(tmpPath);
     return false;
