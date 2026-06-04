@@ -140,7 +140,7 @@ void GOLutCacheDlg::UpdateCacheStatus() {
 
   wxFileOffset sz = wxFileName::GetSize(path).GetLo();
   m_cacheStatusLabel->SetLabel(wxString::Format(
-    _("   Valid — %u of %u releases cached, %.1f KB"),
+    _("   Valid - %u of %u releases cached, %.1f KB"),
     cached,
     p_controller->GetLutReleaseCount(),
     sz / 1024.0));
