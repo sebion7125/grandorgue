@@ -172,8 +172,9 @@ bool GOLutCacheReader::Load(
     if (idx != -1 && (uint32_t)idx >= lutCount) return false;
 
   // ── LUT entries ─────────────────────────────────────────────────────────────
-  // MAX_TOTAL in ComputeCorrelationLut is 30; allow 256 for future growth.
-  static constexpr uint32_t GOLUT_MAX_POINTS = 256;
+  // Sparse LUT: MAX_TOTAL=30.  Exhaustive LUT: up to n_total which can be
+  // several hundred for long attacks.  4096 leaves generous headroom.
+  static constexpr uint32_t GOLUT_MAX_POINTS = 4096;
   m_luts.resize(lutCount);
   for (GOLutEntry &entry : m_luts) {
     uint32_t n = 0;
