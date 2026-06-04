@@ -283,7 +283,7 @@ GOFrame::GOFrame(
     ID_ReleaseAlign_Correlation, _("Correlation (new)\tF3"));
   m_releasealign_menu->AppendSeparator();
   m_releasealign_menu->Append(
-    ID_LUT_CACHE_GENERATE, _("Generate LUT Cache…"), wxEmptyString, wxITEM_NORMAL);
+    ID_LUT_CACHE_GENERATE, _("Generate LUT Cache..."), wxEmptyString, wxITEM_NORMAL);
   m_releasealign_menu->Append(
     ID_LUT_CACHE_DELETE,   _("Delete LUT Cache"),    wxEmptyString, wxITEM_NORMAL);
   m_audio_menu->AppendSubMenu(m_releasealign_menu, _("&Release Alignment"));

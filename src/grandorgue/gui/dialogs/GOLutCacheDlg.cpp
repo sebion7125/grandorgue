@@ -158,7 +158,7 @@ void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
 
   wxProgressDialog prog(
     _("Release Alignment LUT Cache"),
-    _("Generating…"),
+    _("Generating..."),
     100, this,
     wxPD_APP_MODAL | wxPD_AUTO_HIDE);
   prog.Pulse();
