@@ -602,13 +602,14 @@ bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll) {
       std::vector<GOSoundReleaseAlignTable::CorrPoint> permPts;
 
       // Determine point source: live LUT or permissive recompute.
-      // Multi-LUT releases (>1 attack joinable) are skipped: the .golut
-      // format stores one LUT per release, and using only the first LUT
-      // as a fallback for all attacks would silently ignore the others.
+      // For releases with multiple attack-joinable LUTs (velocity layers),
+      // we cache the first LUT and it acts as the fallback for all attacks.
+      // This matches the existing FindLut() fallback path and is acceptable
+      // because velocity-layer loop bodies are acoustically very similar.
       const std::vector<GOSoundReleaseAlignTable::CorrPoint> *pts = nullptr;
-      if (aligner && aligner->GetCorrLutCount() == 1) {
+      if (aligner && aligner->HasCorrLut()) {
         pts = aligner->GetFirstLutPoints();
-      } else if (forceAll && (!aligner || aligner->GetCorrLutCount() == 0)) {
+      } else if (forceAll) {
         permPts = pipe->TryPermissiveLutForRelease(i);
         if (!permPts.empty()) pts = &permPts;
       }
