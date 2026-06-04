@@ -305,6 +305,21 @@ static unsigned EstimatePeriodByAutocorr(
       best_lag   = lag;
     }
   }
+
+  // Sub-harmonic check: if best_lag is a multiple of a shorter period that
+  // also correlates well, prefer the shorter one.  Handles the common 2*T
+  // false-detection caused by a strong even-harmonic structure.
+  for (unsigned div = 2; div <= 4; div++) {
+    if (best_lag % div != 0) continue;
+    const unsigned candidate = best_lag / div;
+    if (candidate < min_period) break;
+    const float s = NormalizedDotProduct(samples, samples, candidate, window);
+    if (s > best_score * 0.94f) {
+      best_lag   = candidate;
+      best_score = s;
+    }
+  }
+
   return best_lag;
 }
 
@@ -388,7 +403,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   const double T_f = (m_CorrPeriodFloat > 0.0) ? m_CorrPeriodFloat
                                                 : (double)m_CorrPeriodSamples;
 
-  unsigned window_len = std::min(crossfade_len, 2 * m_CorrPeriodSamples);
+  unsigned window_len = crossfade_len;
   if (window_len < 4)
     return;
 
