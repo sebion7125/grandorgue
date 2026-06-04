@@ -298,29 +298,17 @@ static unsigned EstimatePeriodByAutocorr(
   float    best_score = -2.f;
   unsigned best_lag   = min_period;
 
+  // Small lag penalty: score shorter periods slightly higher so that when
+  // NDP(T) ≈ NDP(2T) (perfect loop), T is preferred over its multiples.
+  // alpha=0.10 means a lag at max_period pays a 10% penalty vs. min_period.
+  // This naturally avoids 2*T false-detections without a fragile threshold.
+  const float alpha = 0.10f;
   for (unsigned lag = min_period; lag <= max_period; lag++) {
-    float s = NormalizedDotProduct(samples, samples, lag, window);
+    const float raw = NormalizedDotProduct(samples, samples, lag, window);
+    const float s   = raw * (1.f - alpha * (float)lag / (float)max_period);
     if (s > best_score) {
       best_score = s;
       best_lag   = lag;
-    }
-  }
-
-  // Sub-harmonic check: prefer the shortest period whose NDP is within 6% of
-  // the winner.  Uses rounded division so odd-valued 2*T (e.g. 1119→560) is
-  // caught too.  Compares against the original winner score throughout so
-  // chained updates cannot artificially lower the bar.
-  {
-    const unsigned orig_lag   = best_lag;
-    const float    orig_score = best_score;
-    for (unsigned div = 2; div <= 4; div++) {
-      const unsigned candidate = (orig_lag + div / 2) / div; // rounded
-      if (candidate < min_period || candidate == orig_lag) break;
-      const float s = NormalizedDotProduct(samples, samples, candidate, window);
-      if (s > orig_score * 0.94f && s > best_score) {
-        best_lag   = candidate;
-        best_score = s;
-      }
     }
   }
 
