@@ -306,17 +306,21 @@ static unsigned EstimatePeriodByAutocorr(
     }
   }
 
-  // Sub-harmonic check: if best_lag is a multiple of a shorter period that
-  // also correlates well, prefer the shorter one.  Handles the common 2*T
-  // false-detection caused by a strong even-harmonic structure.
-  for (unsigned div = 2; div <= 4; div++) {
-    if (best_lag % div != 0) continue;
-    const unsigned candidate = best_lag / div;
-    if (candidate < min_period) break;
-    const float s = NormalizedDotProduct(samples, samples, candidate, window);
-    if (s > best_score * 0.94f) {
-      best_lag   = candidate;
-      best_score = s;
+  // Sub-harmonic check: prefer the shortest period whose NDP is within 6% of
+  // the winner.  Uses rounded division so odd-valued 2*T (e.g. 1119→560) is
+  // caught too.  Compares against the original winner score throughout so
+  // chained updates cannot artificially lower the bar.
+  {
+    const unsigned orig_lag   = best_lag;
+    const float    orig_score = best_score;
+    for (unsigned div = 2; div <= 4; div++) {
+      const unsigned candidate = (orig_lag + div / 2) / div; // rounded
+      if (candidate < min_period || candidate == orig_lag) break;
+      const float s = NormalizedDotProduct(samples, samples, candidate, window);
+      if (s > orig_score * 0.94f && s > best_score) {
+        best_lag   = candidate;
+        best_score = s;
+      }
     }
   }
 

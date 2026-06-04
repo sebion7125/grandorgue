@@ -445,17 +445,19 @@ def estimate_period_by_autocorr(samples: np.ndarray,
             best_score = s
             best_lag   = lag
 
-    # Sub-harmonic check: prefer shorter period if it correlates nearly as well.
+    # Sub-harmonic check: prefer shortest period within 6% of original winner.
+    # Rounded division catches odd best_lag (e.g. 1119 → 560 for div=2).
+    # Comparison against orig_score avoids chain-update artifacts.
+    orig_lag   = best_lag
+    orig_score = best_score
     for div in (2, 3, 4):
-        if best_lag % div != 0:
-            continue
-        candidate = best_lag // div
-        if candidate < min_period:
+        candidate = (orig_lag + div // 2) // div  # rounded
+        if candidate < min_period or candidate == orig_lag:
             break
         shifted = samples[candidate:candidate + window].astype(np.float32)
         n = np.linalg.norm(shifted)
         s = float(np.dot(ref_n, shifted / n)) if n > 1e-12 else 0.0
-        if s > best_score * 0.94:
+        if s > orig_score * 0.94 and s > best_score:
             best_lag   = candidate
             best_score = s
 
@@ -2897,7 +2899,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
     matching GO's behaviour (releaseMap[i] = -1 for those).
 
     Compare with GO output:
-      python3 analyze_lut_v52.py organ.organ --export-csv py.csv
+      python3 analyze_lut_v53.py organ.organ --export-csv py.csv
       python3 read_golut.py organ.release-align.golut --csv > go.csv
       diff py.csv go.csv
     """
@@ -2935,7 +2937,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
 
 
 def main():
-    # CLI batch mode: analyze_lut_v52.py <organ> --export-csv [output.csv]
+    # CLI batch mode: analyze_lut_v53.py <organ> --export-csv [output.csv]
     if len(sys.argv) >= 3 and sys.argv[2] == '--export-csv':
         out = sys.argv[3] if len(sys.argv) > 3 else None
         export_csv_batch(sys.argv[1], out)
