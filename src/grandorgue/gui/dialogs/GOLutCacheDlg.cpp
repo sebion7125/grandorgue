@@ -176,24 +176,28 @@ void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
 
   std::atomic<unsigned> doneCount{0};
   std::atomic<bool>     cancelled{false};
+  std::atomic<bool>     workerDone{false};
   wxString errorMsg;
   bool     ok = false;
 
-  // Run computation in a background thread; GUI thread polls doneCount.
+  // Run computation + file write in a background thread.
   std::thread worker([&]() {
     ok = p_controller->GenerateLutCache(errorMsg, forceAll,
                                         &doneCount, &cancelled);
+    workerDone.store(true, std::memory_order_release);
   });
 
-  while (true) {
+  // Poll until worker finishes (computation AND write).
+  while (!workerDone.load(std::memory_order_acquire)) {
     const unsigned done = doneCount.load(std::memory_order_relaxed);
-    const wxString msg  = wxString::Format(
-      _("%u / %u releases processed"), done, total);
-    if (!prog.Update((int)std::min(done, total), msg)) {
+    wxString msg;
+    if (done < total)
+      msg = wxString::Format(_("%u / %u releases processed"), done, total);
+    else
+      msg = _("Writing cache file to disk...");
+    if (!prog.Update((int)std::min(done, total), msg))
       cancelled.store(true, std::memory_order_relaxed);
-    }
-    if (done >= total || cancelled.load()) break;
-    wxMilliSleep(80); // ~12 fps update rate
+    wxMilliSleep(80);
   }
 
   worker.join();
