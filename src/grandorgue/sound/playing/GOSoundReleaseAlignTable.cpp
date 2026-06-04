@@ -518,17 +518,22 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
 
   std::vector<ScoredPoint> spoints;
 
-  // ── Exhaustive mode: full scan of all n in [n_start, n_end) ──────────────
-  // Used by the force-all generator to produce a complete lookup table that
-  // covers every key-press duration.  No adaptive sampling, no quality guards,
-  // no MAX_TOTAL cap.  Callers are responsible for the larger cache size.
+  // ── Exhaustive mode: dense scan of [n_start, n_end) ─────────────────────
+  // Covers every key-press duration with evenly-spaced support points.
+  // For very long loops (n_total > MAX_EXHST) a step is used so the output
+  // stays within GOLUT_MAX_POINTS (4096) while still giving comprehensive
+  // coverage.  No adaptive sampling, no quality guards.
   if (exhaustive) {
-    for (unsigned n = n_start; n < n_end; n++) {
+    constexpr unsigned MAX_EXHST = 2000u;
+    const unsigned span = (n_end > n_start) ? n_end - n_start : 0u;
+    const unsigned step = (span > MAX_EXHST)
+                          ? (span + MAX_EXHST - 1) / MAX_EXHST  // ceil divide
+                          : 1u;
+    for (unsigned n = n_start; n < n_end; n += step) {
       ScoredPoint sp = corr_at(n);
       if (sp.score > -1.5f) spoints.push_back(sp);
     }
     if (spoints.empty()) return;
-    // Skip all quality checks and fall through to CorrPoint conversion.
     goto lut_commit;
   }
 
