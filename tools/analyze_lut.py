@@ -48,6 +48,8 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v54: Lag-Strafterm (alpha=0.10) statt Sub-Harmonischen-Check: NDP(lag) *= (1 - 0.10*lag/max_p).
+#      Bevorzugt kuerze Perioden wenn NDP(T) ≈ NDP(2T), ohne Mixturen faelschlich zu halbieren.
 # v52: NDP-Fenster = crossfade_len (statt min(crossfade,2*T)).
 #      estimate_period_by_autocorr: Sub-Harmonischen-Check (div 2/3/4, 94%-Schwelle)
 #      verhindert 2*T-Fehlbestimmung bei gerader Harmonik.
@@ -437,29 +439,18 @@ def estimate_period_by_autocorr(samples: np.ndarray,
     ref_n = ref / (np.linalg.norm(ref) + 1e-12)
     best_score = -2.0
     best_lag   = min_period
+    # Small lag penalty (alpha=0.10): when NDP(T) ≈ NDP(2T) for a perfect loop,
+    # the shorter period wins.  Avoids 2*T false-detections without a hard
+    # threshold that also incorrectly halves genuine T values.
+    alpha = 0.10
     for lag in range(min_period, max_period + 1):
         shifted = samples[lag:lag + window].astype(np.float32)
         n = np.linalg.norm(shifted)
-        s = float(np.dot(ref_n, shifted / n)) if n > 1e-12 else 0.0
+        raw = float(np.dot(ref_n, shifted / n)) if n > 1e-12 else 0.0
+        s = raw * (1.0 - alpha * lag / max_period)
         if s > best_score:
             best_score = s
             best_lag   = lag
-
-    # Sub-harmonic check: prefer shortest period within 6% of original winner.
-    # Rounded division catches odd best_lag (e.g. 1119 → 560 for div=2).
-    # Comparison against orig_score avoids chain-update artifacts.
-    orig_lag   = best_lag
-    orig_score = best_score
-    for div in (2, 3, 4):
-        candidate = (orig_lag + div // 2) // div  # rounded
-        if candidate < min_period or candidate == orig_lag:
-            break
-        shifted = samples[candidate:candidate + window].astype(np.float32)
-        n = np.linalg.norm(shifted)
-        s = float(np.dot(ref_n, shifted / n)) if n > 1e-12 else 0.0
-        if s > orig_score * 0.94 and s > best_score:
-            best_lag   = candidate
-            best_score = s
 
     return best_lag
 
@@ -2899,7 +2890,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
     matching GO's behaviour (releaseMap[i] = -1 for those).
 
     Compare with GO output:
-      python3 analyze_lut_v53.py organ.organ --export-csv py.csv
+      python3 analyze_lut_v54.py organ.organ --export-csv py.csv
       python3 read_golut.py organ.release-align.golut --csv > go.csv
       diff py.csv go.csv
     """
@@ -2937,7 +2928,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
 
 
 def main():
-    # CLI batch mode: analyze_lut_v53.py <organ> --export-csv [output.csv]
+    # CLI batch mode: analyze_lut_v54.py <organ> --export-csv [output.csv]
     if len(sys.argv) >= 3 and sys.argv[2] == '--export-csv':
         out = sys.argv[3] if len(sys.argv) > 3 else None
         export_csv_batch(sys.argv[1], out)
