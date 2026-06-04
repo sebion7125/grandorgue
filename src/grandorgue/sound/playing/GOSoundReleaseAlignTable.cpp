@@ -771,7 +771,9 @@ unsigned GOSoundReleaseAlignTable::GetPositionForCorrelation(
   // Use float period for accurate phase — avoids drift from integer rounding.
   const double T_f = (m_CorrPeriodFloat > 0.0) ? m_CorrPeriodFloat
                                                 : (double)m_CorrPeriodSamples;
-  unsigned phi = (unsigned)std::round(std::fmod((double)loop_pos, T_f));
+  // Guard: round() can produce exactly T_int when fmod result is just below T_f.
+  unsigned phi = (unsigned)std::round(std::fmod((double)loop_pos, T_f))
+                 % m_CorrPeriodSamples;
   unsigned r_interp;
 
   if (m_CorrPoints.size() == 1 || loop_pos <= m_CorrPoints.front().loop_pos) {
