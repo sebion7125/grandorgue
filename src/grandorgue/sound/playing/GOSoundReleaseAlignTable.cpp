@@ -294,13 +294,17 @@ static unsigned EstimatePeriodByAutocorr(
   if (len < max_period * 2)
     return min_period;
 
-  // Hann window: tapers the analysis segment to zero at both ends.
-  // This suppresses spectral side lobes that make NDP(T/2) and NDP(2T)
-  // appear nearly as strong as NDP(T) for harmonically rich signals.
+  // DC removal + Hann window.  Removing the mean before windowing prevents
+  // the DC offset from inflating the autocorrelation at sub-harmonic lags
+  // (the same step ChatGPT's reference script applies before FFT-ACF).
+  float mean = 0.f;
+  for (unsigned i = 0; i < len; i++) mean += samples[i];
+  mean /= (float)len;
+
   std::vector<float> windowed(len);
   for (unsigned i = 0; i < len; i++) {
     const float w = 0.5f * (1.f - std::cos(2.f * (float)M_PI * i / (len - 1)));
-    windowed[i] = samples[i] * w;
+    windowed[i] = (samples[i] - mean) * w;
   }
   const float *s   = windowed.data();
   const unsigned W = len - max_period;
