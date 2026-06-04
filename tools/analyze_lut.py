@@ -48,6 +48,9 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v52: NDP-Fenster = crossfade_len (statt min(crossfade,2*T)).
+#      estimate_period_by_autocorr: Sub-Harmonischen-Check (div 2/3/4, 94%-Schwelle)
+#      verhindert 2*T-Fehlbestimmung bei gerader Harmonik.
 # v51: Aliquote/Mixturen: Autokorrelations-Suchbereich unabhängig vom smpl-Chunk.
 #      max_p = sr//20 (deckt bis 20 Hz ab), kein HarmonicNumber/smpl-Pitch-Einfluss.
 # v50: Bugfix: Loop-Punkte werden jetzt VOR der Autokorrelation aus dem smpl-Chunk
@@ -441,6 +444,21 @@ def estimate_period_by_autocorr(samples: np.ndarray,
         if s > best_score:
             best_score = s
             best_lag   = lag
+
+    # Sub-harmonic check: prefer shorter period if it correlates nearly as well.
+    for div in (2, 3, 4):
+        if best_lag % div != 0:
+            continue
+        candidate = best_lag // div
+        if candidate < min_period:
+            break
+        shifted = samples[candidate:candidate + window].astype(np.float32)
+        n = np.linalg.norm(shifted)
+        s = float(np.dot(ref_n, shifted / n)) if n > 1e-12 else 0.0
+        if s > best_score * 0.94:
+            best_lag   = candidate
+            best_score = s
+
     return best_lag
 
 
@@ -461,7 +479,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     """
     loop_len    = loop_end - loop_start + 1
     release_len = len(release_mono)
-    window_len  = min(crossfade_len_samples, 2 * T_int)
+    window_len  = crossfade_len_samples
 
     meta = {
         "stabilized": False, "stable_at_n": None,
@@ -2879,7 +2897,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
     matching GO's behaviour (releaseMap[i] = -1 for those).
 
     Compare with GO output:
-      python3 analyze_lut_v51.py organ.organ --export-csv py.csv
+      python3 analyze_lut_v52.py organ.organ --export-csv py.csv
       python3 read_golut.py organ.release-align.golut --csv > go.csv
       diff py.csv go.csv
     """
@@ -2917,7 +2935,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
 
 
 def main():
-    # CLI batch mode: analyze_lut_v51.py <organ> --export-csv [output.csv]
+    # CLI batch mode: analyze_lut_v52.py <organ> --export-csv [output.csv]
     if len(sys.argv) >= 3 and sys.argv[2] == '--export-csv':
         out = sys.argv[3] if len(sys.argv) > 3 else None
         export_csv_batch(sys.argv[1], out)
