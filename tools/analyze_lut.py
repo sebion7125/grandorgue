@@ -888,24 +888,34 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             pa.loop_end   = len(atk_mono) - 1
         pa.loop_len = pa.loop_end - pa.loop_start + 1
 
-        # Aliquote/Mixturen: T rein aus dem Audio bestimmen, smpl-Pitch ignorieren.
-        # Suchbereich deckt alles bis 20 Hz ab — Loop-Laenge entscheidet ob genug
-        # Material vorhanden ist (prueft ac_window >= max_p * 2 weiter unten).
-        if not corr_is_octave_stop(pa.harmonic_number):
+        # Periodenbestimmung per Autokorrelation fuer ALLE nicht-trivialen Stops.
+        #
+        # Nicht-Oktav (Aliquote/Mixturen): smpl-unabhaengiger Bereich [16, sr/20].
+        #
+        # Oktav-Stops (Zweierpotenz-HN): smpl gibt normalerweise die richtige Periode,
+        # aber ein Mixtur-Rank mit geradem HN kann ungerade Obertöne enthalten, die
+        # die echte Wellenformperiode auf 2*T_smpl verdoppeln. Pruefen mit Bereich
+        # [T_smpl, 3*T_smpl] — YIN erkennt ob T_smpl oder 2*T_smpl korrekt ist.
+        T_smpl = pa.T_int
+        if corr_is_octave_stop(pa.harmonic_number):
+            min_p = T_smpl
+            max_p = min(T_smpl * 3, sr // 20)
+        else:
             min_p = 16
             max_p = sr // 20
-            if True:
-                loop_mid = pa.loop_start + pa.loop_len // 2
-                ac_window = max_p * 8
-                autocorr_region = atk_mono[loop_mid:loop_mid + ac_window]
-                if len(autocorr_region) >= max_p * 2:
-                    t_est, diag = estimate_period_by_autocorr(
-                        autocorr_region, min_p, max_p)
-                    pa.T_int          = t_est
-                    pa.T_float        = float(t_est)
-                    pa.cmndf_at_T_half = diag['cmndf_half']
-                    pa.cmndf_at_T      = diag['cmndf_T']
-                    pa.cmndf_at_2T     = diag['cmndf_2T']
+
+        if max_p >= min_p * 2 and T_smpl >= 16:
+            loop_mid = pa.loop_start + pa.loop_len // 2
+            ac_window = max_p * 8
+            autocorr_region = atk_mono[loop_mid:loop_mid + ac_window]
+            if len(autocorr_region) >= max_p * 2:
+                t_est, diag = estimate_period_by_autocorr(
+                    autocorr_region, min_p, max_p)
+                pa.T_int           = t_est
+                pa.T_float         = float(t_est)
+                pa.cmndf_at_T_half = diag['cmndf_half']
+                pa.cmndf_at_T      = diag['cmndf_T']
+                pa.cmndf_at_2T     = diag['cmndf_2T']
 
         pa.n_total  = pa.loop_len // pa.T_int
 

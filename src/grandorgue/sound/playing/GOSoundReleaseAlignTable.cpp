@@ -387,22 +387,26 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     m_CorrPeriodSamples = (unsigned)std::round(m_CorrPeriodFloat);
   }
 
-  // Non-octave stops (aliquots, mixtures): determine T purely from the audio
-  // via autocorrelation.  The smpl-chunk pitch (encoded in sample_freq_hz)
-  // is NOT used as the search-range centre — it can reflect the harmonic
-  // pitch, the key pitch, or be influenced by HarmonicNumber scaling, all
-  // of which would bias the range away from the true waveform period.
-  // Instead we derive the range from the loop length directly, which is
-  // the only reliable bound we have without prior assumptions about pitch.
-  if (first_call && !CorrIsOctaveStop(harmonic_number)) {
+  // Period estimation via autocorrelation.
+  //
+  // Non-octave stops (aliquots, mixtures): smpl-pitch independent broad search
+  // [16, sr/20] — the true waveform period can be far from the smpl note.
+  //
+  // Octave stops: the smpl pitch is normally reliable, but a mixture rank
+  // labelled as a power-of-2 HN can still contain odd-harmonic content that
+  // doubles the true waveform period (smpl encodes the 2nd harmonic, actual
+  // period = 2×T_smpl).  Verify by running autocorr in [T_smpl, 3×T_smpl].
+  if (first_call) {
     const unsigned loop_len_full = loop_section.GetLength();
+    const unsigned T_smpl        = m_CorrPeriodSamples;
+    const unsigned min_p = CorrIsOctaveStop(harmonic_number)
+                           ? T_smpl                              // octave: never shorter than smpl T
+                           : 16u;                               // non-octave: full open range
+    const unsigned max_p = CorrIsOctaveStop(harmonic_number)
+                           ? std::min(T_smpl * 3u, sample_rate / 20u)
+                           : sample_rate / 20u;
 
-    // Search the full range down to 20 Hz — no smpl-pitch bias.
-    // If the loop is too short to support this window the inner check handles it.
-    const unsigned max_p = sample_rate / 20u;
-    const unsigned min_p = 16u;
-
-    {
+    if (max_p >= min_p * 2 && T_smpl >= 16u) {
       unsigned ac_window = 8 * max_p;
       unsigned ac_offset = loop_len_full / 2;
       if (ac_offset + ac_window > loop_len_full)
