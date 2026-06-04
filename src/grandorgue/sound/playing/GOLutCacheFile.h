@@ -67,22 +67,27 @@ public:
 
 class GOLutCacheReader {
 public:
-  // Attempt to load a .golut file.  Returns true only if the file exists,
-  // the header is valid, the odfHash and releaseCount match, and all data
-  // can be read without error.  On any mismatch or read error: returns false
-  // silently (caller falls back to live computation).
+  // Load a .golut file.  Returns true on success.
+  // headerOnly=false (default): reads and validates everything; caller can
+  //   iterate GetReleaseMap() / GetLuts() to apply LUTs.
+  // headerOnly=true: reads only the fixed header (~104 bytes) and validates
+  //   magic, versions, hash and counts.  GetLutCount() is populated;
+  //   GetReleaseMap() / GetLuts() remain empty.  Use for fast status checks.
   bool Load(
     const wxString &path,
     const wxString &expectedOdfHash,
-    uint32_t        expectedReleaseCount);
+    uint32_t        expectedReleaseCount,
+    bool            headerOnly = false);
 
   bool                           IsValid()      const { return m_valid; }
+  uint32_t                       GetLutCount()  const { return m_lutCount; }
   const std::vector<int32_t>    &GetReleaseMap() const { return m_releaseMap; }
   const std::vector<GOLutEntry> &GetLuts()       const { return m_luts; }
   const GOLutGeneratorCriteria  &GetCriteria()   const { return m_criteria; }
 
 private:
-  bool                    m_valid = false;
+  bool                    m_valid    = false;
+  uint32_t                m_lutCount = 0;
   std::vector<int32_t>    m_releaseMap;
   std::vector<GOLutEntry> m_luts;
   GOLutGeneratorCriteria  m_criteria;
