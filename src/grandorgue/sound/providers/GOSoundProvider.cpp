@@ -7,6 +7,8 @@
 
 #include "GOSoundProvider.h"
 
+#include "../model/GOSoundingPipe.h"
+
 #include <cmath>
 
 #include <wx/intl.h>
@@ -148,14 +150,36 @@ void GOSoundProvider::RebuildAlignmentPointers() {
   }
 }
 
-void GOSoundProvider::ComputeReleaseAlignmentInfo() {
-  // Compute the actual fundamental frequency of this pipe's audio.
-  // m_MidiKeyNumber + m_MidiPitchFract give the base pitch from the WAV file.
-  // m_HarmonicNumber corrects for foot length: 8'=1x, 4'=2x, 16'=0.5x, 2'=4x.
-  const float sample_freq_hz = 440.f
+float GOSoundProvider::ComputeSampleFreqHz() const {
+  // Returns the fundamental frequency of this pipe's recorded audio.
+  //
+  // For aliquot/mixture stops the smpl-chunk MIDI note already encodes the
+  // sounding pitch (stop transposition baked in), so HarmonicNumber/8 must
+  // NOT be applied again — that would double-count the transposition.
+  // Detection: if smpl_midi != key_midi the sample is transposed → use smpl.
+  //
+  // Fallback when GetOwnerPipe() is unavailable: legacy formula unchanged.
+  if (m_OwnerPipe != nullptr && m_MidiKeyNumber > 0) {
+    const unsigned keyMidi = m_OwnerPipe->GetKeyMidiNumber();
+    if (m_MidiKeyNumber != keyMidi) {
+      return 440.f
+        * std::pow(2.f, ((float)m_MidiKeyNumber + m_MidiPitchFract / 100.f - 69.f)
+                          / 12.f);
+    } else {
+      return 440.f
+        * std::pow(2.f, ((float)keyMidi + m_MidiPitchFract / 100.f - 69.f)
+                          / 12.f)
+        * ((float)m_HarmonicNumber / 8.f);
+    }
+  }
+  return 440.f
     * std::pow(2.f, ((float)m_MidiKeyNumber + m_MidiPitchFract / 100.f - 69.f)
                       / 12.f)
     * ((float)m_HarmonicNumber / 8.f);
+}
+
+void GOSoundProvider::ComputeReleaseAlignmentInfo() {
+  const float sample_freq_hz = ComputeSampleFreqHz();
 
   std::vector<const GOSoundAudioSection *> sections;
   for (int8_t k = BOOL3_MIN; k <= BOOL3_MAX; ++k) {
@@ -180,7 +204,8 @@ void GOSoundProvider::ComputeReleaseAlignmentInfo() {
       // max_key_press_ms=0 signals "no limit" (unlimited release).
       const unsigned max_ms = (my_max == (unsigned)-1) ? 0u : my_max;
       m_Release[i]->SetupStreamAlignment(
-        sections, 0, sample_freq_hz, m_HarmonicNumber, min_ms, max_ms);
+        sections, 0, sample_freq_hz, m_HarmonicNumber, min_ms, max_ms,
+        m_skipCorrLutCompute);
     }
 
     sections.clear();
@@ -366,7 +391,7 @@ unsigned GOSoundProvider::AssignReleaseParseIndices(unsigned startIndex) {
   return startIndex + (unsigned)m_Release.size();
 }
 
-std::vector<GOSoundReleaseAlignTable::CorrPoint>
+GOSoundProvider::LutResult
 GOSoundProvider::TryPermissiveLutForRelease(unsigned releaseIdx) const {
   if (releaseIdx >= m_Release.size()) return {};
 
@@ -375,10 +400,7 @@ GOSoundProvider::TryPermissiveLutForRelease(unsigned releaseIdx) const {
   if (crossfade_len < 2) return {};
 
   const unsigned sample_rate = rel->GetSampleRate();
-  const float sample_freq_hz = 440.f
-    * std::pow(2.f, ((float)m_MidiKeyNumber + m_MidiPitchFract / 100.f - 69.f)
-                      / 12.f)
-    * ((float)m_HarmonicNumber / 8.f);
+  const float sample_freq_hz = ComputeSampleFreqHz();
 
   const GOBool3 k = m_ReleaseInfo[releaseIdx].m_WaveTremulantStateFor;
 
@@ -411,10 +433,10 @@ GOSoundProvider::TryPermissiveLutForRelease(unsigned releaseIdx) const {
 
   const auto *pts = tmp.GetFirstLutPoints();
   if (!pts || pts->empty()) return {};
-  return *pts;
+  return {*pts, tmp.GetPeriodSamples(), tmp.GetPeriodFloat()};
 }
 
-std::vector<GOSoundReleaseAlignTable::CorrPoint>
+GOSoundProvider::LutResult
 GOSoundProvider::TryExhaustiveLutForRelease(unsigned releaseIdx) const {
   if (releaseIdx >= m_Release.size()) return {};
 
@@ -423,10 +445,7 @@ GOSoundProvider::TryExhaustiveLutForRelease(unsigned releaseIdx) const {
   if (crossfade_len < 2) return {};
 
   const unsigned sample_rate = rel->GetSampleRate();
-  const float sample_freq_hz = 440.f
-    * std::pow(2.f, ((float)m_MidiKeyNumber + m_MidiPitchFract / 100.f - 69.f)
-                      / 12.f)
-    * ((float)m_HarmonicNumber / 8.f);
+  const float sample_freq_hz = ComputeSampleFreqHz();
 
   const GOBool3 k = m_ReleaseInfo[releaseIdx].m_WaveTremulantStateFor;
 
@@ -457,5 +476,5 @@ GOSoundProvider::TryExhaustiveLutForRelease(unsigned releaseIdx) const {
 
   const auto *pts = tmp.GetFirstLutPoints();
   if (!pts || pts->empty()) return {};
-  return *pts;
+  return {*pts, tmp.GetPeriodSamples(), tmp.GetPeriodFloat()};
 }

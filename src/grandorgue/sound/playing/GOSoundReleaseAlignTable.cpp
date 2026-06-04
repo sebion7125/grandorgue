@@ -339,8 +339,9 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     m_CorrPeriodSamples = (unsigned)std::round(m_CorrPeriodFloat);
   }
 
-  // Mixtures: re-estimate T via autocorrelation only on first call.
-  if (first_call && harmonic_number >= CORR_MIXTURE_HARMONIC_THRESHOLD) {
+  // Non-octave stops (aliquots, mixtures): re-estimate T via autocorrelation.
+  // Pure octave stops (power-of-2 HarmonicNumber) use the formula T directly.
+  if (first_call && !CorrIsOctaveStop(harmonic_number)) {
     const unsigned T_formula = m_CorrPeriodSamples;
     const unsigned min_p = std::max(8u, T_formula / 2);
     const unsigned max_p = std::min(T_formula * 4, sample_rate / 20u);
@@ -565,7 +566,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
 
     const int stable_thresh = std::max(
       (int)m_CorrPeriodSamples
-        / (harmonic_number >= CORR_MIXTURE_HARMONIC_THRESHOLD ? 6 : 8),
+        / (!CorrIsOctaveStop(harmonic_number) ? 6 : 8),
       4);
 
     // Dynamic dense_step: enough steps to fit STABLE_WIN+1 points in the range.
@@ -883,8 +884,16 @@ unsigned GOSoundReleaseAlignTable::CopyLutPoints(
 #endif
 
 void GOSoundReleaseAlignTable::OverrideCorrLutsFromCache(
-  std::vector<CorrPoint> points) {
-  if (m_CorrPeriodSamples == 0 || points.empty())
+  std::vector<CorrPoint> points,
+  uint32_t               period_samples,
+  double                 period_float) {
+  if (points.empty())
+    return;
+  if (period_samples >= 16) {
+    m_CorrPeriodSamples = period_samples;
+    m_CorrPeriodFloat   = period_float;
+  }
+  if (m_CorrPeriodSamples == 0)
     return;
   m_CorrLuts.clear();
   m_CorrLuts.push_back({nullptr, std::move(points)});

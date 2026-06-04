@@ -521,10 +521,11 @@ static void ApplyLutReaderToOrgan(
       if (!aligner) continue;
       const GOLutEntry &entry = lutEntries[(unsigned)lutIdx];
       std::vector<GOSoundReleaseAlignTable::CorrPoint> pts;
-      pts.reserve(entry.size());
-      for (const GOLutPoint &pt : entry)
+      pts.reserve(entry.points.size());
+      for (const GOLutPoint &pt : entry.points)
         pts.push_back({pt.loop_pos, pt.best_r});
-      aligner->OverrideCorrLutsFromCache(std::move(pts));
+      aligner->OverrideCorrLutsFromCache(
+        std::move(pts), entry.period_samples, entry.period_float);
     }
   }
 }
@@ -631,23 +632,29 @@ bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll,
         const GOSoundReleaseAlignTable *aligner
           = item.sec->GetReleaseAligner();
 
-        std::vector<GOSoundReleaseAlignTable::CorrPoint> pts;
+        GOLutEntry entry;
         if (aligner && aligner->HasCorrLut() && !forceAll) {
           // Good quality sparse LUT from the last Load() — use as-is.
           const auto *p = aligner->GetFirstLutPoints();
-          if (p) pts = *p;
+          if (p) {
+            entry.period_samples = aligner->GetPeriodSamples();
+            entry.period_float   = aligner->GetPeriodFloat();
+            entry.points.reserve(p->size());
+            for (const auto &cp : *p)
+              entry.points.push_back({cp.loop_pos, cp.best_r});
+          }
         } else {
           // Legacy-fallback release or forceAll: exhaustive computation.
-          pts = item.pipe->TryExhaustiveLutForRelease(item.releaseIdx);
+          auto res = item.pipe->TryExhaustiveLutForRelease(item.releaseIdx);
+          entry.period_samples = res.period_samples;
+          entry.period_float   = res.period_float;
+          entry.points.reserve(res.points.size());
+          for (const auto &cp : res.points)
+            entry.points.push_back({cp.loop_pos, cp.best_r});
         }
 
-        if (!pts.empty()) {
-          GOLutEntry entry;
-          entry.reserve(pts.size());
-          for (const auto &cp : pts)
-            entry.push_back({cp.loop_pos, cp.best_r});
+        if (!entry.points.empty())
           tmpLuts[item.parseIdx] = std::move(entry);
-        }
 
         if (p_progress)
           p_progress->fetch_add(1, std::memory_order_relaxed);
@@ -666,7 +673,7 @@ bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll,
   std::vector<int32_t>    releaseMap(m_lutReleaseCount, -1);
   std::vector<GOLutEntry> luts;
   for (unsigned i = 0; i < m_lutReleaseCount; i++) {
-    if (!tmpLuts[i].empty()) {
+    if (!tmpLuts[i].points.empty()) {
       releaseMap[i] = (int32_t)luts.size();
       luts.push_back(std::move(tmpLuts[i]));
     }
@@ -939,6 +946,21 @@ wxString GOOrganController::Load(
         sw_phase.Start();
 #endif
 
+        // Pre-check: if a valid LUT cache exists, mark all pipes to skip
+        // ComputeCorrelationLut() during WAV loading — Phase 3 will apply the
+        // cached values instead, saving significant load time.
+        {
+          const wxString lutPath = GOLutCacheWriter::MakePath(
+            m_config.OrganCachePath(), GetOrganHash());
+          if (GOLutCacheReader::PeekHeader(lutPath, m_ODFHash)) {
+            dlg->Reset(1, _("LUT cache found — skipping correlation LUT computation"));
+            for (GOCacheObject *obj : GetCacheObjects()) {
+              GOSoundingPipe *pipe = obj->AsSoundingPipe();
+              if (pipe) pipe->SetSkipCorrLutCompute(true);
+            }
+          }
+        }
+
         /* Figure out list of pipes to load */
 #ifdef GO_PROFILE_ODFLOAD
         LOG_TIMING("Timing: Preparing audio objects...");
@@ -1161,20 +1183,21 @@ wxString GOOrganController::Load(
         }
       __tim_cache_ms = __sw_cache.Time();
 
-      // Assign sequential parse indices to all release sections.
-      // The resulting count is stored in m_lutReleaseCount and used as
-      // releaseCount in the LUT cache file header.
-      EnumerateReleaseParseIndices();
-
       // Phase 3: Apply pre-computed LUT cache if available.
       // Silently ignored on any mismatch (wrong ODF, version, count).
       // Safe: PreparePlayback has not been called yet, no audio thread active.
       {
         const wxString lutPath = GOLutCacheWriter::MakePath(
           m_config.OrganCachePath(), GetOrganHash());
-        GOLutCacheReader lutReader;
-        if (lutReader.Load(lutPath, m_ODFHash, m_lutReleaseCount))
-          ApplyLutReaderToOrgan(lutReader, GetCacheObjects());
+        if (wxFileExists(lutPath)) {
+          dlg->Reset(1, _("Applying release alignment LUT cache..."));
+          EnumerateReleaseParseIndices();
+          GOLutCacheReader lutReader;
+          if (lutReader.Load(lutPath, m_ODFHash, m_lutReleaseCount))
+            ApplyLutReaderToOrgan(lutReader, GetCacheObjects());
+        } else {
+          EnumerateReleaseParseIndices();
+        }
       }
 
     } catch (const GOOutOfMemory &e) {

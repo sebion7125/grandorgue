@@ -23,6 +23,7 @@
 #ifdef GO_LOG_RELEASE_ALIGN
 #include <atomic>
 #include <condition_variable>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
@@ -115,13 +116,15 @@ static std::string GetReleaseAlignVerbosePath() {
 // all string formatting happens in the writer thread.
 struct VerboseEntry {
   unsigned loop_pos, period, legacy, corr;
+  unsigned atk_len, atk_sr;   // attack section length + sample rate (layer ID)
   uint32_t lut_pos[VERBOSE_MAX_LUT];
   uint16_t lut_r[VERBOSE_MAX_LUT];
   unsigned n_lut;
-  int      atk[VERBOSE_WINDOW];
-  int      leg[VERBOSE_WINDOW];
-  int      cor[VERBOSE_WINDOW];
+  float    atk[VERBOSE_WINDOW];
+  float    leg[VERBOSE_WINDOW];
+  float    cor[VERBOSE_WINDOW];
   unsigned n_atk, n_leg, n_cor;
+  char     label[64];
 };
 
 static VerboseEntry           s_VerbRing[VERBOSE_RING_SIZE];
@@ -149,15 +152,17 @@ static void VerboseWriterThread() {
           << " T=" << e.period
           << " legacy=" << e.legacy
           << " corr=" << e.corr
-          << " circ_diff=" << circ_diff << "\n";
+          << " circ_diff=" << circ_diff;
+        if (e.label[0]) f << " pipe=" << e.label;
+        f << " atk_len=" << e.atk_len << " atk_sr=" << e.atk_sr << "\n";
         for (unsigned i = 0; i < e.n_lut; i++)
           f << "lut," << e.lut_pos[i] << "," << (unsigned)e.lut_r[i] << "\n";
         for (unsigned i = 0; i < e.n_atk; i++)
-          f << "atk," << e.loop_pos << "," << i << "," << e.atk[i] << "\n";
+          f << "atk," << e.loop_pos << "," << i << "," << (long)e.atk[i] << "\n";
         for (unsigned i = 0; i < e.n_leg; i++)
-          f << "rel_leg," << e.loop_pos << "," << i << "," << e.leg[i] << "\n";
+          f << "rel_leg," << e.loop_pos << "," << i << "," << (long)e.leg[i] << "\n";
         for (unsigned i = 0; i < e.n_cor; i++)
-          f << "rel_corr," << e.loop_pos << "," << i << "," << e.cor[i] << "\n";
+          f << "rel_corr," << e.loop_pos << "," << i << "," << (long)e.cor[i] << "\n";
       }
       s_VerbReadIdx.fetch_add(1, std::memory_order_release);
     }
@@ -169,7 +174,8 @@ static void LogReleaseAlignVerbose(
   unsigned legacy_result, unsigned corr_result,
   const GOSoundAudioSection *atk,
   const GOSoundAudioSection *rel,
-  const GOSoundReleaseAlignTable *aligner) {
+  const GOSoundReleaseAlignTable *aligner,
+  const char *label) {
   if (!period) return;
   std::call_once(
     s_VerbThreadOnce, [] { std::thread(VerboseWriterThread).detach(); });
@@ -188,6 +194,13 @@ static void LogReleaseAlignVerbose(
   e.period   = period;
   e.legacy   = legacy_result;
   e.corr     = corr_result;
+  e.atk_len  = atk->GetLength();
+  e.atk_sr   = atk->GetSampleRate();
+  if (label)
+    std::strncpy(e.label, label, sizeof(e.label) - 1);
+  else
+    e.label[0] = '\0';
+  e.label[sizeof(e.label) - 1] = '\0';
   e.n_lut    = aligner
     ? aligner->CopyLutPoints(atk, e.lut_pos, e.lut_r, VERBOSE_MAX_LUT)
     : 0u;
@@ -199,11 +212,28 @@ static void LogReleaseAlignVerbose(
   // (O(start_pos × window)).
   GOSoundCompressionCache ca, cl, cc;
   ca.Init(); cl.Init(); cc.Init();
+  const unsigned atk_ch = atk->GetChannels();
+  const unsigned rel_ch = rel->GetChannels();
   e.n_atk = e.n_leg = e.n_cor = 0;
   for (unsigned i = 0; i < VERBOSE_WINDOW; i++) {
-    if (loop_pos      + i < atk_len) e.atk[e.n_atk++] = atk->GetSample(loop_pos      + i, 0, &ca);
-    if (legacy_result + i < rel_len) e.leg[e.n_leg++] = rel->GetSample(legacy_result  + i, 0, &cl);
-    if (corr_result   + i < rel_len) e.cor[e.n_cor++] = rel->GetSample(corr_result    + i, 0, &cc);
+    if (loop_pos + i < atk_len) {
+      float s = 0.f;
+      for (unsigned c = 0; c < atk_ch; c++)
+        s += (float)atk->GetSample(loop_pos + i, c, &ca);
+      e.atk[e.n_atk++] = s / atk_ch;
+    }
+    if (legacy_result + i < rel_len) {
+      float s = 0.f;
+      for (unsigned c = 0; c < rel_ch; c++)
+        s += (float)rel->GetSample(legacy_result + i, c, &cl);
+      e.leg[e.n_leg++] = s / rel_ch;
+    }
+    if (corr_result + i < rel_len) {
+      float s = 0.f;
+      for (unsigned c = 0; c < rel_ch; c++)
+        s += (float)rel->GetSample(corr_result + i, c, &cc);
+      e.cor[e.n_cor++] = s / rel_ch;
+    }
   }
 
   s_VerbCv.notify_one();
@@ -495,7 +525,8 @@ void GOSoundStream::InitStream(
 void GOSoundStream::InitAlignedStream(
   const GOSoundAudioSection *pSection,
   GOSoundResample::InterpolationType interpolation,
-  const GOSoundStream *existing_stream) {
+  const GOSoundStream *existing_stream,
+  const char *debugLabel) {
   const unsigned releaseStartSegment = pSection->GetReleaseStartSegment();
   const GOSoundAudioSection::StartSegment &start
     = pSection->GetStartSegment(releaseStartSegment);
@@ -521,7 +552,7 @@ void GOSoundStream::InitAlignedStream(
 #ifdef GO_LOG_RELEASE_ALIGN_VERBOSE
     LogReleaseAlignVerbose(
       loop_pos, releaseAligner->GetPeriodSamples(), legacy_result, corr_result,
-      existing_stream->audio_section, pSection, releaseAligner);
+      existing_stream->audio_section, pSection, releaseAligner, debugLabel);
 #endif
     startIndex = useCorr ? corr_result : legacy_result;
 #else

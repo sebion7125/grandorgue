@@ -39,7 +39,12 @@ MAX_DENSE_N = 100
 STABLE_WIN  = 4
 N_SPARSE    = 5
 MAX_TOTAL   = 30
-CORR_MIXTURE_HARMONIC_THRESHOLD = 48
+# Removed: CORR_MIXTURE_HARMONIC_THRESHOLD = 48
+# Now using CorrIsOctaveStop logic: only power-of-2 HarmonicNumbers are pure
+# octave stops (8=8', 16=4', 32=2', 4=16', ...) and skip autocorrelation.
+# Non-power-of-2 (24=2⅔', 40=1⅗', 48=1⅓', mixtures) always use autocorr.
+def corr_is_octave_stop(harmonic_number: int) -> bool:
+    return harmonic_number > 0 and (harmonic_number & (harmonic_number - 1)) == 0
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
@@ -499,7 +504,8 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                         phase=phase, raw_r=raw_r, raw_score=raw_s,
                         folded=folded, fold_ratio=fold_ratio)
 
-    stable_thresh = max(T_int // 8, 4)
+    # Tighter tolerance for non-octave stops (aliquots/mixtures), matching GO.
+    stable_thresh = max(T_int // (8 if corr_is_octave_stop(harmonic_number) else 6), 4)
     points: list  = []
 
     # ── Kurzer Loop ───────────────────────────────────────────────────────────
@@ -828,7 +834,7 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             return pa
 
         # Mixturen: T per Autokorrelation neu schaetzen (wie GO)
-        if pa.harmonic_number >= CORR_MIXTURE_HARMONIC_THRESHOLD:
+        if not corr_is_octave_stop(pa.harmonic_number):
             T_formula = pa.T_int
             min_p = max(8, T_formula // 2)
             # max_p wie in GO: min(T*4, sample_rate/20)

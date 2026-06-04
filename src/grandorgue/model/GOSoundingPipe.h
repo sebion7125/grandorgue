@@ -132,10 +132,16 @@ public:
   void Load(GOConfigReader &cfg, const wxString &group, const wxString &prefix)
     override;
 
+  // ODF-based MIDI key number (the pressed key), not the sample's recorded pitch.
+  unsigned GetKeyMidiNumber() const { return m_MidiKeyNumber; }
+
   // Assign sequential parse indices to all release sections of this pipe.
   // Returns the next available index (startIndex + release count).
   unsigned AssignReleaseParseIndices(unsigned startIndex) {
     return m_SoundProvider.AssignReleaseParseIndices(startIndex);
+  }
+  void SetSkipCorrLutCompute(bool skip) {
+    m_SoundProvider.SetSkipCorrLutCompute(skip);
   }
   unsigned GetReleaseCount() const {
     return m_SoundProvider.GetReleaseCount();
@@ -143,11 +149,11 @@ public:
   const GOSoundAudioSection *GetReleaseSection(unsigned i) const {
     return m_SoundProvider.GetReleaseSection(i);
   }
-  std::vector<GOSoundReleaseAlignTable::CorrPoint>
+  GOSoundProvider::LutResult
   TryPermissiveLutForRelease(unsigned releaseIdx) const {
     return m_SoundProvider.TryPermissiveLutForRelease(releaseIdx);
   }
-  std::vector<GOSoundReleaseAlignTable::CorrPoint>
+  GOSoundProvider::LutResult
   TryExhaustiveLutForRelease(unsigned releaseIdx) const {
     return m_SoundProvider.TryExhaustiveLutForRelease(releaseIdx);
   }
