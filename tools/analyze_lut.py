@@ -48,6 +48,8 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v55: Hann-Fenster in estimate_period_by_autocorr (Seitenkeulendaempfung).
+#      Score-Worker crossfade window = crossfade_len_samples (wie compute_lut).
 # v54: Lag-Strafterm (alpha=0.10) statt Sub-Harmonischen-Check: NDP(lag) *= (1 - 0.10*lag/max_p).
 #      Bevorzugt kuerze Perioden wenn NDP(T) ≈ NDP(2T), ohne Mixturen faelschlich zu halbieren.
 # v52: NDP-Fenster = crossfade_len (statt min(crossfade,2*T)).
@@ -434,22 +436,27 @@ def estimate_period_by_autocorr(samples: np.ndarray,
     """Schaetzt Periode via Autokorrelation (Nachbau EstimatePeriodByAutocorr)."""
     if len(samples) < max_period * 2:
         return min_period
-    window = len(samples) - max_period
-    ref   = samples[:window].astype(np.float32)
-    ref_n = ref / (np.linalg.norm(ref) + 1e-12)
+
+    # Hann window: suppresses side lobes that make NDP(T/2) and NDP(2T)
+    # appear nearly as strong as the true fundamental peak.
+    N    = len(samples)
+    hann = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(N) / (N - 1)))
+    s_w  = (samples.astype(np.float32) * hann.astype(np.float32))
+
+    window = N - max_period
+    ref_n  = s_w[:window] / (np.linalg.norm(s_w[:window]) + 1e-12)
     best_score = -2.0
     best_lag   = min_period
-    # Small lag penalty (alpha=0.10): when NDP(T) ≈ NDP(2T) for a perfect loop,
-    # the shorter period wins.  Avoids 2*T false-detections without a hard
-    # threshold that also incorrectly halves genuine T values.
+
+    # Lag penalty (alpha=0.10): breaks NDP(T)=NDP(2T) tie for perfect loops.
     alpha = 0.10
     for lag in range(min_period, max_period + 1):
-        shifted = samples[lag:lag + window].astype(np.float32)
+        shifted = s_w[lag:lag + window]
         n = np.linalg.norm(shifted)
         raw = float(np.dot(ref_n, shifted / n)) if n > 1e-12 else 0.0
-        s = raw * (1.0 - alpha * lag / max_period)
-        if s > best_score:
-            best_score = s
+        sc = raw * (1.0 - alpha * lag / max_period)
+        if sc > best_score:
+            best_score = sc
             best_lag   = lag
 
     return best_lag
@@ -1431,9 +1438,7 @@ class CrossfadeSimWindow:
             rel = self._rel_mono
             T   = pa.T_int
             ds  = min(4, T // 500) if T >= 500 else 1
-            window_len = min(pa.crossfade_len_samples, 2 * T)
-            if window_len < 4:
-                window_len = 2 * T
+            window_len = pa.crossfade_len_samples if pa.crossfade_len_samples >= 4 else 2 * T
             r_max = min(2 * T, len(rel) - window_len)
             if r_max <= 0:
                 return
@@ -2890,7 +2895,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
     matching GO's behaviour (releaseMap[i] = -1 for those).
 
     Compare with GO output:
-      python3 analyze_lut_v54.py organ.organ --export-csv py.csv
+      python3 analyze_lut_v55.py organ.organ --export-csv py.csv
       python3 read_golut.py organ.release-align.golut --csv > go.csv
       diff py.csv go.csv
     """
@@ -2928,7 +2933,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
 
 
 def main():
-    # CLI batch mode: analyze_lut_v54.py <organ> --export-csv [output.csv]
+    # CLI batch mode: analyze_lut_v55.py <organ> --export-csv [output.csv]
     if len(sys.argv) >= 3 and sys.argv[2] == '--export-csv':
         out = sys.argv[3] if len(sys.argv) > 3 else None
         export_csv_batch(sys.argv[1], out)

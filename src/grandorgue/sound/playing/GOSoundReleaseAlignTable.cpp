@@ -294,24 +294,31 @@ static unsigned EstimatePeriodByAutocorr(
   if (len < max_period * 2)
     return min_period;
 
+  // Hann window: tapers the analysis segment to zero at both ends.
+  // This suppresses spectral side lobes that make NDP(T/2) and NDP(2T)
+  // appear nearly as strong as NDP(T) for harmonically rich signals.
+  std::vector<float> windowed(len);
+  for (unsigned i = 0; i < len; i++) {
+    const float w = 0.5f * (1.f - std::cos(2.f * (float)M_PI * i / (len - 1)));
+    windowed[i] = samples[i] * w;
+  }
+  const float *s = windowed.data();
+
   const unsigned window = len - max_period;
   float    best_score = -2.f;
   unsigned best_lag   = min_period;
 
-  // Small lag penalty: score shorter periods slightly higher so that when
-  // NDP(T) ≈ NDP(2T) (perfect loop), T is preferred over its multiples.
-  // alpha=0.10 means a lag at max_period pays a 10% penalty vs. min_period.
-  // This naturally avoids 2*T false-detections without a fragile threshold.
+  // Lag penalty (alpha=0.10): breaks the NDP(T)=NDP(2T) tie for perfect
+  // loops, preferring the shorter period.  Combines with Hann for robustness.
   const float alpha = 0.10f;
   for (unsigned lag = min_period; lag <= max_period; lag++) {
-    const float raw = NormalizedDotProduct(samples, samples, lag, window);
-    const float s   = raw * (1.f - alpha * (float)lag / (float)max_period);
-    if (s > best_score) {
-      best_score = s;
+    const float raw = NormalizedDotProduct(s, s, lag, window);
+    const float sc  = raw * (1.f - alpha * (float)lag / (float)max_period);
+    if (sc > best_score) {
+      best_score = sc;
       best_lag   = lag;
     }
   }
-
   return best_lag;
 }
 
