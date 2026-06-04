@@ -11,7 +11,7 @@ Aufruf:
 import os, re, sys
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Button
+from matplotlib.widgets import Button, CheckButtons
 
 # ---------------------------------------------------------------------------
 # Datei finden
@@ -21,6 +21,10 @@ def default_log_path():
     if sys.platform == "win32":
         tmp = os.environ.get("TEMP") or os.environ.get("TMP") or "C:\\"
         return os.path.join(tmp, "go_release_align_verbose.csv")
+    # Shared-folder path (Windows TEMP mapped via VirtualBox)
+    sf_path = "/media/sf_Temp/go_release_align_verbose.csv"
+    if os.path.isfile(sf_path):
+        return sf_path
     return "/tmp/go_release_align_verbose.csv"
 
 
@@ -46,6 +50,9 @@ def parse_log(path):
                 meta = {}
                 for m in re.finditer(r"(\w+)=(-?\d+)", line):
                     meta[m.group(1)] = int(m.group(2))
+                pm = re.search(r"\bpipe=(.+)$", line)
+                if pm:
+                    meta["pipe"] = pm.group(1)
                 data = {"atk": [], "rel_leg": [], "rel_corr": []}
             elif line and not line.startswith("#"):
                 parts = line.split(",")
@@ -69,24 +76,6 @@ def to_arrays(pairs):
     return idx, val
 
 
-def rotate_attack_to_phase0(atk_vals, phi, T):
-    """
-    Der verbose-Log zeigt attack ab loop_pos (Phase phi).
-    Die Korrelation vergleicht aber bei Phase 0 (crossfade_start = n*T).
-    Rotation: Phase-0 beginnt bei Offset (T - phi) im atk-Array.
-    Da der Attack periodisch ist, können fehlende Samples am Ende
-    aus dem Anfang des Arrays geholt werden (modulo T).
-    """
-    if T == 0 or len(atk_vals) == 0:
-        return atk_vals
-    n = len(atk_vals)
-    offset = T - phi
-    rotated = [atk_vals[(offset + i) % T] if (offset + i) % T < n
-               else atk_vals[(offset + i) % T - T] if (offset + i) % T - T >= 0
-               else 0
-               for i in range(n)]
-    return rotated
-
 
 # ---------------------------------------------------------------------------
 # GUI
@@ -97,29 +86,50 @@ class Browser:
         self.transitions = transitions
         self.idx = 0
 
-        self._normalize = False
+        self._normalize  = False
+        self._zoom_xlim  = None   # None = autoscale
+        self._zoom_ylim  = None
+        self._visible    = [True, True, True]  # atk, legacy, corr
 
         self.fig, self.ax = plt.subplots(figsize=(11, 6))
-        plt.subplots_adjust(bottom=0.25, top=0.88)
+        plt.subplots_adjust(bottom=0.28, top=0.88, right=0.82)
 
         # Linien vorab anlegen
-        self.line_atk,     = self.ax.plot([], [], color="#2196F3", lw=1.5, label="attack @ loop_pos")
-        self.line_legacy,  = self.ax.plot([], [], color="#F44336", lw=1.5, label="release @ legacy", linestyle="--")
-        self.line_corr,    = self.ax.plot([], [], color="#4CAF50", lw=1.5, label="release @ corr")
+        self.line_atk,    = self.ax.plot([], [], color="#2196F3", lw=1.5, label="attack")
+        self.line_legacy, = self.ax.plot([], [], color="#F44336", lw=1.5, label="legacy", linestyle="--")
+        self.line_corr,   = self.ax.plot([], [], color="#4CAF50", lw=1.5, label="corr")
+        self._lines = [self.line_atk, self.line_legacy, self.line_corr]
         self.ax.legend(loc="upper right")
-        self.ax.set_xlabel("Sample-Offset ab Startposition")
+        self.ax.set_xlabel("Sample-Offset  (Scroll=X-Zoom, Shift+Scroll=Y-Zoom)")
         self.ax.grid(True, alpha=0.3)
 
-        # Buttons
-        ax_prev = plt.axes([0.15, 0.05, 0.12, 0.06])
-        ax_next = plt.axes([0.73, 0.05, 0.12, 0.06])
-        self.btn_prev = Button(ax_prev, "◀ Zurück")
-        self.btn_next = Button(ax_next, "Weiter ▶")
+        # Checkboxen zum Ein-/Ausblenden (rechts neben dem Plot)
+        ax_chk = self.fig.add_axes([0.84, 0.55, 0.14, 0.20])
+        self.chk = CheckButtons(
+            ax_chk,
+            ["attack", "legacy", "corr"],
+            self._visible,
+        )
+        # Farben der Häkchen passend zu den Linien
+        for rect, color in zip(
+            ax_chk.patches, ["#2196F3", "#F44336", "#4CAF50"]
+        ):
+            rect.set_facecolor(color)
+        self.chk.on_clicked(self.toggle_line)
+
+        # Navigations-Buttons (untere Leiste)
+        ax_prev  = plt.axes([0.08, 0.06, 0.11, 0.06])
+        ax_next  = plt.axes([0.63, 0.06, 0.11, 0.06])
+        ax_reset = plt.axes([0.76, 0.06, 0.13, 0.06])
+        self.btn_prev  = Button(ax_prev,  "◀ Zurück")
+        self.btn_next  = Button(ax_next,  "Weiter ▶")
+        self.btn_reset = Button(ax_reset, "Zoom Reset [r]")
         self.btn_prev.on_clicked(self.prev)
         self.btn_next.on_clicked(self.next)
+        self.btn_reset.on_clicked(self.reset_zoom)
 
-        # Zähler-Text mittig
-        self.counter_ax = plt.axes([0.35, 0.05, 0.30, 0.06])
+        # Zähler-Text
+        self.counter_ax = plt.axes([0.22, 0.06, 0.22, 0.06])
         self.counter_ax.axis("off")
         self.counter_text = self.counter_ax.text(
             0.5, 0.5, "", ha="center", va="center",
@@ -127,11 +137,12 @@ class Browser:
         )
 
         # Normalize toggle button
-        ax_norm = plt.axes([0.35, 0.12, 0.30, 0.05])
+        ax_norm = plt.axes([0.22, 0.14, 0.30, 0.05])
         self.btn_norm = Button(ax_norm, "Normalisieren: AUS")
         self.btn_norm.on_clicked(self.toggle_norm)
 
         self.fig.canvas.mpl_connect("key_press_event", self.on_key)
+        self.fig.canvas.mpl_connect("scroll_event",    self.on_scroll)
         self.draw()
         plt.show()
 
@@ -146,15 +157,23 @@ class Browser:
 
         xi, xv = to_arrays(data["atk"])
         self.line_atk.set_data(xi, maybe_norm(xv))
+        self.line_atk.set_visible(self._visible[0])
 
         li, lv = to_arrays(data["rel_leg"])
         self.line_legacy.set_data(li, maybe_norm(lv))
+        self.line_legacy.set_visible(self._visible[1])
 
         ci, cv = to_arrays(data["rel_corr"])
         self.line_corr.set_data(ci, maybe_norm(cv))
+        self.line_corr.set_visible(self._visible[2])
 
-        self.ax.relim()
-        self.ax.autoscale_view()
+        if self._zoom_xlim is None:
+            self.ax.relim()
+            self.ax.autoscale_view()
+        else:
+            self.ax.set_xlim(self._zoom_xlim)
+            self.ax.set_ylim(self._zoom_ylim)
+
         self.ax.set_ylabel("Amplitude (normiert)" if self._normalize else "Amplitude (raw)")
 
         T_str   = meta.get("T", "?")
@@ -162,17 +181,55 @@ class Browser:
         lp    = meta.get("loop_pos", "?")
         leg   = meta.get("legacy", "?")
         corr  = meta.get("corr", "?")
-        cdiff = meta.get("circ_diff", "?")
+        cdiff    = meta.get("circ_diff", "?")
+        pipe     = meta.get("pipe", "")
+        atk_len  = meta.get("atk_len", "")
+        atk_sr   = meta.get("atk_sr", "")
 
-        self.fig.suptitle(
-            f"loop_pos={lp}  phi={phi_str}  T={T_str}  "
-            f"legacy={leg}  corr={corr}  circ_diff={cdiff}",
-            fontsize=11
-        )
+        title_line1 = f"{pipe}  " if pipe else ""
+        title_line1 += (f"loop_pos={lp}  phi={phi_str}  T={T_str}  "
+                        f"legacy={leg}  corr={corr}  circ_diff={cdiff}")
+        if atk_len or atk_sr:
+            title_line1 += f"  atk:{atk_len}smp@{atk_sr}Hz"
+        self.fig.suptitle(title_line1, fontsize=11)
         self.counter_text.set_text(
             f"{self.idx + 1} / {len(self.transitions)}"
         )
         self.fig.canvas.draw_idle()
+
+    def on_scroll(self, event):
+        if event.inaxes != self.ax:
+            return
+        factor = 0.75 if event.button == "up" else 1.33
+        xc, yc = event.xdata, event.ydata
+        xl, xr = self.ax.get_xlim()
+        yb, yt = self.ax.get_ylim()
+        if event.key == "shift":          # Shift+Scroll → nur Y
+            self._zoom_ylim = (yc - (yc - yb) * factor,
+                               yc + (yt - yc) * factor)
+            self._zoom_xlim = self._zoom_xlim or (xl, xr)
+        else:                             # Scroll → nur X
+            self._zoom_xlim = (xc - (xc - xl) * factor,
+                               xc + (xr - xc) * factor)
+            self._zoom_ylim = self._zoom_ylim or (yb, yt)
+        self.ax.set_xlim(self._zoom_xlim)
+        self.ax.set_ylim(self._zoom_ylim)
+        self.fig.canvas.draw_idle()
+
+    def toggle_line(self, label):
+        mapping = {"attack": 0, "legacy": 1, "corr": 2}
+        i = mapping[label]
+        self._visible[i] = not self._visible[i]
+        self._lines[i].set_visible(self._visible[i])
+        if self._zoom_xlim is None:
+            self.ax.relim()
+            self.ax.autoscale_view()
+        self.fig.canvas.draw_idle()
+
+    def reset_zoom(self, _event=None):
+        self._zoom_xlim = None
+        self._zoom_ylim = None
+        self.draw()
 
     def toggle_norm(self, _event=None):
         self._normalize = not self._normalize
@@ -197,6 +254,8 @@ class Browser:
             self.prev()
         elif event.key == "z":
             self.toggle_norm()
+        elif event.key == "r":
+            self.reset_zoom()
 
 
 # ---------------------------------------------------------------------------

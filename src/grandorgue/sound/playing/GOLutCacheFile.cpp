@@ -61,8 +61,9 @@ bool GOLutCacheWriter::Write(
     + sizeof(criteria.useDriftFallback) + sizeof(criteria._pad)
     + (size_t)releaseCount * sizeof(int32_t);
   for (const auto &e : luts)
-    bufSize += sizeof(uint32_t)
-              + e.size() * (sizeof(uint32_t) + sizeof(uint16_t));
+    bufSize += sizeof(uint32_t) + sizeof(double)   // period_samples + period_float
+              + sizeof(uint32_t)                   // n_points
+              + e.points.size() * (sizeof(uint32_t) + sizeof(uint16_t));
 
   std::vector<uint8_t> buf;
   buf.reserve(bufSize);
@@ -88,9 +89,11 @@ bool GOLutCacheWriter::Write(
   if (releaseCount > 0)
     put(releaseMap.data(), (size_t)releaseCount * sizeof(int32_t));
   for (const auto &entry : luts) {
-    const uint32_t n = (uint32_t)entry.size();
+    put(&entry.period_samples, sizeof(entry.period_samples));
+    put(&entry.period_float,   sizeof(entry.period_float));
+    const uint32_t n = (uint32_t)entry.points.size();
     putU32(n);
-    for (const auto &pt : entry) {
+    for (const auto &pt : entry.points) {
       put(&pt.loop_pos, sizeof(pt.loop_pos));
       put(&pt.best_r,   sizeof(pt.best_r));
     }
@@ -113,6 +116,25 @@ bool GOLutCacheWriter::Write(
 
 // ── Reader ────────────────────────────────────────────────────────────────────
 
+// Minimal header size (magic + 2×ver + hash + 2×count).
+static constexpr size_t GOLUT_FIXED_HEADER_SIZE =
+  sizeof(GOLUT_MAGIC) + 4 + 4 + GOLUT_HASH_FIELD + 4 + 4;
+
+// Buffer-based deserializer — zero syscall overhead after initial file read.
+struct BufReader {
+  const uint8_t *data;
+  size_t         pos;
+  size_t         size;
+
+  bool Read(void *dst, size_t n) {
+    if (pos + n > size) return false;
+    memcpy(dst, data + pos, n);
+    pos += n;
+    return true;
+  }
+  bool ReadU32(uint32_t &v) { return Read(&v, 4); }
+};
+
 bool GOLutCacheReader::Load(
   const wxString &path,
   const wxString &expectedOdfHash,
@@ -130,71 +152,113 @@ bool GOLutCacheReader::Load(
   if (!f.Open(path, wxFile::read))
     return false;
 
+  // Read entire file into memory — avoids per-field syscall overhead.
+  const wxFileOffset fileSize = f.Length();
+  if (fileSize < 0 || (size_t)fileSize < GOLUT_FIXED_HEADER_SIZE)
+    return false;
+  std::vector<uint8_t> buf((size_t)fileSize);
+  if (f.Read(buf.data(), buf.size()) != fileSize)
+    return false;
+  f.Close();
+
+  BufReader r{buf.data(), 0, buf.size()};
+
   // ── Header ──────────────────────────────────────────────────────────────────
   char magic[8] = {};
-  if (!ReadAll(f, magic, sizeof(magic))) return false;
+  if (!r.Read(magic, sizeof(magic))) return false;
   if (memcmp(magic, GOLUT_MAGIC, sizeof(GOLUT_MAGIC)) != 0) return false;
 
   uint32_t fmtVer = 0, algVer = 0;
-  if (!ReadAll(f, &fmtVer, sizeof(fmtVer))) return false;
-  if (!ReadAll(f, &algVer, sizeof(algVer))) return false;
-  if (fmtVer != GOLUT_FORMAT_VERSION)   return false;
-  if (algVer != GOLUT_ALGORITHM_VERSION) return false;
+  if (!r.ReadU32(fmtVer)) return false;
+  if (!r.ReadU32(algVer)) return false;
+  if (fmtVer != GOLUT_FORMAT_VERSION)    return false;
+  if (algVer  != GOLUT_ALGORITHM_VERSION) return false;
 
   char hashField[GOLUT_HASH_FIELD] = {};
-  if (!ReadAll(f, hashField, GOLUT_HASH_FIELD)) return false;
+  if (!r.Read(hashField, GOLUT_HASH_FIELD)) return false;
   hashField[GOLUT_HASH_FIELD - 1] = '\0';
   if (wxString::FromUTF8(hashField) != expectedOdfHash) return false;
 
   uint32_t releaseCount = 0, lutCount = 0;
-  if (!ReadAll(f, &releaseCount, sizeof(releaseCount))) return false;
-  if (!ReadAll(f, &lutCount,     sizeof(lutCount)))     return false;
+  if (!r.ReadU32(releaseCount)) return false;
+  if (!r.ReadU32(lutCount))     return false;
   if (releaseCount != expectedReleaseCount) return false;
   if (lutCount > releaseCount) return false;
 
   m_lutCount = lutCount;
 
   // headerOnly: header validated, counts available — skip the bulk data.
-  // Used by the dialog status display to avoid reading the full file.
   if (headerOnly) {
     m_valid = true;
     return true;
   }
 
-  // Generator criteria (read but not validated — diagnostics only)
-  if (!ReadAll(f, &m_criteria.minScore,             sizeof(m_criteria.minScore)))             return false;
-  if (!ReadAll(f, &m_criteria.minCoherence,         sizeof(m_criteria.minCoherence)))         return false;
-  if (!ReadAll(f, &m_criteria.maxGapFills,          sizeof(m_criteria.maxGapFills)))          return false;
-  if (!ReadAll(f, &m_criteria.requireStabilization, sizeof(m_criteria.requireStabilization))) return false;
-  if (!ReadAll(f, &m_criteria.useDriftFallback,     sizeof(m_criteria.useDriftFallback)))     return false;
-  if (!ReadAll(f, m_criteria._pad, sizeof(m_criteria._pad))) return false;
+  // Generator criteria (diagnostics only, not validated).
+  if (!r.Read(&m_criteria.minScore,             sizeof(m_criteria.minScore)))             return false;
+  if (!r.Read(&m_criteria.minCoherence,         sizeof(m_criteria.minCoherence)))         return false;
+  if (!r.Read(&m_criteria.maxGapFills,          sizeof(m_criteria.maxGapFills)))          return false;
+  if (!r.Read(&m_criteria.requireStabilization, sizeof(m_criteria.requireStabilization))) return false;
+  if (!r.Read(&m_criteria.useDriftFallback,     sizeof(m_criteria.useDriftFallback)))     return false;
+  if (!r.Read(m_criteria._pad,                  sizeof(m_criteria._pad)))                 return false;
 
   // ── ReleaseMap ──────────────────────────────────────────────────────────────
   m_releaseMap.resize(releaseCount, -1);
   if (releaseCount > 0)
-    if (!ReadAll(f, m_releaseMap.data(), releaseCount * sizeof(int32_t)))
+    if (!r.Read(m_releaseMap.data(), releaseCount * sizeof(int32_t)))
       return false;
 
-  // Validate: all indices must be -1 or in [0, lutCount).
   for (int32_t idx : m_releaseMap)
     if (idx != -1 && (uint32_t)idx >= lutCount) return false;
 
   // ── LUT entries ─────────────────────────────────────────────────────────────
-  // Sparse LUT: MAX_TOTAL=30.  Exhaustive LUT: capped at MAX_EXHST=2000.
-  // 6000 gives comfortable margin above the generation cap.
   static constexpr uint32_t GOLUT_MAX_POINTS = 6000;
   m_luts.resize(lutCount);
   for (GOLutEntry &entry : m_luts) {
+    if (!r.Read(&entry.period_samples, sizeof(entry.period_samples))) return false;
+    if (!r.Read(&entry.period_float,   sizeof(entry.period_float)))   return false;
     uint32_t n = 0;
-    if (!ReadAll(f, &n, sizeof(n))) return false;
-    if (n > GOLUT_MAX_POINTS) return false; // guard against corrupt files
-    entry.resize(n);
-    for (GOLutPoint &pt : entry) {
-      if (!ReadAll(f, &pt.loop_pos, sizeof(pt.loop_pos))) return false;
-      if (!ReadAll(f, &pt.best_r,   sizeof(pt.best_r)))   return false;
+    if (!r.ReadU32(n)) return false;
+    if (n > GOLUT_MAX_POINTS) return false;
+    entry.points.resize(n);
+    if (n > 0) {
+      for (GOLutPoint &pt : entry.points) {
+        if (!r.Read(&pt.loop_pos, sizeof(pt.loop_pos))) return false;
+        if (!r.Read(&pt.best_r,   sizeof(pt.best_r)))   return false;
+      }
     }
   }
 
   m_valid = true;
   return true;
+}
+
+bool GOLutCacheReader::PeekHeader(
+  const wxString &path, const wxString &expectedOdfHash) {
+  if (!wxFileExists(path))
+    return false;
+
+  wxFile f;
+  if (!f.Open(path, wxFile::read))
+    return false;
+
+  uint8_t buf[GOLUT_FIXED_HEADER_SIZE];
+  if (f.Read(buf, sizeof(buf)) != (wxFileOffset)sizeof(buf))
+    return false;
+
+  BufReader r{buf, 0, sizeof(buf)};
+
+  char magic[8] = {};
+  if (!r.Read(magic, sizeof(magic))) return false;
+  if (memcmp(magic, GOLUT_MAGIC, sizeof(GOLUT_MAGIC)) != 0) return false;
+
+  uint32_t fmtVer = 0, algVer = 0;
+  if (!r.ReadU32(fmtVer)) return false;
+  if (!r.ReadU32(algVer)) return false;
+  if (fmtVer != GOLUT_FORMAT_VERSION)    return false;
+  if (algVer  != GOLUT_ALGORITHM_VERSION) return false;
+
+  char hashField[GOLUT_HASH_FIELD] = {};
+  if (!r.Read(hashField, GOLUT_HASH_FIELD)) return false;
+  hashField[GOLUT_HASH_FIELD - 1] = '\0';
+  return wxString::FromUTF8(hashField) == expectedOdfHash;
 }

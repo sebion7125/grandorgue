@@ -37,6 +37,11 @@
 #include "model/GOSoundingPipe.h"
 #include <wx/log.h>
 
+#if __has_include("playing/GOLogReleaseAlignEnable.h") \
+  && __has_include("playing/GOLogReleaseAlignVerbose.h")
+#include <cstdio>
+#endif
+
 GOSoundOrganEngine::GOSoundOrganEngine()
   : m_PolyphonyLimiting(true),
     m_ScaledReleases(true),
@@ -801,8 +806,32 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
       if (
         m_ReleaseAlignmentEnabled
         && release_section->SupportsStreamAlignment()) {
+#if __has_include("playing/GOLogReleaseAlignEnable.h") \
+  && __has_include("playing/GOLogReleaseAlignVerbose.h")
+        {
+          auto *dbgPipe  = this_pipe->GetOwnerPipe();
+          auto *dbgRank  = dbgPipe ? dbgPipe->GetRank() : nullptr;
+          const wxString dbgRankName
+            = dbgRank ? dbgRank->GetName().Lower() : wxString();
+          const ChannelKind dbgChan = ChannelFromRankName(dbgRankName);
+          const char *dbgChanStr = (dbgChan == CK_Front) ? "front"
+                                 : (dbgChan == CK_Rear)  ? "rear" : "dry";
+          // GetKeyMidiNumber() = ODF key position (pressed key).
+          // GetMidiKeyNumber() = smpl-chunk pitch (recording pitch) — wrong here.
+          const unsigned dbgKeyMidi
+            = dbgPipe ? dbgPipe->GetKeyMidiNumber() : this_pipe->GetMidiKeyNumber();
+          char dbgLabel[64];
+          std::snprintf(
+            dbgLabel, sizeof(dbgLabel), "%s|midi=%u|%s",
+            dbgRankName.utf8_str().data(),
+            dbgKeyMidi, dbgChanStr);
+          new_sampler->stream.InitAlignedStream(
+            release_section, m_interpolation, &handle->stream, dbgLabel);
+        }
+#else
         new_sampler->stream.InitAlignedStream(
           release_section, m_interpolation, &handle->stream);
+#endif
       } else {
         new_sampler->stream.InitStream(
           &m_resample,

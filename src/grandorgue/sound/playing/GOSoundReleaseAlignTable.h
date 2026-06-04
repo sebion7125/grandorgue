@@ -21,10 +21,13 @@ class GOCacheWriter;
 #define PHASE_ALIGN_AMPLITUDES 32
 #define PHASE_ALIGN_MIN_FREQUENCY 20 /* Hertz */
 
-// Ranks with HarmonicNumber >= this are treated as potential mixtures and use
-// autocorrelation for period estimation. Quint 1⅓' = HarmonicNumber 48 is the
-// lowest rank where repetition can occur.
-static constexpr unsigned CORR_MIXTURE_HARMONIC_THRESHOLD = 48;
+// Returns true for pure octave stops (HarmonicNumber is a power of two:
+// 1=64', 2=32', 4=16', 8=8', 16=4', 32=2', 64=1').
+// Non-octave stops (aliquots, mixtures: e.g. 24=2⅔', 40=1⅗', 48=1⅓')
+// require autocorrelation for accurate period estimation.
+inline bool CorrIsOctaveStop(unsigned harmonicNumber) {
+  return harmonicNumber > 0 && (harmonicNumber & (harmonicNumber - 1)) == 0;
+}
 
 class GOSoundReleaseAlignTable {
 public:
@@ -101,6 +104,16 @@ public:
     unsigned loop_pos, const GOSoundAudioSection *p_Attack = nullptr) const;
 
   unsigned GetPeriodSamples() const { return m_CorrPeriodSamples; }
+  double   GetPeriodFloat()   const { return m_CorrPeriodFloat; }
+
+  // Set the period from the pitch formula only (no audio scan).
+  // Used when ComputeCorrelationLut is skipped due to a pre-loaded LUT cache:
+  // OverrideCorrLutsFromCache requires a non-zero period to apply the cache.
+  void InitPeriodFromFormula(unsigned sample_rate, float sample_freq_hz) {
+    if (sample_freq_hz <= 0.f) return;
+    const unsigned T = (unsigned)((double)sample_rate / (double)sample_freq_hz + 0.5);
+    if (T >= 16) m_CorrPeriodSamples = T;
+  }
 
   // Returns true if at least one correlation LUT is present.
   bool HasCorrLut() const { return !m_CorrLuts.empty(); }
@@ -118,8 +131,13 @@ public:
 
   // Replace any existing correlation LUTs with a single cached LUT that
   // applies to all attacks (p_Attack = nullptr → FindLut() fallback).
-  // No-op if m_CorrPeriodSamples is not yet set or points is empty.
-  void OverrideCorrLutsFromCache(std::vector<CorrPoint> points);
+  // If period_samples >= 16, also restores m_CorrPeriodSamples/Float from the
+  // stored values so runtime interpolation uses the generation-time grid.
+  // No-op if m_CorrPeriodSamples ends up 0 or points is empty.
+  void OverrideCorrLutsFromCache(
+    std::vector<CorrPoint> points,
+    uint32_t               period_samples = 0,
+    double                 period_float   = 0.0);
 
   // If this aligner holds a cache-injected LUT (single entry, p_Attack=nullptr),
   // remove it so that Legacy alignment is used until the next organ load.
