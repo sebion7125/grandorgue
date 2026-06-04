@@ -445,7 +445,8 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 harmonic_number: int,
                 loop_start: int, loop_end: int,
                 min_sample: int = 0,
-                max_sample: Optional[int] = None) -> tuple:
+                max_sample: Optional[int] = None,
+                downsampling: bool = True) -> tuple:
     """
     Nachbau von ComputeCorrelationLut. Rückgabe: (points, meta)
     v24: Klassischer Dense-Loop für alle Pfeifen.
@@ -468,7 +469,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     if r_max == 0 or (loop_len // T_int) < 4:
         return [], meta
 
-    ds           = min(4, T_int // 500) if T_int >= 500 else 1
+    ds           = (min(4, T_int // 500) if T_int >= 500 else 1) if downsampling else 1
     atk_full_len = len(attack_mono)
     n_total      = max(1, int((atk_full_len - window_len) / T_float))
 
@@ -861,6 +862,7 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             loop_end=pa.loop_end,
             min_sample=pa.min_sample,
             max_sample=pa.max_sample,
+            downsampling=desc.get("downsampling", True),
         )
         pa.stabilized = bool(lut_meta.get("stabilized", False))
         pa.stable_at_n = lut_meta.get("stable_at_n")
@@ -2122,6 +2124,16 @@ class LUTAnalyzerApp(tk.Tk):
                                       font=("Consolas",10))
         self._organ_label.pack(side=tk.LEFT, padx=12)
 
+        # Downsampling-Einstellung — entspricht GOSettingsOptions::CorrLutDownsampling
+        self._ds_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(toolbar, text="Downsampling",
+                       variable=self._ds_var,
+                       bg=C_BG3, fg=C_TEXT,
+                       selectcolor=C_BG2, activebackground=C_BG3,
+                       activeforeground=C_TEXT,
+                       font=("Consolas", 10)
+                       ).pack(side=tk.LEFT, padx=(12, 4))
+
         # Fortschrittsbalken
         self._progress_var = tk.DoubleVar()
         self._progress = ttk.Progressbar(toolbar, variable=self._progress_var,
@@ -2370,9 +2382,11 @@ class LUTAnalyzerApp(tk.Tk):
             # analyze_pipe ist eine reine Funktion ohne GUI-Referenzen → picklebar.
             n_workers = min(20, max(2, (_os.cpu_count() or 4)))
             self._progress_label.config(text=f"0/{self._total_work}  ({n_workers} Prozesse)")
+            use_ds = self._ds_var.get()
+            descs = [{**d, "downsampling": use_ds} for d in self._pipe_descs]
             with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as pool:
                 futures = {pool.submit(analyze_pipe, d): d
-                           for d in self._pipe_descs}
+                           for d in descs}
                 for fut in concurrent.futures.as_completed(futures):
                     try:
                         result = fut.result()
@@ -2453,7 +2467,7 @@ class LUTAnalyzerApp(tk.Tk):
 
         if isinstance(pa, dict):
             # Noch nicht analysiert — on-demand
-            pa = analyze_pipe(pa)
+            pa = analyze_pipe({**pa, "downsampling": self._ds_var.get()})
             self._analyses[key] = pa
             self._update_tree_item(key, pa)
 
