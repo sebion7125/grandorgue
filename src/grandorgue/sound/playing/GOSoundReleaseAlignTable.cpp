@@ -368,7 +368,10 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     }
   }
 
-  if (m_CorrPeriodSamples < 16)
+  // Normal mode: T < 16 samples → correlation window too small, skip.
+  // Permissive mode (generator): accept down to T = 2 so high-pitched stops
+  // (1', 2') are included in the cache.
+  if (m_CorrPeriodSamples < (permissive ? 2u : 16u))
     return;
 
   const double T_f = (m_CorrPeriodFloat > 0.0) ? m_CorrPeriodFloat
