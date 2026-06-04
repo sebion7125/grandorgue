@@ -865,7 +865,7 @@ wxString GOOrganController::Load(
 
         /* Figure out list of pipes to load */
 #ifdef GO_PROFILE_ODFLOAD
-        LOG_TIMING("Timing: Preparing audio objects…");
+        LOG_TIMING("Timing: Preparing audio objects...");
 #endif
         dlg->Reset(1, _("Preparing audio objects"));
         GOCacheObjectDistributor objectDistributor(GetCacheObjects());
