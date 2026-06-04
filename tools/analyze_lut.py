@@ -48,6 +48,9 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v56: YIN-CMNDF Periodendetektion: findet erste starke Periodizitaet statt
+#      globalem NDP-Maximum — loest T/2-Problem fuer Mixturen mit gerader Harmonik.
+#      Fallback auf Lag-Penalty-NDP wenn kein YIN-Valley gefunden.
 # v55: Hann-Fenster in estimate_period_by_autocorr (Seitenkeulendaempfung).
 #      Score-Worker crossfade window = crossfade_len_samples (wie compute_lut).
 # v54: Lag-Strafterm (alpha=0.10) statt Sub-Harmonischen-Check: NDP(lag) *= (1 - 0.10*lag/max_p).
@@ -432,34 +435,56 @@ def fit_linear_drift(points, T: int):
 
 def estimate_period_by_autocorr(samples: np.ndarray,
                                   min_period: int,
-                                  max_period: int) -> int:
-    """Schaetzt Periode via Autokorrelation (Nachbau EstimatePeriodByAutocorr)."""
-    if len(samples) < max_period * 2:
+                                  max_period: int,
+                                  yin_threshold: float = 0.15) -> int:
+    """YIN-style CMNDF period estimator (Nachbau EstimatePeriodByAutocorr).
+
+    Finds the FIRST lag where the cumulative-mean normalised difference dips
+    below yin_threshold — the true fundamental, not T/2 or 2T.
+    Falls back to penalised NDP if no YIN valley is found.
+    """
+    N = len(samples)
+    if N < max_period * 2:
         return min_period
 
-    # Hann window: suppresses side lobes that make NDP(T/2) and NDP(2T)
-    # appear nearly as strong as the true fundamental peak.
-    N    = len(samples)
+    # Hann window
     hann = 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(N) / (N - 1)))
-    s_w  = (samples.astype(np.float32) * hann.astype(np.float32))
+    x    = samples.astype(np.float32) * hann.astype(np.float32)
+    W    = N - max_period
+    ref_n = x[:W] / (np.linalg.norm(x[:W]) + 1e-12)
 
-    window = N - max_period
-    ref_n  = s_w[:window] / (np.linalg.norm(s_w[:window]) + 1e-12)
-    best_score = -2.0
-    best_lag   = min_period
+    lags    = np.arange(min_period, max_period + 1)
+    ndp_arr = np.empty(len(lags), dtype=np.float64)
+    for i, lag in enumerate(lags):
+        sh = x[lag:lag + W]
+        nrm = np.linalg.norm(sh)
+        ndp_arr[i] = float(np.dot(ref_n, sh / nrm)) if nrm > 1e-12 else 0.0
 
-    # Lag penalty (alpha=0.10): breaks NDP(T)=NDP(2T) tie for perfect loops.
-    alpha = 0.10
-    for lag in range(min_period, max_period + 1):
-        shifted = s_w[lag:lag + window]
-        n = np.linalg.norm(shifted)
-        raw = float(np.dot(ref_n, shifted / n)) if n > 1e-12 else 0.0
-        sc = raw * (1.0 - alpha * lag / max_period)
-        if sc > best_score:
-            best_score = sc
-            best_lag   = lag
+    # YIN CMNDF: d'[i]=1-NDP[i];  cmndf[i]=d'[i]/mean(d'[0..i])
+    d_prime = 1.0 - ndp_arr
+    cumsum  = np.cumsum(d_prime)
+    cmndf   = np.where(cumsum > 0,
+                       d_prime * np.arange(1, len(lags)+1) / cumsum,
+                       1.0)
 
-    return best_lag
+    # First local minimum below threshold
+    in_valley  = False
+    best_cmndf = 2.0
+    yin_lag    = 0
+    for i in range(len(cmndf)):
+        c = cmndf[i]
+        if c < yin_threshold:
+            if not in_valley or c < best_cmndf:
+                best_cmndf = c;  yin_lag = int(lags[i]);  in_valley = True
+            else:
+                break
+        elif in_valley:
+            break
+    if in_valley:
+        return yin_lag
+
+    # Fallback: penalised NDP
+    return int(lags[np.argmax(ndp_arr * (1.0 - 0.10 * lags / max_period))])
 
 
 # ─── LUT-Algorithmus (Python-Nachbau) ────────────────────────────────────────
@@ -2895,7 +2920,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
     matching GO's behaviour (releaseMap[i] = -1 for those).
 
     Compare with GO output:
-      python3 analyze_lut_v55.py organ.organ --export-csv py.csv
+      python3 analyze_lut_v56.py organ.organ --export-csv py.csv
       python3 read_golut.py organ.release-align.golut --csv > go.csv
       diff py.csv go.csv
     """
@@ -2933,7 +2958,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
 
 
 def main():
-    # CLI batch mode: analyze_lut_v55.py <organ> --export-csv [output.csv]
+    # CLI batch mode: analyze_lut_v56.py <organ> --export-csv [output.csv]
     if len(sys.argv) >= 3 and sys.argv[2] == '--export-csv':
         out = sys.argv[3] if len(sys.argv) > 3 else None
         export_csv_batch(sys.argv[1], out)
