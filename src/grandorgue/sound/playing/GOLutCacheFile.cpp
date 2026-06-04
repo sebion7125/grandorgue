@@ -67,8 +67,12 @@ bool GOLutCacheWriter::Write(
   // odfHash: fixed 64-byte null-terminated UTF-8 field
   char hashField[GOLUT_HASH_FIELD] = {};
   const wxScopedCharBuffer utf8 = odfHash.utf8_str();
+  if (utf8.length() >= GOLUT_HASH_FIELD) return fail(); // hash too long
   strncpy(hashField, utf8.data(), GOLUT_HASH_FIELD - 1);
   if (!WriteAll(f, hashField, GOLUT_HASH_FIELD))         return fail();
+
+  // Validate releaseMap size before writing to avoid out-of-bounds read.
+  if (releaseMap.size() != releaseCount) return fail();
 
   if (!WriteAll(f, &releaseCount, sizeof(releaseCount))) return fail();
   if (!WriteAll(f, &lutCount,     sizeof(lutCount)))     return fail();
@@ -98,10 +102,10 @@ bool GOLutCacheWriter::Write(
 
   f.Close();
 
-  // Atomic rename: on POSIX, rename() replaces the destination atomically.
-  if (wxFileExists(path))
-    wxRemoveFile(path);
-  if (!wxRenameFile(tmpPath, path, false)) {
+  // Atomic replace: on POSIX wxRenameFile(overwrite=true) calls rename(2)
+  // which replaces the destination atomically — the old cache is never
+  // absent.  On Windows this is best-effort (delete+rename, not atomic).
+  if (!wxRenameFile(tmpPath, path, true)) {
     wxRemoveFile(tmpPath);
     return false;
   }
@@ -145,6 +149,9 @@ bool GOLutCacheReader::Load(
   if (!ReadAll(f, &releaseCount, sizeof(releaseCount))) return false;
   if (!ReadAll(f, &lutCount,     sizeof(lutCount)))     return false;
   if (releaseCount != expectedReleaseCount) return false;
+  // lutCount can't exceed the number of releases; also guard against corrupt
+  // files that would cause huge allocations.
+  if (lutCount > releaseCount) return false;
 
   // Generator criteria (read but not validated — diagnostics only)
   if (!ReadAll(f, &m_criteria.minScore,             sizeof(m_criteria.minScore)))             return false;
@@ -165,10 +172,13 @@ bool GOLutCacheReader::Load(
     if (idx != -1 && (uint32_t)idx >= lutCount) return false;
 
   // ── LUT entries ─────────────────────────────────────────────────────────────
+  // MAX_TOTAL in ComputeCorrelationLut is 30; allow 256 for future growth.
+  static constexpr uint32_t GOLUT_MAX_POINTS = 256;
   m_luts.resize(lutCount);
   for (GOLutEntry &entry : m_luts) {
     uint32_t n = 0;
     if (!ReadAll(f, &n, sizeof(n))) return false;
+    if (n > GOLUT_MAX_POINTS) return false; // guard against corrupt files
     entry.resize(n);
     for (GOLutPoint &pt : entry) {
       if (!ReadAll(f, &pt.loop_pos, sizeof(pt.loop_pos))) return false;

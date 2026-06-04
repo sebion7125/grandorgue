@@ -506,7 +506,7 @@ static void ApplyLutReaderToOrgan(
   const std::vector<int32_t>    &releaseMap = reader.GetReleaseMap();
   const std::vector<GOLutEntry> &lutEntries = reader.GetLuts();
   for (GOCacheObject *obj : cacheObjects) {
-    GOSoundingPipe *pipe = dynamic_cast<GOSoundingPipe *>(obj);
+    GOSoundingPipe *pipe = obj->AsSoundingPipe();
     if (!pipe) continue;
     for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
       const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
@@ -543,7 +543,7 @@ wxString GOOrganController::GetLutCachePath() const {
 
 void GOOrganController::ClearAllCachedLuts() {
   for (GOCacheObject *obj : GetCacheObjects()) {
-    GOSoundingPipe *pipe = dynamic_cast<GOSoundingPipe *>(obj);
+    GOSoundingPipe *pipe = obj->AsSoundingPipe();
     if (!pipe) continue;
     for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
       const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
@@ -567,10 +567,22 @@ bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll) {
   EnumerateReleaseParseIndices();
 
   if (m_lutReleaseCount == 0) {
-    if (GetCacheObjects().empty())
+    if (GetCacheObjects().empty()) {
       errorMsg = _("No organ loaded. Load an organ first.");
-    else
-      errorMsg = _("No releases found. This organ may not use sampled releases.");
+    } else {
+      // Count sounding pipes to give a useful diagnostic.
+      unsigned pipeCount = 0;
+      for (const GOCacheObject *obj : GetCacheObjects())
+        if (dynamic_cast<const GOSoundingPipe *>(obj)) pipeCount++;
+      errorMsg = wxString::Format(
+        _("No release audio sections found (%u sounding pipes checked).\n"
+          "The LUT cache requires loop-based samples (WAV files with loop and\n"
+          "release markers).  Simple single-file or percussive pipes are not\n"
+          "supported.\n\n"
+          "If this organ should have looped releases, try deleting the\n"
+          ".gorgan cache (File > Delete Cache) and reloading."),
+        pipeCount);
+    }
     return false;
   }
 
@@ -578,7 +590,7 @@ bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll) {
   std::vector<GOLutEntry> luts;
 
   for (GOCacheObject *obj : GetCacheObjects()) {
-    GOSoundingPipe *pipe = dynamic_cast<GOSoundingPipe *>(obj);
+    GOSoundingPipe *pipe = obj->AsSoundingPipe();
     if (!pipe) continue;
     for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
       const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
@@ -590,10 +602,13 @@ bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll) {
       std::vector<GOSoundReleaseAlignTable::CorrPoint> permPts;
 
       // Determine point source: live LUT or permissive recompute.
+      // Multi-LUT releases (>1 attack joinable) are skipped: the .golut
+      // format stores one LUT per release, and using only the first LUT
+      // as a fallback for all attacks would silently ignore the others.
       const std::vector<GOSoundReleaseAlignTable::CorrPoint> *pts = nullptr;
-      if (aligner && aligner->HasCorrLut()) {
+      if (aligner && aligner->GetCorrLutCount() == 1) {
         pts = aligner->GetFirstLutPoints();
-      } else if (forceAll) {
+      } else if (forceAll && (!aligner || aligner->GetCorrLutCount() == 0)) {
         permPts = pipe->TryPermissiveLutForRelease(i);
         if (!permPts.empty()) pts = &permPts;
       }
@@ -625,7 +640,7 @@ bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll) {
 unsigned GOOrganController::EnumerateReleaseParseIndices() {
   unsigned counter = 0;
   for (GOCacheObject *obj : GetCacheObjects()) {
-    GOSoundingPipe *pipe = dynamic_cast<GOSoundingPipe *>(obj);
+    GOSoundingPipe *pipe = obj->AsSoundingPipe();
     if (pipe)
       counter = pipe->AssignReleaseParseIndices(counter);
   }

@@ -109,6 +109,10 @@ private:
   void VelocityChanged(unsigned velocity, unsigned old_velocity) override;
 
 public:
+  // Override to allow identification via GOCacheObject* without dynamic_cast
+  // (private base class inheritance makes dynamic_cast from base unreliable).
+  GOSoundingPipe *AsSoundingPipe() override { return this; }
+
   GOSoundingPipe(
     GOOrganModel *pOrganModel,
     GORank *rank,
