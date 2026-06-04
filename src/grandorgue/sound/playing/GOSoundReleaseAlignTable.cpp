@@ -302,22 +302,52 @@ static unsigned EstimatePeriodByAutocorr(
     const float w = 0.5f * (1.f - std::cos(2.f * (float)M_PI * i / (len - 1)));
     windowed[i] = samples[i] * w;
   }
-  const float *s = windowed.data();
+  const float *s   = windowed.data();
+  const unsigned W = len - max_period;
 
-  const unsigned window = len - max_period;
+  // Collect NDP for all lags — used by both YIN and the fallback.
+  const unsigned n_lags = max_period - min_period + 1;
+  std::vector<float> ndp_vals(n_lags);
+  for (unsigned i = 0; i < n_lags; i++)
+    ndp_vals[i] = NormalizedDotProduct(s, s, min_period + i, W);
+
+  // YIN cumulative mean normalised difference (CMNDF).
+  // d'[i] = 1 - NDP[i];  CMNDF[i] = d'[i] / mean(d'[0..i])
+  // Returns the FIRST lag in [min_period, max_period] where CMNDF dips below
+  // the threshold — i.e. the true fundamental rather than T/2 or 2T.
+  static constexpr float YIN_THRESHOLD = 0.15f;
+  double   cumsum      = 0.0;
+  bool     in_valley   = false;
+  float    best_cmndf  = 2.f;
+  unsigned yin_lag     = 0;
+
+  for (unsigned i = 0; i < n_lags; i++) {
+    const float d    = 1.f - ndp_vals[i];
+    cumsum          += d;
+    const float cmndf = (cumsum > 0.0)
+                        ? d * (float)(i + 1) / (float)cumsum : 1.f;
+    if (cmndf < YIN_THRESHOLD) {
+      if (!in_valley || cmndf < best_cmndf) {
+        best_cmndf = cmndf;
+        yin_lag    = min_period + i;
+        in_valley  = true;
+      } else {
+        break; // past valley bottom
+      }
+    } else if (in_valley) {
+      break; // rose above threshold after valley
+    }
+  }
+  if (in_valley) return yin_lag;
+
+  // Fallback: penalized NDP — prefers shorter periods when NDP values tie.
   float    best_score = -2.f;
   unsigned best_lag   = min_period;
-
-  // Lag penalty (alpha=0.10): breaks the NDP(T)=NDP(2T) tie for perfect
-  // loops, preferring the shorter period.  Combines with Hann for robustness.
-  const float alpha = 0.10f;
-  for (unsigned lag = min_period; lag <= max_period; lag++) {
-    const float raw = NormalizedDotProduct(s, s, lag, window);
-    const float sc  = raw * (1.f - alpha * (float)lag / (float)max_period);
-    if (sc > best_score) {
-      best_score = sc;
-      best_lag   = lag;
-    }
+  const float alpha   = 0.10f;
+  for (unsigned i = 0; i < n_lags; i++) {
+    const unsigned lag = min_period + i;
+    const float sc = ndp_vals[i] * (1.f - alpha * (float)lag / (float)max_period);
+    if (sc > best_score) { best_score = sc; best_lag = lag; }
   }
   return best_lag;
 }
