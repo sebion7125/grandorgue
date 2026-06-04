@@ -175,7 +175,7 @@ void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
     m_statusLabel->SetLabel(status);
     m_statusLabel->SetForegroundColour(*wxBLACK);
     UpdateCacheStatus();
-    GOMessageBox(status, _("LUT Cache"), wxOK | wxICON_INFORMATION, this);
+    // Success: status label is sufficient — no MessageBox.
   } else {
     m_statusLabel->SetLabel(wxString::Format(_("Error: %s"), errorMsg));
     m_statusLabel->SetForegroundColour(*wxRED);
@@ -188,12 +188,14 @@ void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
 
 void GOLutCacheDlg::OnDelete(wxCommandEvent &) {
   if (!p_controller) return;
+  // Only delete the file.  Do NOT clear in-memory aligners: after
+  // OverrideCorrLutsFromCache() the live-computed LUTs are gone and clearing
+  // the injected LUT would leave empty aligners (legacy fallback, not
+  // correlation).  Correct behaviour: current session keeps its alignment
+  // state; the deletion takes effect on the next organ load.
   p_controller->DeleteLutCache();
-  r_soundSystem.WithOrganEngineQuiesced([this]() {
-    p_controller->ClearAllCachedLuts();
-  });
   m_statusLabel->SetLabel(
-    _("Cache deleted. Live computation active until next reload."));
+    _("Cache file deleted. Current alignment state unchanged until next reload."));
   m_statusLabel->SetForegroundColour(*wxBLACK);
   UpdateCacheStatus();
   Layout();

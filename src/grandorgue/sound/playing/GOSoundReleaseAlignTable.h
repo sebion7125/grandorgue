@@ -101,6 +101,11 @@ public:
   // Returns true if at least one correlation LUT is present.
   bool HasCorrLut() const { return !m_CorrLuts.empty(); }
 
+  // Returns the number of per-attack LUTs.
+  // 0 = no LUT (legacy fallback), 1 = single LUT (safe to cache),
+  // >1 = multi-attack LUT (cache only supports one → skip).
+  unsigned GetCorrLutCount() const { return (unsigned)m_CorrLuts.size(); }
+
   // Returns the points of the first LUT, or nullptr if none.
   // Used by the cache generator to extract quality-filtered LUT data.
   const std::vector<CorrPoint> *GetFirstLutPoints() const {
