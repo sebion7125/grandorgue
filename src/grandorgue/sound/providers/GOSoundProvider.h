@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "sound/playing/GOSoundReleaseAlignTable.h"
 #include "sound/playing/GOSoundToneBalanceFilter.h"
 
 #include "GOBool3.h"
@@ -20,7 +21,6 @@
 // forward:
 class GOSoundingPipe;
 
-class GOSoundAudioSection;
 class GOCache;
 class GOCacheWriter;
 class GOHash;
@@ -119,6 +119,13 @@ public:
   // Assign sequential parse indices to all release sections starting at
   // startIndex.  Returns the next available index (= startIndex + release count).
   unsigned AssignReleaseParseIndices(unsigned startIndex);
+
+  // For force-all cache generation: compute a permissive LUT for a release
+  // that has no quality-filtered LUT (HasCorrLut()==false on its aligner).
+  // Returns the best-effort CorrPoints, or empty if nothing can be computed.
+  // Does NOT modify the live in-memory aligner.
+  std::vector<GOSoundReleaseAlignTable::CorrPoint>
+  TryPermissiveLutForRelease(unsigned releaseIdx) const;
 
   unsigned GetMidiKeyNumber() const;
   float GetMidiPitchFract() const;

@@ -76,6 +76,8 @@ public:
   // Append one LUT for the given attack joinable. Call once per joinable.
   // min_key_press_ms / max_key_press_ms restrict the LUT to the time window
   // in which this release is actually triggered (0 = no restriction).
+  // permissive=true: skip stabilisation/drift/quality guards so the
+  // generator can cache even "bad" releases for force-all mode.
   void ComputeCorrelationLut(
     const GOSoundAudioSection &loop,
     const GOSoundAudioSection &release,
@@ -84,7 +86,8 @@ public:
     float    sample_freq_hz,
     unsigned harmonic_number,
     unsigned min_key_press_ms = 0,
-    unsigned max_key_press_ms = 0);
+    unsigned max_key_press_ms = 0,
+    bool     permissive       = false);
 
   // Restore runtime attack pointers after cache load (in joinable order).
   void AssignAttackPointers(

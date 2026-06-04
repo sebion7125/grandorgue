@@ -185,10 +185,15 @@ public:
   // Returns the total count (stored in m_lutReleaseCount).
   unsigned EnumerateReleaseParseIndices();
 
-  // Build a .golut cache from the quality-filtered LUTs that were computed
-  // during the last Load().  Returns true on success, sets errorMsg on failure.
-  // Safe to call from the GUI thread after Load(); no audio thread races.
-  bool GenerateLutCache(wxString &errorMsg);
+  // Build a .golut cache from the LUTs computed during the last Load().
+  // forceAll=false (default): only releases that passed quality checks
+  //   (HasCorrLut()==true) are cached; others get releaseMap[i]=-1.
+  // forceAll=true: also includes releases that normally go to legacy fallback
+  //   by re-running the correlation with permissive (no-quality-filter) mode.
+  // Re-enumerates release parse indices at the start so it works even if
+  // Load() didn't reach that step (e.g., after an early abort).
+  // Returns true on success, sets errorMsg on failure.
+  bool GenerateLutCache(wxString &errorMsg, bool forceAll = false);
 
   // Delete the .golut cache file for the current organ (if present).
   void DeleteLutCache();

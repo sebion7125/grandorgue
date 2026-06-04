@@ -562,9 +562,15 @@ void GOOrganController::DeleteLutCache() {
     wxRemoveFile(path);
 }
 
-bool GOOrganController::GenerateLutCache(wxString &errorMsg) {
+bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll) {
+  // Always re-enumerate so the generator works even if Load() exited early.
+  EnumerateReleaseParseIndices();
+
   if (m_lutReleaseCount == 0) {
-    errorMsg = _("No releases indexed. Load an organ first.");
+    if (GetCacheObjects().empty())
+      errorMsg = _("No organ loaded. Load an organ first.");
+    else
+      errorMsg = _("No releases found. This organ may not use sampled releases.");
     return false;
   }
 
@@ -579,10 +585,18 @@ bool GOOrganController::GenerateLutCache(wxString &errorMsg) {
       if (!sec) continue;
       const unsigned parseIdx = sec->GetReleaseParseIndex();
       if (parseIdx >= m_lutReleaseCount) continue;
+
       const GOSoundReleaseAlignTable *aligner = sec->GetReleaseAligner();
-      if (!aligner || !aligner->HasCorrLut()) continue;
-      const std::vector<GOSoundReleaseAlignTable::CorrPoint> *pts
-        = aligner->GetFirstLutPoints();
+      std::vector<GOSoundReleaseAlignTable::CorrPoint> permPts;
+
+      // Determine point source: live LUT or permissive recompute.
+      const std::vector<GOSoundReleaseAlignTable::CorrPoint> *pts = nullptr;
+      if (aligner && aligner->HasCorrLut()) {
+        pts = aligner->GetFirstLutPoints();
+      } else if (forceAll) {
+        permPts = pipe->TryPermissiveLutForRelease(i);
+        if (!permPts.empty()) pts = &permPts;
+      }
       if (!pts || pts->empty()) continue;
 
       GOLutEntry entry;

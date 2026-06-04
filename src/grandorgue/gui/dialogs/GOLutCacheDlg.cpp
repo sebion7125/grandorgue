@@ -7,6 +7,7 @@
 #include "GOLutCacheDlg.h"
 
 #include <wx/button.h>
+#include <wx/checkbox.h>
 #include <wx/filename.h>
 #include <wx/intl.h>
 #include <wx/msgdlg.h>
@@ -45,7 +46,8 @@ GOLutCacheDlg::GOLutCacheDlg(
     p_controller(controller),
     r_soundSystem(soundSystem),
     m_cacheStatusLabel(nullptr),
-    m_statusLabel(nullptr) {
+    m_statusLabel(nullptr),
+    m_cbForceAll(nullptr) {
 
   wxBoxSizer *topSizer = new wxBoxSizer(wxVERTICAL);
 
@@ -63,27 +65,19 @@ GOLutCacheDlg::GOLutCacheDlg(
   topSizer->Add(
     new wxStaticText(
       this, wxID_ANY,
-      _("Generates a pre-computed LUT cache for all releases that passed\n"
-        "the quality criteria during the last organ load.\n\n"
-        "The cache is used automatically on the next load and replaces\n"
-        "the live correlation computation for cached releases.")),
+      _("Generates a pre-computed LUT cache for release alignment.\n\n"
+        "Default: only releases that passed quality checks during the last\n"
+        "organ load are cached (recommended for most organs).\n\n"
+        "Force all: also includes releases that normally use the legacy\n"
+        "fallback path (drift, low coherence, mixtures). The resulting LUT\n"
+        "may be imperfect but avoids recomputation on every load.")),
     0, wxALL, 10);
 
-  // ── Current quality criteria (informational) ──────────────────────────────
-  topSizer->Add(
-    new wxStaticText(this, wxID_ANY, _("Quality criteria (from current build):")),
-    0, wxLEFT | wxRIGHT, 10);
-
-  const GOLutGeneratorCriteria crit;
-  topSizer->Add(
-    new wxStaticText(
-      this, wxID_ANY,
-      wxString::Format(
-        _("   Min correlation score:  %.2f\n"
-          "   Min circular coherence: %.2f\n"
-          "   Max gap-fill points:    %u"),
-        crit.minScore, crit.minCoherence, crit.maxGapFills)),
-    0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+  // ── Force-all checkbox ────────────────────────────────────────────────────
+  m_cbForceAll = new wxCheckBox(
+    this, wxID_ANY,
+    _("Force generation for all releases (including legacy-fallback releases)"));
+  topSizer->Add(m_cbForceAll, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
 
   // ── CPU hint ──────────────────────────────────────────────────────────────
   wxStaticText *hint = new wxStaticText(
@@ -164,7 +158,8 @@ void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
   prog.Pulse();
 
   wxString errorMsg;
-  const bool ok = p_controller->GenerateLutCache(errorMsg);
+  const bool forceAll = m_cbForceAll && m_cbForceAll->IsChecked();
+  const bool ok = p_controller->GenerateLutCache(errorMsg, forceAll);
 
   if (ok) {
     // Immediate activation: apply cache to in-memory aligners while the

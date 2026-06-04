@@ -138,6 +138,10 @@ public:
   const GOSoundAudioSection *GetReleaseSection(unsigned i) const {
     return m_SoundProvider.GetReleaseSection(i);
   }
+  std::vector<GOSoundReleaseAlignTable::CorrPoint>
+  TryPermissiveLutForRelease(unsigned releaseIdx) const {
+    return m_SoundProvider.TryPermissiveLutForRelease(releaseIdx);
+  }
 };
 
 #endif
