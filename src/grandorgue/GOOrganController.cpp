@@ -573,7 +573,7 @@ bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll) {
       // Count sounding pipes to give a useful diagnostic.
       unsigned pipeCount = 0;
       for (const GOCacheObject *obj : GetCacheObjects())
-        if (dynamic_cast<const GOSoundingPipe *>(obj)) pipeCount++;
+        if (obj->AsSoundingPipe()) pipeCount++;
       errorMsg = wxString::Format(
         _("No release audio sections found (%u sounding pipes checked).\n"
           "The LUT cache requires loop-based samples (WAV files with loop and\n"
