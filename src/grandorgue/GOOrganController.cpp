@@ -8,7 +8,9 @@
 #include "GOOrganController.h"
 
 #include <algorithm>
+#include <atomic>
 #include <math.h>
+#include <thread>
 
 #include <wx/filename.h>
 #include <wx/log.h>
@@ -562,15 +564,14 @@ void GOOrganController::DeleteLutCache() {
     wxRemoveFile(path);
 }
 
-bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll) {
-  // Always re-enumerate so the generator works even if Load() exited early.
+bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll,
+    std::atomic<unsigned> *p_progress, std::atomic<bool> *p_cancel) {
   EnumerateReleaseParseIndices();
 
   if (m_lutReleaseCount == 0) {
     if (GetCacheObjects().empty()) {
       errorMsg = _("No organ loaded. Load an organ first.");
     } else {
-      // Count sounding pipes to give a useful diagnostic.
       unsigned pipeCount = 0;
       for (const GOCacheObject *obj : GetCacheObjects())
         if (obj->AsSoundingPipe()) pipeCount++;
@@ -586,57 +587,98 @@ bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll) {
     return false;
   }
 
-  std::vector<int32_t>    releaseMap(m_lutReleaseCount, -1);
-  std::vector<GOLutEntry> luts;
-
+  // ── Build flat work-item list (preserves ODF/parse-index order) ──────────
+  struct WorkItem {
+    GOSoundingPipe          *pipe;
+    unsigned                 releaseIdx; // index within pipe's m_Release
+    unsigned                 parseIdx;   // global parse index for releaseMap
+    const GOSoundAudioSection *sec;
+  };
+  std::vector<WorkItem> items;
+  items.reserve(m_lutReleaseCount);
   for (GOCacheObject *obj : GetCacheObjects()) {
     GOSoundingPipe *pipe = obj->AsSoundingPipe();
     if (!pipe) continue;
     for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
       const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
       if (!sec) continue;
-      const unsigned parseIdx = sec->GetReleaseParseIndex();
-      if (parseIdx >= m_lutReleaseCount) continue;
+      const unsigned idx = sec->GetReleaseParseIndex();
+      if (idx < m_lutReleaseCount)
+        items.push_back({pipe, i, idx, sec});
+    }
+  }
 
-      const GOSoundReleaseAlignTable *aligner = sec->GetReleaseAligner();
-      std::vector<GOSoundReleaseAlignTable::CorrPoint> permPts;
+  // Pre-allocate per-release output (indexed by parseIdx; empty = not cached).
+  // Threads write to disjoint index ranges — no mutex needed.
+  std::vector<GOLutEntry> tmpLuts(m_lutReleaseCount);
 
-      // Determine point source: live LUT or permissive recompute.
-      // For releases with multiple attack-joinable LUTs (velocity layers),
-      // we cache the first LUT and it acts as the fallback for all attacks.
-      // This matches the existing FindLut() fallback path and is acceptable
-      // because velocity-layer loop bodies are acoustically very similar.
-      // Source selection:
-      //   Has quality-LUT AND !forceAll → sparse quality LUT (fast, proven)
-      //   No quality-LUT (legacy fallback) → exhaustive LUT always
-      //   forceAll → exhaustive for every release (overrides quality-LUT too)
-      const std::vector<GOSoundReleaseAlignTable::CorrPoint> *pts = nullptr;
-      if (aligner && aligner->HasCorrLut() && !forceAll) {
-        pts = aligner->GetFirstLutPoints();
-      } else {
-        permPts = pipe->TryExhaustiveLutForRelease(i);
-        if (!permPts.empty()) pts = &permPts;
+  // ── Thread pool ───────────────────────────────────────────────────────────
+  const unsigned nThreads = std::max(
+    1u, std::min((unsigned)std::thread::hardware_concurrency(),
+                 (unsigned)items.size()));
+  std::vector<std::thread> threads;
+  threads.reserve(nThreads);
+
+  for (unsigned t = 0; t < nThreads; t++) {
+    const unsigned start = t * (unsigned)items.size() / nThreads;
+    const unsigned end   = (t + 1) * (unsigned)items.size() / nThreads;
+
+    threads.emplace_back([&, start, end, forceAll]() {
+      for (unsigned i = start; i < end; i++) {
+        if (p_cancel && p_cancel->load(std::memory_order_relaxed)) break;
+
+        const WorkItem &item = items[i];
+        const GOSoundReleaseAlignTable *aligner
+          = item.sec->GetReleaseAligner();
+
+        std::vector<GOSoundReleaseAlignTable::CorrPoint> pts;
+        if (aligner && aligner->HasCorrLut() && !forceAll) {
+          // Good quality sparse LUT from the last Load() — use as-is.
+          const auto *p = aligner->GetFirstLutPoints();
+          if (p) pts = *p;
+        } else {
+          // Legacy-fallback release or forceAll: exhaustive computation.
+          pts = item.pipe->TryExhaustiveLutForRelease(item.releaseIdx);
+        }
+
+        if (!pts.empty()) {
+          GOLutEntry entry;
+          entry.reserve(pts.size());
+          for (const auto &cp : pts)
+            entry.push_back({cp.loop_pos, cp.best_r});
+          tmpLuts[item.parseIdx] = std::move(entry);
+        }
+
+        if (p_progress)
+          p_progress->fetch_add(1, std::memory_order_relaxed);
       }
-      if (!pts || pts->empty()) continue;
+    });
+  }
 
-      GOLutEntry entry;
-      entry.reserve(pts->size());
-      for (const auto &cp : *pts)
-        entry.push_back({cp.loop_pos, cp.best_r});
+  for (auto &t : threads) t.join();
 
-      releaseMap[parseIdx] = (int32_t)luts.size();
-      luts.push_back(std::move(entry));
+  if (p_cancel && p_cancel->load()) {
+    errorMsg = _("Generation cancelled.");
+    return false;
+  }
+
+  // ── Compact: build dense luts vector and update releaseMap ────────────────
+  std::vector<int32_t>    releaseMap(m_lutReleaseCount, -1);
+  std::vector<GOLutEntry> luts;
+  for (unsigned i = 0; i < m_lutReleaseCount; i++) {
+    if (!tmpLuts[i].empty()) {
+      releaseMap[i] = (int32_t)luts.size();
+      luts.push_back(std::move(tmpLuts[i]));
     }
   }
 
   const wxString path
     = GOLutCacheWriter::MakePath(m_config.OrganCachePath(), GetOrganHash());
 
-  GOLutGeneratorCriteria criteria; // default thresholds matching Python v47
+  GOLutGeneratorCriteria criteria;
   if (!GOLutCacheWriter::Write(
         path, m_ODFHash, m_lutReleaseCount, releaseMap, luts, criteria)) {
-    errorMsg = wxString::Format(
-      _("Failed to write LUT cache to %s"), path);
+    errorMsg = wxString::Format(_("Failed to write LUT cache to %s"), path);
     return false;
   }
   return true;

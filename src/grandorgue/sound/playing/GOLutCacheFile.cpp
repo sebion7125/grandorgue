@@ -172,9 +172,9 @@ bool GOLutCacheReader::Load(
     if (idx != -1 && (uint32_t)idx >= lutCount) return false;
 
   // ── LUT entries ─────────────────────────────────────────────────────────────
-  // Sparse LUT: MAX_TOTAL=30.  Exhaustive LUT: up to n_total which can be
-  // several hundred for long attacks.  4096 leaves generous headroom.
-  static constexpr uint32_t GOLUT_MAX_POINTS = 4096;
+  // Sparse LUT: MAX_TOTAL=30.  Exhaustive LUT: capped at MAX_EXHST=2000.
+  // 6000 gives comfortable margin above the generation cap.
+  static constexpr uint32_t GOLUT_MAX_POINTS = 6000;
   m_luts.resize(lutCount);
   for (GOLutEntry &entry : m_luts) {
     uint32_t n = 0;
