@@ -607,37 +607,6 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
     points = [p for p in points if p.best_score > -1.5]
     return points, meta
-    loop_len    = loop_end - loop_start + 1
-    release_len = len(release_mono)
-    window_len  = min(crossfade_len_samples, 2 * T_int)
-
-    meta = {
-        "stabilized": False,
-        "stable_at_n": None,
-        "drift_mode": False,
-        "drift_per_period": 0.0,
-        "drift_residual": 0.0,
-        "max_interp_gap_n": 0,
-        "dense_step_used": DENSE_STEP,
-    }
-
-    if window_len < 4 or loop_len < window_len or release_len < window_len:
-        return [], meta
-
-    r_max = min(2 * T_int, release_len - window_len)
-    if r_max == 0:
-        return [], meta
-
-    n_total_loop = loop_len // T_int
-    if n_total_loop < 4:
-        return [], meta
-
-    ds = min(4, T_int // 500) if T_int >= 500 else 1
-
-    atk_full_len = len(attack_mono)
-    n_total = max(1, int((atk_full_len - window_len) / T_float))
-
-    min_sample = max(0, min_sample)
 
 
 # ─── ODF-Parser ──────────────────────────────────────────────────────────────
