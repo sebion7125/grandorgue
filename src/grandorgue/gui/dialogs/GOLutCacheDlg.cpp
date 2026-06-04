@@ -6,6 +6,9 @@
 
 #include "GOLutCacheDlg.h"
 
+#include <atomic>
+#include <thread>
+
 #include <wx/button.h>
 #include <wx/checkbox.h>
 #include <wx/filename.h>
@@ -150,32 +153,72 @@ void GOLutCacheDlg::UpdateCacheStatus() {
 void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
   if (!p_controller) return;
 
+  const bool forceAll = m_cbForceAll && m_cbForceAll->IsChecked();
+  const unsigned total = p_controller->GetLutReleaseCount();
+
+  if (total == 0) {
+    // Let GenerateLutCache provide the detailed error.
+    wxString err;
+    p_controller->GenerateLutCache(err, forceAll);
+    m_statusLabel->SetLabel(wxString::Format(_("Error: %s"), err));
+    m_statusLabel->SetForegroundColour(*wxRED);
+    Layout();
+    return;
+  }
+
+  // Progress dialog with elapsed/remaining time and Cancel.
   wxProgressDialog prog(
     _("Release Alignment LUT Cache"),
-    _("Generating..."),
-    100, this,
-    wxPD_APP_MODAL | wxPD_AUTO_HIDE);
-  prog.Pulse();
+    _("Initialising..."),
+    (int)total, this,
+    wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_CAN_ABORT |
+    wxPD_ELAPSED_TIME | wxPD_REMAINING_TIME);
 
+  std::atomic<unsigned> doneCount{0};
+  std::atomic<bool>     cancelled{false};
   wxString errorMsg;
-  const bool forceAll = m_cbForceAll && m_cbForceAll->IsChecked();
-  const bool ok = p_controller->GenerateLutCache(errorMsg, forceAll);
+  bool     ok = false;
+
+  // Run computation in a background thread; GUI thread polls doneCount.
+  std::thread worker([&]() {
+    ok = p_controller->GenerateLutCache(errorMsg, forceAll,
+                                        &doneCount, &cancelled);
+  });
+
+  while (true) {
+    const unsigned done = doneCount.load(std::memory_order_relaxed);
+    const wxString msg  = wxString::Format(
+      _("%u / %u releases processed"), done, total);
+    if (!prog.Update((int)std::min(done, total), msg)) {
+      cancelled.store(true, std::memory_order_relaxed);
+    }
+    if (done >= total || cancelled.load()) break;
+    wxMilliSleep(80); // ~12 fps update rate
+  }
+
+  worker.join();
+
+  if (cancelled.load() && !ok) {
+    m_statusLabel->SetLabel(_("Generation cancelled."));
+    m_statusLabel->SetForegroundColour(
+      wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
+    UpdateCacheStatus();
+    Layout();
+    return;
+  }
 
   if (ok) {
-    // Immediate activation: apply cache to in-memory aligners while the
-    // audio engine is quiesced (worker threads idle, no data race).
     bool applied = false;
     r_soundSystem.WithOrganEngineQuiesced([this, &applied]() {
       applied = p_controller->ApplyLutCacheNow();
     });
-
     const wxString status = applied
       ? _("Cache generated and activated immediately.")
       : _("Cache generated. Will be used on next organ load.");
     m_statusLabel->SetLabel(status);
     m_statusLabel->SetForegroundColour(*wxBLACK);
     UpdateCacheStatus();
-    // Success: status label is sufficient — no MessageBox.
+    // No MessageBox on success — status label is sufficient.
   } else {
     m_statusLabel->SetLabel(wxString::Format(_("Error: %s"), errorMsg));
     m_statusLabel->SetForegroundColour(*wxRED);
