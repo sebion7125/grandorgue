@@ -339,35 +339,43 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     m_CorrPeriodSamples = (unsigned)std::round(m_CorrPeriodFloat);
   }
 
-  // Non-octave stops (aliquots, mixtures): re-estimate T via autocorrelation.
-  // Pure octave stops (power-of-2 HarmonicNumber) use the formula T directly.
+  // Non-octave stops (aliquots, mixtures): determine T purely from the audio
+  // via autocorrelation.  The smpl-chunk pitch (encoded in sample_freq_hz)
+  // is NOT used as the search-range centre — it can reflect the harmonic
+  // pitch, the key pitch, or be influenced by HarmonicNumber scaling, all
+  // of which would bias the range away from the true waveform period.
+  // Instead we derive the range from the loop length directly, which is
+  // the only reliable bound we have without prior assumptions about pitch.
   if (first_call && !CorrIsOctaveStop(harmonic_number)) {
-    const unsigned T_formula = m_CorrPeriodSamples;
-    const unsigned min_p = std::max(8u, T_formula / 2);
-    const unsigned max_p = std::min(T_formula * 4, sample_rate / 20u);
     const unsigned loop_len_full = loop_section.GetLength();
 
-    // Take a stable window from the middle of the loop (8× max_p samples)
-    unsigned ac_window = 8 * max_p;
-    unsigned ac_offset = loop_len_full / 2;
-    if (ac_offset + ac_window > loop_len_full)
-      ac_offset = loop_len_full > ac_window ? loop_len_full - ac_window : 0;
-    ac_window = std::min(ac_window, loop_len_full - ac_offset);
+    // Search the full range down to 20 Hz — no smpl-pitch bias.
+    // If the loop is too short to support this window the inner check handles it.
+    const unsigned max_p = sample_rate / 20u;
+    const unsigned min_p = 16u;
 
-    if (ac_window >= max_p * 2) {
-      GOSoundCompressionCache ac_cache;
-      ac_cache.Init();
-      const unsigned loop_ch = loop_section.GetChannels();
-      std::vector<float> ac_mono(ac_window);
-      for (unsigned i = 0; i < ac_window; i++) {
-        double s = 0.0;
-        for (unsigned c = 0; c < loop_ch; c++)
-          s += loop_section.GetSample(ac_offset + i, c, &ac_cache);
-        ac_mono[i] = (float)(s / loop_ch);
+    {
+      unsigned ac_window = 8 * max_p;
+      unsigned ac_offset = loop_len_full / 2;
+      if (ac_offset + ac_window > loop_len_full)
+        ac_offset = loop_len_full > ac_window ? loop_len_full - ac_window : 0;
+      ac_window = std::min(ac_window, loop_len_full - ac_offset);
+
+      if (ac_window >= max_p * 2) {
+        GOSoundCompressionCache ac_cache;
+        ac_cache.Init();
+        const unsigned loop_ch = loop_section.GetChannels();
+        std::vector<float> ac_mono(ac_window);
+        for (unsigned i = 0; i < ac_window; i++) {
+          double s = 0.0;
+          for (unsigned c = 0; c < loop_ch; c++)
+            s += loop_section.GetSample(ac_offset + i, c, &ac_cache);
+          ac_mono[i] = (float)(s / loop_ch);
+        }
+        m_CorrPeriodSamples = EstimatePeriodByAutocorr(
+          ac_mono.data(), ac_window, min_p, max_p);
+        m_CorrPeriodFloat = m_CorrPeriodSamples;
       }
-      m_CorrPeriodSamples = EstimatePeriodByAutocorr(
-        ac_mono.data(), ac_window, min_p, max_p);
-      m_CorrPeriodFloat = m_CorrPeriodSamples; // autocorr gives integer for now
     }
   }
 

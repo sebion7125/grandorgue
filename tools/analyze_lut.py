@@ -48,6 +48,8 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v51: Aliquote/Mixturen: Autokorrelations-Suchbereich unabhängig vom smpl-Chunk.
+#      max_p = sr//20 (deckt bis 20 Hz ab), kein HarmonicNumber/smpl-Pitch-Einfluss.
 # v50: Bugfix: Loop-Punkte werden jetzt VOR der Autokorrelation aus dem smpl-Chunk
 #      gelesen. Vorher: loop_start=0 (Default) → Autokorrelation lief im Anblase-
 #      Transient → falsches T bei Aliquoten/Mixturen (z.B. T=96 statt ~177).
@@ -818,20 +820,20 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             pa.loop_end   = len(atk_mono) - 1
         pa.loop_len = pa.loop_end - pa.loop_start + 1
 
-        # Mixturen: T per Autokorrelation neu schaetzen (wie GO)
+        # Aliquote/Mixturen: T rein aus dem Audio bestimmen, smpl-Pitch ignorieren.
+        # Suchbereich deckt alles bis 20 Hz ab — Loop-Laenge entscheidet ob genug
+        # Material vorhanden ist (prueft ac_window >= max_p * 2 weiter unten).
         if not corr_is_octave_stop(pa.harmonic_number):
-            T_formula = pa.T_int
-            min_p = max(8, T_formula // 2)
-            # max_p wie in GO: min(T*4, sample_rate/20)
-            max_p = min(T_formula * 4, sr // 20)
-            # Fenster: 8*max_p ab Mitte des Loops (wie GO: loop_len_full/2)
-            loop_mid  = pa.loop_start + pa.loop_len // 2
-            ac_window = max_p * 8
-            autocorr_region = atk_mono[loop_mid:loop_mid + ac_window]
-            if len(autocorr_region) >= max_p * 2:
-                pa.T_int   = estimate_period_by_autocorr(
-                    autocorr_region, min_p, max_p)
-                pa.T_float = float(pa.T_int)
+            min_p = 16
+            max_p = sr // 20
+            if True:
+                loop_mid = pa.loop_start + pa.loop_len // 2
+                ac_window = max_p * 8
+                autocorr_region = atk_mono[loop_mid:loop_mid + ac_window]
+                if len(autocorr_region) >= max_p * 2:
+                    pa.T_int   = estimate_period_by_autocorr(
+                        autocorr_region, min_p, max_p)
+                    pa.T_float = float(pa.T_int)
 
         pa.n_total  = pa.loop_len // pa.T_int
 
@@ -2877,7 +2879,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
     matching GO's behaviour (releaseMap[i] = -1 for those).
 
     Compare with GO output:
-      python3 analyze_lut_v50.py organ.organ --export-csv py.csv
+      python3 analyze_lut_v51.py organ.organ --export-csv py.csv
       python3 read_golut.py organ.release-align.golut --csv > go.csv
       diff py.csv go.csv
     """
@@ -2915,7 +2917,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
 
 
 def main():
-    # CLI batch mode: analyze_lut_v50.py <organ> --export-csv [output.csv]
+    # CLI batch mode: analyze_lut_v51.py <organ> --export-csv [output.csv]
     if len(sys.argv) >= 3 and sys.argv[2] == '--export-csv':
         out = sys.argv[3] if len(sys.argv) > 3 else None
         export_csv_batch(sys.argv[1], out)
