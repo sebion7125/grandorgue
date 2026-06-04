@@ -454,7 +454,7 @@ def estimate_period_by_autocorr(samples: np.ndarray,
     """
     N = len(samples)
     if N < max_period * 2:
-        return min_period
+        return min_period, {'cmndf_half': float('nan'), 'cmndf_T': float('nan'), 'cmndf_2T': float('nan')}
 
     # DC removal then Hann window (matches ChatGPT reference: seg -= mean before FFT).
     # Removing DC prevents the mean offset from inflating sub-harmonic ACF peaks.
