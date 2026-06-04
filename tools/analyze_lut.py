@@ -48,6 +48,9 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v50: Bugfix: Loop-Punkte werden jetzt VOR der Autokorrelation aus dem smpl-Chunk
+#      gelesen. Vorher: loop_start=0 (Default) → Autokorrelation lief im Anblase-
+#      Transient → falsches T bei Aliquoten/Mixturen (z.B. T=96 statt ~177).
 # v49: Downsampling-Checkbox in der Toolbar (entspricht GOSettingsOptions::CorrLutDownsampling,
 #      Default ON). Toter Code nach return in compute_lut() entfernt.
 # v46: Zusätzliche Qualitätskriterien für Legacy-Fallback.
@@ -805,6 +808,16 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             pa.error = None
             return pa
 
+        # Loop-Punkte (muss vor Autokorrelation stehen — loop_mid braucht loop_start)
+        loops = smpl["loops"]
+        if loops:
+            pa.loop_start = loops[0][0]
+            pa.loop_end   = loops[0][1]
+        else:
+            pa.loop_start = 0
+            pa.loop_end   = len(atk_mono) - 1
+        pa.loop_len = pa.loop_end - pa.loop_start + 1
+
         # Mixturen: T per Autokorrelation neu schaetzen (wie GO)
         if not corr_is_octave_stop(pa.harmonic_number):
             T_formula = pa.T_int
@@ -820,15 +833,6 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
                     autocorr_region, min_p, max_p)
                 pa.T_float = float(pa.T_int)
 
-        # Loop-Punkte
-        loops = smpl["loops"]
-        if loops:
-            pa.loop_start = loops[0][0]
-            pa.loop_end   = loops[0][1]
-        else:
-            pa.loop_start = 0
-            pa.loop_end   = len(atk_mono) - 1
-        pa.loop_len = pa.loop_end - pa.loop_start + 1
         pa.n_total  = pa.loop_len // pa.T_int
 
         # Crossfade-Länge
@@ -2873,7 +2877,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
     matching GO's behaviour (releaseMap[i] = -1 for those).
 
     Compare with GO output:
-      python3 analyze_lut_v49.py organ.organ --export-csv py.csv
+      python3 analyze_lut_v50.py organ.organ --export-csv py.csv
       python3 read_golut.py organ.release-align.golut --csv > go.csv
       diff py.csv go.csv
     """
@@ -2911,7 +2915,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
 
 
 def main():
-    # CLI batch mode: analyze_lut_v49.py <organ> --export-csv [output.csv]
+    # CLI batch mode: analyze_lut_v50.py <organ> --export-csv [output.csv]
     if len(sys.argv) >= 3 and sys.argv[2] == '--export-csv':
         out = sys.argv[3] if len(sys.argv) > 3 else None
         export_csv_batch(sys.argv[1], out)
