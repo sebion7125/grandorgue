@@ -7,6 +7,7 @@
 #ifndef GOLUT_CACHE_DLG_H
 #define GOLUT_CACHE_DLG_H
 
+#include <wx/checkbox.h>
 #include <wx/dialog.h>
 
 class GOOrganController;
@@ -29,6 +30,7 @@ private:
   GOSoundSystem     &r_soundSystem;
   wxStaticText      *m_cacheStatusLabel; // shows current .golut file state
   wxStaticText      *m_statusLabel;      // shows result of last action
+  wxCheckBox        *m_cbForceAll;       // force generation for all releases
 
   void UpdateCacheStatus();             // refresh m_cacheStatusLabel from disk
   void OnGenerate(wxCommandEvent &event);

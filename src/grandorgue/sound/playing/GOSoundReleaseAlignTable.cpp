@@ -316,7 +316,8 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   float    sample_freq_hz,
   unsigned harmonic_number,
   unsigned min_key_press_ms,
-  unsigned max_key_press_ms) {
+  unsigned max_key_press_ms,
+  bool     permissive) {
 #if __has_include("GOLogReleaseAlignEnable.h")
   const auto t0 = std::chrono::high_resolution_clock::now();
 #endif
@@ -569,7 +570,10 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
         }
       }
     }
-    if (!stabilized) return;  // not stabilized → Legacy path
+    if (!stabilized) {
+      // permissive: continue with partial spoints if at least one was computed
+      if (!permissive || spoints.empty()) return;
+    }
 
     // Drift detection: linear phase shift over DRIFT_FIT_WIN dense points.
     // Slope ≥ T/(4·STABLE_WIN·DENSE_STEP) with low residual → drift → Legacy.
@@ -618,7 +622,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
           = m_CorrPeriodSamples / (4.0 * STABLE_WIN * DENSE_STEP_MAX);
         if (std::abs(slope) >= drift_slope_thresh
             && max_resid <= (double)stable_thresh * DRIFT_MAX_RESID_FACTOR)
-          return;  // drift detected → Legacy path
+          if (!permissive) return;  // drift detected → Legacy path
       }
     }
 
@@ -682,7 +686,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
       if (score_min < SCORE_MIN_THRESHOLD
           || R < COHERENCE_THRESHOLD
           || gap_count > PHASE3_MAX)
-        return;  // bad LUT quality → Legacy path
+        if (!permissive) return;  // bad LUT quality → Legacy path
     }
   }
 
