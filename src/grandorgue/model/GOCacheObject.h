@@ -45,6 +45,7 @@ public:
   // Returns this object as GOSoundingPipe if it is one, else nullptr.
   // Safer than dynamic_cast from a private base class pointer.
   virtual GOSoundingPipe *AsSoundingPipe() { return nullptr; }
+  virtual const GOSoundingPipe *AsSoundingPipe() const { return nullptr; }
 
   bool IsReady() const { return m_IsReady; }
   const wxString &GetLoadError() const { return m_LoadError; }
