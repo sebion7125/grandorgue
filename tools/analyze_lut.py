@@ -48,6 +48,8 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v49: Downsampling-Checkbox in der Toolbar (entspricht GOSettingsOptions::CorrLutDownsampling,
+#      Default ON). Toter Code nach return in compute_lut() entfernt.
 # v46: Zusätzliche Qualitätskriterien für Legacy-Fallback.
 # Eine formal stabilisierte LUT kann trotzdem unbrauchbar sein, wenn
 # sie nur durch viele Gap-Fill-Punkte zusammengeflickt wird, schlechte
@@ -2871,7 +2873,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
     matching GO's behaviour (releaseMap[i] = -1 for those).
 
     Compare with GO output:
-      python3 analyze_lut_v48.py organ.organ --export-csv py.csv
+      python3 analyze_lut_v49.py organ.organ --export-csv py.csv
       python3 read_golut.py organ.release-align.golut --csv > go.csv
       diff py.csv go.csv
     """
@@ -2909,7 +2911,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
 
 
 def main():
-    # CLI batch mode: analyze_lut_v48.py <organ> --export-csv [output.csv]
+    # CLI batch mode: analyze_lut_v49.py <organ> --export-csv [output.csv]
     if len(sys.argv) >= 3 and sys.argv[2] == '--export-csv':
         out = sys.argv[3] if len(sys.argv) > 3 else None
         export_csv_batch(sys.argv[1], out)
