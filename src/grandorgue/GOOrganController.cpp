@@ -606,14 +606,16 @@ bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll) {
       // we cache the first LUT and it acts as the fallback for all attacks.
       // This matches the existing FindLut() fallback path and is acceptable
       // because velocity-layer loop bodies are acoustically very similar.
-      // forceAll: exhaustive scan (all period positions, no quality guards).
-      // Normal:   use the quality-filtered sparse LUT from load time.
+      // Source selection:
+      //   Has quality-LUT AND !forceAll → sparse quality LUT (fast, proven)
+      //   No quality-LUT (legacy fallback) → exhaustive LUT always
+      //   forceAll → exhaustive for every release (overrides quality-LUT too)
       const std::vector<GOSoundReleaseAlignTable::CorrPoint> *pts = nullptr;
-      if (forceAll) {
+      if (aligner && aligner->HasCorrLut() && !forceAll) {
+        pts = aligner->GetFirstLutPoints();
+      } else {
         permPts = pipe->TryExhaustiveLutForRelease(i);
         if (!permPts.empty()) pts = &permPts;
-      } else if (aligner && aligner->HasCorrLut()) {
-        pts = aligner->GetFirstLutPoints();
       }
       if (!pts || pts->empty()) continue;
 
