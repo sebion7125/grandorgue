@@ -3840,35 +3840,35 @@ def test_wav_period(wav_path: str, harmonic_number: int = 8):
         print(f"{TOOL_VERSION}: Kein smpl-Chunk: {wav_path}")
         return 2
     atk_mono, sr, atk_frames, atk_ch = read_wav_mono_float(wav_path)
-    midi_note = smpl["midi_note"]
+    midi_note  = smpl["midi_note"]
     pitch_frac = smpl["pitch_frac"] / 2**32
-    freq_hz = 440.0 * 2**((midi_note + pitch_frac - 69) / 12)
-    smpl_T = sr / freq_hz
+    freq_hz    = 440.0 * 2**((midi_note + pitch_frac - 69) / 12)
+    smpl_T     = sr / freq_hz
+    hn_T       = smpl_T * harmonic_number / 8.0
+    T_smpl_i   = int(round(smpl_T))
+    T_hn_i     = int(round(hn_T))
     loops = smpl["loops"]
     if loops:
         loop_start, loop_end = loops[0]
     else:
         loop_start, loop_end = 0, len(atk_mono) - 1
-    T_smpl_i = int(round(smpl_T))
-    if corr_is_octave_stop(harmonic_number):
-        min_p = T_smpl_i
-        max_p = min(T_smpl_i * 3, sr // 20)
-    else:
-        min_p = 16
-        max_p = sr // 20
+    # Suchbereich identisch zu analyze_pipe: [0.5*T_hn, 2.0*T_hn]
+    min_p = max(16, int(round(0.5 * T_hn_i)))
+    max_p = min(sr // 20, int(round(2.0 * T_hn_i)))
     loop_len = loop_end - loop_start + 1
     loop_mid = loop_start + loop_len // 2
     autocorr_region = atk_mono[loop_mid:loop_mid + max_p * 8]
     if len(autocorr_region) < max_p * 2:
         print(f"FEHLER: autocorr_region zu kurz ({len(autocorr_region)} < {max_p * 2}), WAV zu kurz oder loop_mid zu gross.")
         return 1
-    t_est, diag = estimate_period_by_autocorr(autocorr_region, min_p, max_p, expected_period=smpl_T)
+    t_est, diag = estimate_period_by_autocorr(autocorr_region, min_p, max_p, expected_period=hn_T)
     print(f"TOOL_VERSION={TOOL_VERSION}")
     print(f"wav={wav_path}")
     print(f"sr={sr} frames={atk_frames} channels={atk_ch}")
     print(f"smpl_midi={midi_note} pitch_frac={smpl['pitch_frac']} freq_hz={freq_hz:.6f}")
     print(f"smpl_T={smpl_T:.6f} T_smpl_int={T_smpl_i}")
-    print(f"harmonic_number_for_test={harmonic_number} search=[{min_p},{max_p}]")
+    print(f"hn_T={hn_T:.6f} T_hn_int={T_hn_i}  (harmonic_number={harmonic_number})")
+    print(f"search=[{min_p},{max_p}]")
     print(f"loop={loop_start}-{loop_end} autocorr_region_len={len(autocorr_region)}")
     print(f"T_est={t_est:.6f} T_int={int(round(t_est))}")
     print(f"CMNDF_half={diag['cmndf_half']:.6g} CMNDF_T={diag['cmndf_T']:.6g} CMNDF_2T={diag['cmndf_2T']:.6g}")
