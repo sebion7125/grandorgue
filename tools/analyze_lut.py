@@ -114,7 +114,7 @@ SCORE_BAD   = 0.2
 # sie nur durch viele Gap-Fill-Punkte zusammengeflickt wird, schlechte
 # Scores hat oder die best_r-Werte kreisstatistisch breit streuen.
 LEGACY_SCORE_MIN_THRESHOLD = 0.35
-ALLOW_SHORT_PERIOD = False  # Experiment: True deaktiviert die T<16-Legacy-Sperre
+ALLOW_SHORT_PERIOD = True   # Experiment: T<16-Legacy-Sperre deaktiviert
 LEGACY_COHERENCE_THRESHOLD = 0.75
 LEGACY_PHASE3_MAX          = 8
 
