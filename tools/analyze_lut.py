@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v92-two-stage-circular"
+TOOL_VERSION = "v93-copy-dp"
 
 try:
     import matplotlib
@@ -50,6 +50,9 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v93: Dreistufiger Ansatz. Stufe3: Copy-DP ueber copy_id=raw_r//T verhindert
+#      Alternieren (54→5→54) wenn Scores zwischen T-Kopien schwanken.
+#      BRANCH_COPY_SWITCH_PENALTY=0.20; bester konsistenter T-Copy gewaehlt.
 # v92: Zweistufen-zirkulaerer DP. Stufe1: DP in [0,T) Phasenraum (kein T-Fenster-
 #      Alternieren). Stufe2: phase_r→raw_r mit bestem Score (korrekte Kopplung).
 #      Loest v91-Problem (freies Alternieren zwischen r und r+T).
@@ -166,6 +169,7 @@ BRANCH_HARD_LOCK_FACTOR  = 0.75   # Kandidaten in dieser Naehe zum Predicted-Ast
 BRANCH_GLOBAL_SMOOTH_PENALTY = 0.70 # Strafe fuer Knicke im globalen Astpfad
 BRANCH_GLOBAL_ALLOWED_FACTOR = 0.10  # erlaubter Knickfehler relativ zu T
 MAX_PRUNE_GAP_N = 50                 # max. n-Abstand zwischen Nachbarn beim Pruning (Perioden)
+BRANCH_COPY_SWITCH_PENALTY = 0.20   # Kosten fuer T-Copy-Wechsel in der Copy-DP (Stufe 3)
 
 # v86: Small-T-only Kostenterme (nur aktiv wenn search_periods > 2)
 BRANCH_SWITCH_PENALTY  = 0.50  # Kosten pro Periodenfenster-Wechsel (branch_id-Diff)
@@ -1003,20 +1007,23 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
         # Phasen-Kandidatenlisten und Lookup raw_r fuer Stufe 2.
         if use_circular:
-            dp_cand_lists  = []   # fuer DP: (phase_r, score)
-            raw_r_per_phase = []  # Lookup phase_r → best_raw_r
+            dp_cand_lists    = []   # Phase-DP: (phase_r, best_score_ueber_T_Kopien)
+            all_copies_lists = []   # Stufe-3: phase_r → {raw_r: score} (alle T-Kopien)
             for cands in cand_lists:
-                by_phase = {}  # phase_r → (best_score, best_raw_r)
+                by_phase = {}  # phase_r → {raw_r: score}
                 for raw_r, sc in cands:
                     phr = int(raw_r) % T_int
-                    if phr not in by_phase or sc > by_phase[phr][0]:
-                        by_phase[phr] = (float(sc), int(raw_r))
-                sorted_p = sorted(by_phase.items(), key=lambda x: x[1][0], reverse=True)[:BRANCH_TOP_K]
-                dp_cand_lists.append([(phr, sc) for phr, (sc, _) in sorted_p])
-                raw_r_per_phase.append({phr: rr for phr, (_, rr) in sorted_p})
+                    if phr not in by_phase:
+                        by_phase[phr] = {}
+                    by_phase[phr][int(raw_r)] = float(sc)
+                # Phase-Kandidaten fuer DP: bester Score pro Phase
+                sorted_p = sorted(by_phase.items(),
+                                  key=lambda x: max(x[1].values()), reverse=True)[:BRANCH_TOP_K]
+                dp_cand_lists.append([(phr, max(copies.values())) for phr, copies in sorted_p])
+                all_copies_lists.append({phr: copies for phr, copies in sorted_p})
         else:
-            dp_cand_lists  = cand_lists
-            raw_r_per_phase = [{r: r for r, sc in cands} for cands in cand_lists]
+            dp_cand_lists    = cand_lists
+            all_copies_lists = [{r: {r: sc} for r, sc in cands} for cands in cand_lists]
 
         def _circ_phase_err(phase_cur, pred_phase):
             if use_circular:
@@ -1124,31 +1131,82 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         if any(i is None for i in idx_path):
             return points_in
 
-        # Rekonstruktion: phase_r → actual_raw_r (Stufe 2 des Zweistufen-Ansatzes).
-        # track_r bleibt in [0,T) Phasenraum; best_r = T-Copy mit bestem Score.
+        # Stufe 2: gewaehlte Phasenpositionen extrahieren.
+        selected_phases  = []
+        selected_copies  = []  # alle T-Kopien pro Punkt (fuer Copy-DP)
+        for dp_cands_p, all_copies_p, ci in zip(dp_cand_lists, all_copies_lists, idx_path):
+            ph, _ = dp_cands_p[int(ci)]
+            selected_phases.append(int(ph))
+            selected_copies.append(all_copies_p.get(ph, {int(ph): 0.5}))
+
+        # Stufe 3: Copy-DP — waehle konsistente T-Kopie (copy_id = raw_r // T_int).
+        # Kosten: -score(raw_r) + COPY_SWITCH_PENALTY * |copy_cur - copy_prev|
+        # Verhindert Alternieren 54 → 5 → 54 wenn Scores zwischen T-Kopien schwanken.
+        copy_hist  = []   # step i → {copy_id: (total_cost, best_raw_r)}
+        copy_bkref = []   # step i → {copy_id: best_prev_copy_id}
+        prev_copy_states = None
+        for copies_dict in selected_copies:
+            cur = {}
+            bkr = {}
+            for raw_r, sc in copies_dict.items():
+                cid = int(raw_r) // T_int
+                if prev_copy_states is None:
+                    cost = -float(sc)
+                    best_prev = None
+                else:
+                    best_prev = min(prev_copy_states,
+                                   key=lambda pc: prev_copy_states[pc][0]
+                                                  + BRANCH_COPY_SWITCH_PENALTY * abs(cid - pc))
+                    cost = (prev_copy_states[best_prev][0] - float(sc)
+                            + BRANCH_COPY_SWITCH_PENALTY * abs(cid - best_prev))
+                if cid not in cur or cost < cur[cid][0]:
+                    cur[cid] = (cost, int(raw_r))
+                    bkr[cid] = best_prev
+            if not cur:
+                # Fallback: erster Kandidat
+                rr = next(iter(copies_dict))
+                cid = int(rr) // T_int
+                cost = 0.0 if prev_copy_states is None else min(prev_copy_states.values(), key=lambda x: x[0])[0]
+                cur[cid] = (cost, int(rr))
+                bkr[cid] = None
+            copy_hist.append(cur)
+            copy_bkref.append(bkr)
+            prev_copy_states = cur
+
+        # Copy-DP rueckwaerts: besten raw_r pro Punkt bestimmen.
+        selected_raw_rs = [None] * len(pts)
+        if copy_hist:
+            best_final_cid = min(copy_hist[-1], key=lambda c: copy_hist[-1][c][0])
+            cur_cid = best_final_cid
+            for i in range(len(pts) - 1, -1, -1):
+                selected_raw_rs[i] = copy_hist[i].get(cur_cid, (None, selected_phases[i]))[1]
+                prev_cid = copy_bkref[i].get(cur_cid)
+                if prev_cid is not None:
+                    cur_cid = prev_cid
+        else:
+            selected_raw_rs = list(selected_phases)
+
+        # Rekonstruktion: LutPoints mit korrektem raw_r und track_r in [0,T).
         out = []
         prev_track = None
-        prevprev_track = None
-        prev_n = None
-        prevprev_n = None
-        for p, dp_cands, rr_lookup, ci in zip(pts, dp_cand_lists, raw_r_per_phase, idx_path):
-            phase_r, sc = dp_cands[int(ci)]
-            # Stufe 2: bester tatsaechlicher Release-Offset fuer diese Phase.
-            actual_raw_r = rr_lookup.get(phase_r, phase_r)
-            track = float(phase_r)
+        for p, ph, rr, dp_cands_p, all_copies_p in zip(
+                pts, selected_phases, selected_raw_rs, dp_cand_lists, all_copies_lists):
+            if rr is None:
+                rr = ph
+            sc = all_copies_p.get(ph, {}).get(rr, 0.5)
+            track = float(ph)
             npnt = LutPoint(n=p.n, loop_pos=p.loop_pos,
-                            best_r=int(actual_raw_r), best_score=float(sc), phase=p.phase,
-                            raw_r=int(actual_raw_r), raw_score=float(sc),
+                            best_r=int(rr), best_score=float(sc), phase=p.phase,
+                            raw_r=int(rr), raw_score=float(sc),
                             folded=False, fold_ratio=1.0)
-            npnt.track_r = float(track)     # Phasenraum-Position fuer Drift-Diagnose
+            npnt.track_r = float(track)
             npnt.predicted_r = None
             npnt.pred_error = 0.0 if prev_track is None else abs(track - prev_track)
-            npnt.candidates = [(r, sc2) for r, sc2 in zip(
-                [rr_lookup.get(ph, ph) for ph, _ in dp_cands],
-                [s for _, s in dp_cands])]  # Kandidaten mit raw_r fuer _try_fold
+            # Kandidaten mit raw_r fuer _try_fold (alle T-Kopien dieser Phase).
+            all_c = [(rr2, sc2) for rr2, sc2 in all_copies_p.get(ph, {ph: sc}).items()]
+            npnt.candidates = all_c
             out.append(npnt)
-            prevprev_track, prev_track = prev_track, track
-            prevprev_n, prev_n = prev_n, p.n
+            prev_track = track
 
         # Nicht ausgefilterte Originalpunkte, falls es sie gab, hinten anhaengen.
         return out
