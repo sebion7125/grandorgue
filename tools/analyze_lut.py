@@ -37,8 +37,8 @@ except ImportError:
 DENSE_STEP  = 6
 MAX_DENSE_N = 100
 STABLE_WIN  = 4
-N_SPARSE    = 5
-MAX_TOTAL   = 30
+N_SPARSE    = 10
+MAX_TOTAL   = 64
 # Removed: CORR_MIXTURE_HARMONIC_THRESHOLD = 48
 # Now using CorrIsOctaveStop logic: only power-of-2 HarmonicNumbers are pure
 # octave stops (8=8', 16=4', 32=2', 4=16', ...) and skip autocorrelation.
@@ -48,6 +48,30 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v74: Simulationsfenster-Defaults: Crossfade-Kurve standardmaessig Sin2;
+#      beim Oeffnen nur Attack und Release NDP (interpoliert) sichtbar.
+# v73: Simulationsfenster: Crossfade-Laenge kollabiert am rechten Rand der
+#      Attack-WAV nicht mehr; safe_slice() darf wie vorgesehen zero-padden.
+# v72: Globales Branch-Path-Tracking (Viterbi-artig): lokale Maxima werden
+#      ueber alle LUT-Punkte zu einem glatten Gesamtpfad verbunden. Verhindert
+#      isolierte Astspruenge; Drift selbst ist erlaubt, abrupte Knicke werden
+#      bestraft. Bad-LUT-Heuristik fuer Driftpfade entschaerft.
+# v71: Korrelationslandschaft: Colorbar horizontal unter dem Plot, damit sie
+#      die Legende rechts nicht mehr verdeckt.
+# v70: Crossfade-Simulation: Attack-Slider reicht bis zur Release-Gueltigkeit
+#      bzw. beim langen Release bis zum Ende der Attack-WAV.
+# v69: Branch-Lock/Full-Coverage: zurueck auf v67-Strategie mit groesserem
+#      Punktbudget; Sparse-Punkte werden staerker am vorhergesagten Ast gehalten
+#      und nachtraeglich gegen Astwechsel repariert.
+# v68: Experimentelles progressives Branch-Tracking: vom letzten sicheren Punkt
+#      aus schrittweise weitergehen, bei Abweichung Schrittweite halbieren.
+#      Verwarf sich praktisch teilweise, weil viele Punkte frueh verbraucht wurden.
+# v67: Anzeige-Konsistenz in der Korrelationslandschaft: effektive LUT-Punkte
+#      als best_r % T anzeigen; raw_r nur als Zusatzmarkierung.
+# v66: Adaptives Branch-Tracking: laengere Dense-Warmup-Phase und rekursive
+#      Zwischenpunkte bei unsicherer Sparse-Fortsetzung.
+# v65: Branch-Tracking ueber lokale Korrelationsmaxima statt lokalem argmax;
+#      mehrere Kandidaten pro n werden gegen einen vorhergesagten Ast bewertet.
 # v64: YIN-CMNDF-Refinement nutzt globales ndp_all, vermeidet Integer-Rundung am Suchrand.
 # v63: YIN-CMNDF normalisiert ab Lag 1, verhindert 2T-Schätzung bei Oktav-Stops.
 # v57: DC-Entfernung vor Hann-Fenster in estimate_period_by_autocorr.
@@ -86,6 +110,22 @@ DRIFT_MAX_RESID_FACTOR = 1.0 # Residuum <= stable_thresh * Faktor
 # v10: Fold-Akzeptanz-Parameter
 FOLD_ACCEPT_RATIO    = 0.85
 FOLD_SEARCH_RADIUS_D = 2
+
+# v65: Branch-Tracking-Parameter
+# Statt pro n blind das globale Maximum zu nehmen, werden mehrere lokale Maxima
+# betrachtet und der Kandidat gewählt, der zum vorhergesagten Ast passt.
+BRANCH_TOP_K             = 32
+BRANCH_SCORE_MARGIN      = 0.40   # Kandidaten bis best_score - margin behalten
+BRANCH_PREDICT_PENALTY   = 0.35   # Score-Abzug bei Abstand zum vorhergesagten Ast
+BRANCH_MIN_PEAK_DISTANCE = 3      # Mindestabstand lokaler Maxima in r-Samples
+BRANCH_FIT_WIN           = 8      # letzte Punkte fuer lokale lineare Vorhersage
+BRANCH_STABLE_RESID_FACTOR = 1.0
+BRANCH_WARMUP_POINTS     = 12     # dichte Startmessungen vor Sparse-Phase
+BRANCH_ADAPT_MAX_DEPTH   = 8      # rekursive Zwischenmessungen pro Sparse-Ziel
+BRANCH_ADAPT_ERR_FACTOR  = 0.75   # erlaubter Fehler = allowed * Faktor
+BRANCH_HARD_LOCK_FACTOR  = 0.75   # Kandidaten in dieser Naehe zum Predicted-Ast haben Vorrang
+BRANCH_GLOBAL_SMOOTH_PENALTY = 0.70 # Strafe fuer Knicke im globalen Astpfad
+BRANCH_GLOBAL_ALLOWED_FACTOR = 0.10  # erlaubter Knickfehler relativ zu T
 
 
 # ─── Datenklassen ─────────────────────────────────────────────────────────────
@@ -403,6 +443,96 @@ def best_corr_vectorized(lw: np.ndarray, release_mono: np.ndarray,
         return best_r, folded_score, raw_idx, raw_score, True, fold_ratio
     return raw_idx, raw_score, raw_idx, raw_score, False, fold_ratio
 
+
+def _local_maxima_indices(scores: np.ndarray, min_distance: int = 3) -> list:
+    """Lokale Maxima in einer 1D-Scorekurve, sortiert nach Score absteigend."""
+    if len(scores) == 0:
+        return []
+    peaks = []
+    for i in range(len(scores)):
+        left_ok  = (i == 0 or scores[i] >= scores[i - 1])
+        right_ok = (i == len(scores) - 1 or scores[i] >= scores[i + 1])
+        if left_ok and right_ok:
+            peaks.append(i)
+    peaks.sort(key=lambda idx: float(scores[idx]), reverse=True)
+
+    # einfache Non-Maximum-Suppression, damit ein breiter Peak nicht mehrere
+    # fast identische Kandidaten liefert.
+    selected = []
+    for idx in peaks:
+        if all(abs(idx - j) >= min_distance for j in selected):
+            selected.append(idx)
+    return selected
+
+
+def corr_candidates_vectorized(lw: np.ndarray, release_mono: np.ndarray,
+                               r_max: int, window_len: int,
+                               top_k: int = BRANCH_TOP_K,
+                               score_margin: float = BRANCH_SCORE_MARGIN,
+                               min_peak_distance: int = BRANCH_MIN_PEAK_DISTANCE) -> list:
+    """
+    Berechnet alle relevanten lokalen Korrelationsmaxima für ein Attack-Fenster.
+
+    Rückgabe: Liste von Tupeln (raw_r, score), nach Score absteigend.
+    raw_r liegt im realen r-Suchraum [0, r_max). Keine T-Faltung.
+    """
+    if r_max + window_len > len(release_mono):
+        r_max = max(1, len(release_mono) - window_len)
+
+    na = np.linalg.norm(lw)
+    if na < 1e-12 or r_max <= 0:
+        return [(0, 0.0)]
+    lw_n = lw / na
+
+    from numpy.lib.stride_tricks import as_strided
+    s = release_mono.strides[0]
+    rel_mat = as_strided(release_mono,
+                          shape=(r_max, window_len),
+                          strides=(s, s))
+
+    norms = np.linalg.norm(rel_mat, axis=1)
+    norms = np.where(norms < 1e-12, 1.0, norms)
+    scores = rel_mat.dot(lw_n) / norms
+
+    peak_idx = _local_maxima_indices(scores, min_peak_distance)
+    if not peak_idx:
+        peak_idx = [int(np.argmax(scores))]
+
+    best_score = float(scores[peak_idx[0]])
+    candidates = []
+    for idx in peak_idx:
+        sc = float(scores[idx])
+        if len(candidates) >= top_k:
+            break
+        if sc < best_score - score_margin and len(candidates) > 0:
+            continue
+        candidates.append((int(idx), sc))
+
+    if not candidates:
+        idx = int(np.argmax(scores))
+        candidates.append((idx, float(scores[idx])))
+    return candidates
+
+
+def closest_branch_copy(raw_r: int, predicted_r: float, T_int: int) -> float:
+    """
+    Wählt die um k*T verschobene Kopie eines Kandidaten, die am nächsten an
+    der vorhergesagten unwrapped Astposition liegt.
+
+    Das ist nur zum Tracking gedacht. Der reale Release-Offset bleibt raw_r.
+    """
+    if T_int <= 0:
+        return float(raw_r)
+    best = float(raw_r)
+    best_d = abs(best - predicted_r)
+    for k in range(-8, 9):
+        cand = float(raw_r + k * T_int)
+        d = abs(cand - predicted_r)
+        if d < best_d:
+            best = cand
+            best_d = d
+    return best
+
 def circ_dist(a: int, b: int, T: int) -> int:
     d = abs(int(a) - int(b))
     if d > T // 2:
@@ -595,7 +725,29 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     window_len_d = max(4, window_len // ds)
     r_max_d      = max(1, r_max // ds)
 
-    def corr_at(n: int, phase: str) -> LutPoint:
+    def _fit_track(points_subset):
+        pts = [p for p in points_subset if getattr(p, "track_r", None) is not None
+               and p.best_score > -1.5]
+        if len(pts) < 2:
+            return 0.0, float(getattr(pts[-1], "track_r", 0.0)) if pts else 0.0, float("inf")
+        ns_fit = np.array([p.n for p in pts], dtype=float)
+        rs_fit = np.array([float(p.track_r) for p in pts], dtype=float)
+        a, b = np.polyfit(ns_fit, rs_fit, 1)
+        resid = float(np.max(np.abs(rs_fit - (a * ns_fit + b))))
+        return float(a), float(b), resid
+
+    def _predict_track_r(points_subset, n: int):
+        pts = [p for p in points_subset if getattr(p, "track_r", None) is not None
+               and p.best_score > -1.5]
+        if not pts:
+            return None
+        if len(pts) == 1:
+            return float(pts[-1].track_r)
+        fit_pts = pts[-BRANCH_FIT_WIN:]
+        a, b, _ = _fit_track(fit_pts)
+        return a * float(n) + b
+
+    def corr_at(n: int, phase: str, predicted_r: Optional[float] = None) -> LutPoint:
         if n < n_start or n >= n_end:
             return LutPoint(n=n, loop_pos=0, best_r=0, best_score=-2.0, phase=phase)
         cs   = int(round(n * T_float))
@@ -603,15 +755,191 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         if cs_d + window_len_d > len(loop_seg):
             return LutPoint(n=n, loop_pos=cs, best_r=0, best_score=-2.0, phase=phase)
         lw = loop_seg[cs_d:cs_d + window_len_d]
-        best_r_d, best_s, raw_r_d, raw_s, folded, fold_ratio = best_corr_vectorized(
-            lw, release_ds, r_max_d, window_len_d, max(1, T_int // ds))
-        best_r = best_r_d * ds
-        raw_r  = raw_r_d  * ds
-        if folded:
-            best_r = best_r % T_int
-        return LutPoint(n=n, loop_pos=cs, best_r=best_r, best_score=best_s,
-                        phase=phase, raw_r=raw_r, raw_score=raw_s,
-                        folded=folded, fold_ratio=fold_ratio)
+
+        candidates = corr_candidates_vectorized(
+            lw, release_ds, r_max_d, window_len_d,
+            top_k=BRANCH_TOP_K,
+            score_margin=BRANCH_SCORE_MARGIN,
+            min_peak_distance=max(1, BRANCH_MIN_PEAK_DISTANCE // ds))
+
+        # Downsampling zurück auf echte Sample-Offsets.
+        candidates = [(int(r_d * ds), float(sc)) for r_d, sc in candidates]
+        best_raw, best_score = max(candidates, key=lambda item: item[1])
+
+        if predicted_r is None:
+            chosen_raw = best_raw
+            chosen_score = best_score
+            chosen_track = float(chosen_raw)
+            pred_error = 0.0
+        else:
+            # Kandidaten nach Score UND Nähe zum vorhergesagten Ast bewerten.
+            # v69: Wenn ein Kandidat im engen Korridor um den vorhergesagten
+            # Ast liegt, hat dieser Korridor Vorrang. Das verhindert den
+            # typischen End-of-WAV-Astwechsel, bei dem ein Nachbarast lokal
+            # minimal besser ist, obwohl der bisherige Ast linear stabil war.
+            allowed = max(2.0, T_int / 10.0)
+            enriched = []
+            for raw_r, sc in candidates:
+                track_r = closest_branch_copy(raw_r, predicted_r, T_int)
+                dist = abs(track_r - predicted_r)
+                enriched.append((dist, raw_r, sc, track_r))
+
+            hard_limit = allowed * BRANCH_HARD_LOCK_FACTOR
+            near = [e for e in enriched if e[0] <= hard_limit]
+            if near:
+                # Innerhalb des richtigen Ast-Korridors entscheidet wieder der Score.
+                dist, chosen_raw, chosen_score, chosen_track = max(near, key=lambda e: e[2])
+                pred_error = dist
+            else:
+                best_eff = -1e30
+                chosen_raw = best_raw
+                chosen_score = best_score
+                chosen_track = closest_branch_copy(best_raw, predicted_r, T_int)
+                pred_error = abs(chosen_track - predicted_r)
+                for dist, raw_r, sc, track_r in enriched:
+                    eff = sc - BRANCH_PREDICT_PENALTY * (dist / allowed) ** 2
+                    if eff > best_eff:
+                        best_eff = eff
+                        chosen_raw = raw_r
+                        chosen_score = sc
+                        chosen_track = track_r
+                        pred_error = dist
+
+        pt = LutPoint(n=n, loop_pos=cs, best_r=int(chosen_raw),
+                      best_score=float(chosen_score), phase=phase,
+                      raw_r=int(chosen_raw), raw_score=float(best_score),
+                      folded=False, fold_ratio=1.0)
+        # Nicht Teil der Dataclass, nur interne Diagnose/Tracking-Information.
+        pt.track_r = float(chosen_track)
+        pt.predicted_r = None if predicted_r is None else float(predicted_r)
+        pt.pred_error = float(pred_error)
+        pt.candidates = candidates
+        return pt
+
+    def _global_branch_path(points_in: list) -> list:
+        """Viterbi-artiges Branch-Tracking ueber alle bereits gewaehlten n-Punkte.
+
+        corr_at() waehlt lokal schon astbewusst, kann aber bei weiten Sparse-
+        Abstaenden trotzdem auf einen Nachbarast springen. Diese Nachbearbeitung
+        betrachtet pro Punkt erneut alle lokalen Maxima und waehlt den global
+        glattesten Pfad. Bewertet wird nicht nur der Score, sondern vor allem der
+        Knick: Ein linearer Drift ist erlaubt, ploetzliche Astwechsel werden
+        bestraft.
+        """
+        pts = [p for p in points_in if p.best_score > -1.5]
+        if len(pts) < 3:
+            return points_in
+
+        cand_lists = []
+        for p in pts:
+            cands = list(getattr(p, "candidates", []) or [])
+            if not cands:
+                cands = [(int(getattr(p, "raw_r", p.best_r)), float(p.best_score))]
+            # Sicherstellen, dass der bisherige Punkt als Kandidat enthalten ist.
+            cur = (int(getattr(p, "raw_r", p.best_r)), float(p.best_score))
+            if all(raw != cur[0] for raw, _ in cands):
+                cands.append(cur)
+            # Deduplizieren nach raw_r, besten Score behalten.
+            by_raw = {}
+            for raw, sc in cands:
+                raw = int(raw)
+                sc = float(sc)
+                if raw not in by_raw or sc > by_raw[raw]:
+                    by_raw[raw] = sc
+            cands = sorted(by_raw.items(), key=lambda it: it[1], reverse=True)[:BRANCH_TOP_K]
+            cand_lists.append(cands)
+
+        allowed = max(2.0, T_int * BRANCH_GLOBAL_ALLOWED_FACTOR)
+
+        # Initialzustand: Kandidatenpaar (0,1). Track-R von Punkt 1 wird als
+        # naechste T-Kopie zu Punkt 0 gewaehlt; dadurch sind Modulo-Wraps erlaubt.
+        states = {}
+        backrefs = []
+        for i0, (raw0, sc0) in enumerate(cand_lists[0]):
+            tr0 = float(raw0)
+            for i1, (raw1, sc1) in enumerate(cand_lists[1]):
+                tr1 = closest_branch_copy(int(raw1), tr0, T_int)
+                dn01 = max(1, pts[1].n - pts[0].n)
+                slope = (tr1 - tr0) / dn01
+                # Nur sehr extreme Anfangsspruenge leicht bestrafen; linearer
+                # Drift soll nicht unterdrueckt werden.
+                start_pen = 0.05 * (abs(tr1 - tr0) / max(allowed, 1e-9)) ** 2
+                cost = -float(sc0) - float(sc1) + start_pen
+                states[(i0, i1)] = (cost, tr0, tr1, slope, None)
+        backrefs.append({})
+
+        # Dynamische Programmierung ueber Kandidatenpaare.
+        all_back = []
+        for pi in range(2, len(pts)):
+            new_states = {}
+            back = {}
+            n_prev2 = pts[pi - 2].n
+            n_prev1 = pts[pi - 1].n
+            n_cur = pts[pi].n
+            dn_prev = max(1, n_prev1 - n_prev2)
+            dn_cur = max(1, n_cur - n_prev1)
+            for (i_prev2, i_prev1), (cost_prev, tr_prev2, tr_prev1, slope_prev, _) in states.items():
+                pred = tr_prev1 + slope_prev * dn_cur
+                for i_cur, (raw_cur, sc_cur) in enumerate(cand_lists[pi]):
+                    tr_cur = closest_branch_copy(int(raw_cur), pred, T_int)
+                    err = tr_cur - pred
+                    smooth_pen = BRANCH_GLOBAL_SMOOTH_PENALTY * (err / allowed) ** 2
+                    cost = cost_prev - float(sc_cur) + smooth_pen
+                    key = (i_prev1, i_cur)
+                    if key not in new_states or cost < new_states[key][0]:
+                        slope_cur = (tr_cur - tr_prev1) / dn_cur
+                        new_states[key] = (cost, tr_prev1, tr_cur, slope_cur, (i_prev2, i_prev1))
+                        back[key] = (i_prev2, i_prev1)
+            if not new_states:
+                return points_in
+            all_back.append(back)
+            states = new_states
+
+        # Bestes Endpaar rekonstruieren.
+        end_key = min(states, key=lambda k: states[k][0])
+        idx_path = [None] * len(pts)
+        idx_path[-2], idx_path[-1] = end_key
+        cur_key = end_key
+        for pi in range(len(pts) - 1, 1, -1):
+            prev_key = all_back[pi - 2].get(cur_key)
+            if prev_key is None:
+                break
+            idx_path[pi - 2] = prev_key[0]
+            cur_key = prev_key
+
+        if any(i is None for i in idx_path):
+            return points_in
+
+        # Track-Rs konsistent aus dem rekonstruierten Pfad erzeugen.
+        out = []
+        prev_track = None
+        prevprev_track = None
+        prev_n = None
+        prevprev_n = None
+        for p, cands, ci in zip(pts, cand_lists, idx_path):
+            raw, sc = cands[int(ci)]
+            if prev_track is None:
+                track = float(raw)
+            elif prevprev_track is None:
+                track = closest_branch_copy(int(raw), prev_track, T_int)
+            else:
+                slope = (prev_track - prevprev_track) / max(1, prev_n - prevprev_n)
+                pred = prev_track + slope * max(1, p.n - prev_n)
+                track = closest_branch_copy(int(raw), pred, T_int)
+            npnt = LutPoint(n=p.n, loop_pos=p.loop_pos,
+                            best_r=int(raw), best_score=float(sc), phase=p.phase,
+                            raw_r=int(raw), raw_score=float(sc),
+                            folded=False, fold_ratio=1.0)
+            npnt.track_r = float(track)
+            npnt.predicted_r = None
+            npnt.pred_error = 0.0 if prev_track is None else abs(track - prev_track)
+            npnt.candidates = cands
+            out.append(npnt)
+            prevprev_track, prev_track = prev_track, track
+            prevprev_n, prev_n = prev_n, p.n
+
+        # Nicht ausgefilterte Originalpunkte, falls es sie gab, hinten anhaengen.
+        return out
 
     # Tighter tolerance for non-octave stops (aliquots/mixtures), matching GO.
     stable_thresh = max(T_int // (8 if corr_is_octave_stop(harmonic_number) else 6), 4)
@@ -623,7 +951,8 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         for i in range(min(10, span)):
             p = n_start + i * max(1, (span - 1) // 9)
             if p < n_end:
-                points.append(corr_at(p, "dense"))
+                pred = _predict_track_r(points, p)
+                points.append(corr_at(p, "dense", pred))
         points = [p for p in points if p.best_score > -1.5]
         meta["stabilized"] = True
         return points, meta
@@ -637,21 +966,22 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     dense_step  = min(DENSE_STEP, max(1, available_n // (STABLE_WIN + 1)))
     meta["dense_step_used"] = dense_step
 
-    dense_stop  = min(n_end, dense_start + dense_step * (STABLE_WIN + 2))
+    dense_stop  = min(n_end, dense_start + dense_step * BRANCH_WARMUP_POINTS)
     stable_at_n = None
 
     for n in range(dense_start, dense_stop, dense_step):
-        pt = corr_at(n, "dense")
+        pred = _predict_track_r(points, n)
+        pt = corr_at(n, "dense", pred)
         if pt.best_score > -1.5:
             points.append(pt)
         if len(points) >= STABLE_WIN:
-            ok = all(
-                circ_dist(points[k].best_r % T_int, points[k+1].best_r % T_int, T_int) <= stable_thresh
-                for k in range(len(points) - STABLE_WIN, len(points) - 1)
-            )
-            if ok:
+            _, _, resid = _fit_track(points[-STABLE_WIN:])
+            ok = resid <= stable_thresh * BRANCH_STABLE_RESID_FACTOR
+            if ok and stable_at_n is None:
                 stable_at_n = n
-                break
+                # Nicht abbrechen: fuer Branch-Tracking brauchen wir mehr als
+                # nur STABLE_WIN Punkte. Sonst ist die Sparse-Extrapolation
+                # ueber tausende Perioden zu schlecht bestimmt.
 
     if not points and n_start < n_end:
         points.append(corr_at(min(n_end - 1, dense_start), "dense"))
@@ -661,7 +991,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     drift_slope, drift_resid = 0.0, 0.0
     diag_pts = [p for p in points if p.best_score > -1.5][:DRIFT_FIT_WIN]
     if len(diag_pts) >= 4:
-        a, b, resid = fit_linear_drift(diag_pts, T_int)
+        a, b, resid = _fit_track(diag_pts)
         drift_slope = a
         drift_resid = resid
 
@@ -687,34 +1017,125 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     meta["drift_per_period"] = drift_slope
     meta["drift_residual"]   = drift_resid
 
-    # ── Phase 2: Sparse ───────────────────────────────────────────────────────
+    # ── Phase 2: Adaptive Sparse ───────────────────────────────────────────────
+    def _append_adaptive_target(n_target: int, phase: str, depth: int = 0):
+        """Fuegt n_target ein, aber nur wenn der Kandidat zum vorhergesagten
+        Ast passt. Bei grosser Abweichung wird zuerst der Mittelpunkt gemessen.
+
+        Das ist der entscheidende Unterschied zum alten Sparse-Verfahren:
+        grosse n-Spruenge werden nicht blind akzeptiert. Dadurch bleiben die
+        lokalen Maxima auf demselben Ast, auch wenn Nachbaraeste lokal aehnliche
+        oder minimal bessere Scores haben.
+        """
+        nonlocal points
+        if len(points) >= MAX_TOTAL or n_target <= 0 or n_target >= n_end:
+            return
+        if points and n_target <= points[-1].n:
+            return
+
+        pred = _predict_track_r(points, n_target)
+        pt = corr_at(n_target, phase, pred)
+
+        need_mid = False
+        if pred is not None and getattr(pt, "track_r", None) is not None and points:
+            allowed = max(2.0, T_int / 10.0)
+            err = abs(float(pt.track_r) - float(pred))
+            dn = n_target - points[-1].n
+            if err > allowed * BRANCH_ADAPT_ERR_FACTOR and dn > 1:
+                need_mid = True
+
+        if need_mid and depth < BRANCH_ADAPT_MAX_DEPTH and len(points) < MAX_TOTAL - 1:
+            nm = (points[-1].n + n_target) // 2
+            if nm > points[-1].n and nm < n_target:
+                _append_adaptive_target(nm, "gap", depth + 1)
+                if len(points) >= MAX_TOTAL:
+                    return
+                # Nach dem Zwischenpunkt ist die Vorhersage besser; Ziel neu messen.
+                pred = _predict_track_r(points, n_target)
+                pt = corr_at(n_target, phase, pred)
+
+        if pt.best_score > -1.5:
+            points.append(pt)
+
     last_n = int(round(points[-1].loop_pos / T_float)) if points else dense_start
-    if last_n + 1 < n_end:
+    if last_n + 1 < n_end and len(points) < MAX_TOTAL:
         n_rem = min(N_SPARSE, MAX_TOTAL - len(points))
+        targets = []
         for i in range(1, n_rem + 1):
             n = last_n + i * (n_end - 1 - last_n) // n_rem
             if n > last_n and n < n_end:
-                pt = corr_at(n, "sparse")
-                if pt.best_score > -1.5:
-                    points.append(pt)
+                targets.append(n)
+        # Monoton und ohne Duplikate.
+        for n in sorted(set(targets)):
+            if len(points) >= MAX_TOTAL:
+                break
+            _append_adaptive_target(n, "sparse", 0)
 
     # ── Phase 3: Gap-Fill ─────────────────────────────────────────────────────
     gap_thresh = T_int // 4
     idx = 0
     while idx + 1 < len(points) and len(points) < MAX_TOTAL:
+        # v66: Gap-Fill nicht mehr nur auf modulo-T-Distanz.
+        # Branch-Spruenge koennen kleiner als T/4 sein; entscheidend ist die
+        # Abweichung des naechsten Punkts vom lokal vorhergesagten track_r.
         gap = circ_dist(points[idx].best_r % T_int, points[idx+1].best_r % T_int, T_int)
-        if gap > gap_thresh:
+        track_gap = 0.0
+        if getattr(points[idx], "track_r", None) is not None and getattr(points[idx+1], "track_r", None) is not None:
+            if idx >= 1 and getattr(points[idx-1], "track_r", None) is not None:
+                dn0 = max(1, points[idx].n - points[idx-1].n)
+                slope0 = (float(points[idx].track_r) - float(points[idx-1].track_r)) / dn0
+                pred_next = float(points[idx].track_r) + slope0 * (points[idx+1].n - points[idx].n)
+                track_gap = abs(float(points[idx+1].track_r) - pred_next)
+        if gap > gap_thresh or track_gap > max(2.0, T_int / 10.0):
             na = int(round(points[idx].loop_pos / T_float))
             nb = int(round(points[idx+1].loop_pos / T_float))
             nm = (na + nb) // 2
             if nm > na and nm < nb:
-                pt = corr_at(nm, "gap")
+                pred = _predict_track_r(points, nm)
+                pt = corr_at(nm, "gap", pred)
                 if pt.best_score > -1.5:
                     points.insert(idx + 1, pt)
                 continue
         idx += 1
 
+    # ── Phase 4: Branch-Lock-Reparatur ───────────────────────────────────────
+    # Nach Sparse+Gap kann besonders am Ende ein falscher Ast die Vorhersage
+    # kapern. Daher messen wir vorhandene Punkte noch einmal in Reihenfolge und
+    # zwingen sie an den aus den vorherigen Punkten vorhergesagten Ast, falls
+    # sie deutlich danebenliegen. Es werden keine neuen Punkte verbraucht; der
+    # Punkt wird nur durch den besten Kandidaten auf dem bestehenden Ast ersetzt.
+    repaired = []
+    for pt in points:
+        if len(repaired) >= max(3, min(BRANCH_FIT_WIN, len(points))):
+            pred = _predict_track_r(repaired, pt.n)
+            if pred is not None:
+                allowed = max(2.0, T_int / 10.0)
+                old_err = abs(float(getattr(pt, "track_r", pt.raw_r)) - float(pred))
+                if old_err > allowed * BRANCH_ADAPT_ERR_FACTOR:
+                    trial = corr_at(pt.n, pt.phase, pred)
+                    new_err = abs(float(getattr(trial, "track_r", trial.raw_r)) - float(pred))
+                    # Ersatz nur, wenn er klar naeher am Ast liegt und der Score
+                    # nicht voellig einbricht. Bei vielen Mixturen ist der richtige
+                    # Ast lokal etwas schwaecher; das ist erlaubt.
+                    if new_err < old_err and trial.best_score >= pt.best_score - BRANCH_SCORE_MARGIN:
+                        pt = trial
+        repaired.append(pt)
+    points = repaired
+
+    # v72: globale Branch-Pfad-Nachbearbeitung. Diese Stufe korrigiert
+    # Astspruenge, die lokal plausibel aussehen, global aber einen Knick im
+    # ansonsten glatten Pfad erzeugen.
+    points = _global_branch_path(points)
+
     points = [p for p in points if p.best_score > -1.5]
+    if len(points) >= 4:
+        a, b, resid = _fit_track(points)
+        meta["drift_per_period"] = a
+        meta["drift_residual"] = resid
+        # Stabilisierung bedeutet ab v72: verwertbarer glatter Pfad, nicht
+        # zwingend konstante Phase. Linearer Drift ist erlaubt.
+        meta["stabilized"] = resid <= max(2.0, T_int / 8.0)
+        meta["stable_at_n"] = points[min(len(points)-1, STABLE_WIN-1)].n
     return points, meta
 
 
@@ -1040,20 +1461,23 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         # v46: Legacy-Fallback nicht nur bei Drift/Instabilität, sondern auch
         # bei formal stabilisierter, aber qualitativ schlechter LUT.
         # Wichtig: erst NACH Berechnung von score_min, R und phase3_count.
-        if pa.drift_mode:
-            pa.legacy_fallback = True
-            pa.legacy_reason = "drift"
-        elif not pa.stabilized:
+        # v65: Linearer/leicht gekruemmter Drift ist mit Branch-Tracking kein
+        # automatischer Legacy-Grund mehr. Legacy nur noch, wenn keine stabile
+        # Punktfolge oder eine qualitativ schlechte LUT entsteht.
+        if not pa.stabilized:
             pa.legacy_fallback = True
             pa.legacy_reason = "instabil"
         else:
             bad_reasons = []
             if pa.score_min and pa.score_min < LEGACY_SCORE_MIN_THRESHOLD:
                 bad_reasons.append(f"score_min<{LEGACY_SCORE_MIN_THRESHOLD:.2f}")
-            if pa.bestr_coherence and pa.bestr_coherence < LEGACY_COHERENCE_THRESHOLD:
-                bad_reasons.append(f"R<{LEGACY_COHERENCE_THRESHOLD:.2f}")
-            if pa.phase3_count > LEGACY_PHASE3_MAX:
-                bad_reasons.append(f"gaps>{LEGACY_PHASE3_MAX}")
+            # v72: R und Anzahl der Gap-Punkte sind fuer branch-getrackte,
+            # linear driftende Pfade keine verlaesslichen Fehlerkriterien mehr.
+            # Ein sauberer linearer Drift verteilt best_r % T ueber den Kreis
+            # und kann deshalb ein kleines R erzeugen. Viele Gap-Punkte koennen
+            # schlicht notwendige adaptive Stuetzpunkte sein.
+            if pa.drift_residual and pa.drift_residual > max(4.0, pa.T_int / 4.0):
+                bad_reasons.append("track_residual_high")
             if bad_reasons:
                 pa.legacy_fallback = True
                 pa.legacy_reason = "bad_lut:" + ",".join(bad_reasons)
@@ -1279,10 +1703,22 @@ class CrossfadeSimWindow:
         # ── Attack-Dauer Controls ──────────────────────────────────────────────
         pa = self.pa
         sr = pa.sample_rate or 48000
-        min_ms  = pa.min_key_press_ms or 0
-        max_ms  = pa.max_key_press_ms or 2000
-        min_smp = int(min_ms * sr / 1000)
-        max_smp = int(max_ms * sr / 1000)
+        # Slider-Grenzen samplegenau aus der Release-Gültigkeit ableiten.
+        # Bisher endete der Slider bei pa.max_key_press_ms oder pauschal 2000 ms.
+        # Für das lange Release (max_key_press_ms=None) ist aber das WAV-Ende
+        # die natürliche Obergrenze; für kurze/mittlere Releases die ODF-
+        # Gültigkeit max_sample. Die eigentlichen Analysewerte wurden in
+        # analyze_pipe() bereits als pa.min_sample/pa.max_sample berechnet.
+        atk_last_smp = max(0, int(getattr(pa, "atk_frames", 0) or 0) - 1)
+        min_smp = int(pa.min_sample) if pa.min_sample is not None else 0
+        if pa.max_sample is not None:
+            max_smp = min(int(pa.max_sample), atk_last_smp)
+        else:
+            max_smp = atk_last_smp
+        if max_smp < min_smp:
+            max_smp = min_smp
+        min_ms = min_smp * 1000.0 / sr
+        max_ms = max_smp * 1000.0 / sr
         self._sr = sr
         self._min_smp = min_smp
         self._max_smp = max_smp
@@ -1445,7 +1881,7 @@ class CrossfadeSimWindow:
         # Crossfade-Modus
         tk.Label(bar, text="Xfade:", bg=C_BG3, fg=C_TEXT,
                  font=("Consolas", 9)).pack(side=tk.LEFT, padx=(8,2))
-        self._xfade_var = tk.StringVar(value="SinEqualPower")
+        self._xfade_var = tk.StringVar(value="Sin2")
         xfade_menu = ttk.Combobox(bar, textvariable=self._xfade_var,
                                    values=self.XFADE_MODES, width=14,
                                    state="readonly", font=("Consolas", 9))
@@ -1477,8 +1913,9 @@ class CrossfadeSimWindow:
             ("legacy",       "Release Legacy",           C_WARN),
             ("xfade_legacy", "Crossfade Legacy",         C_WARN),
         ]
+        default_visible = {"attack", "ndp_interp"}
         for key, label, color in curves:
-            var = tk.BooleanVar(value=True)
+            var = tk.BooleanVar(value=(key in default_visible))
             self._show[key] = var
             cb = tk.Checkbutton(cb_frame, text=label, variable=var,
                                  bg=C_BG2, fg=color, selectcolor=C_BG2,
@@ -1721,9 +2158,15 @@ class CrossfadeSimWindow:
 
         if len(self._rel_mono) < 4 or len(self._atk_mono) < 4:
             return
-        t_smp     = max(0, min(t_smp, len(self._atk_mono) - 1))
-        xfade_len = min(xfade_len, len(self._rel_mono) - 1,
-                        max(1, len(self._atk_mono) - t_smp))
+        t_smp = max(0, min(t_smp, len(self._atk_mono) - 1))
+
+        # Display bugfix: do NOT shorten the crossfade window at the right edge
+        # of the attack WAV. safe_slice() below already zero-pads out-of-range
+        # samples. Shrinking xfade_len here made the simulated crossfade collapse
+        # when the slider was moved to the end of the release-valid range.
+        # Keep the configured GO crossfade length constant so the visualization
+        # stays comparable across the entire slider range.
+        xfade_len = max(1, int(xfade_len))
 
         r_interp = self._get_r_interp(t_smp)
         r_legacy = self._get_r_legacy(t_smp)
@@ -2061,22 +2504,36 @@ class CorrLandscapeWindow:
             cmap="RdYlGn",
             interpolation="nearest",
         )
-        self._fig.colorbar(im, ax=ax, label="NDP-Score", fraction=0.03)
+        # Colorbar bewusst unten statt rechts: rechts sitzt die Legende.
+        # Sonst kann die NDP-Skala je nach Fensterbreite/DPI die Legende ueberdecken.
+        cbar = self._fig.colorbar(
+            im, ax=ax, orientation="horizontal",
+            fraction=0.055, pad=0.11, aspect=35
+        )
+        cbar.set_label("NDP-Score", color=C_TEXT2)
+        cbar.ax.tick_params(colors=C_TEXT2)
 
-        # LUT-Punkte einzeichnen — getrennt nach Fold-Status
+        # LUT-Punkte einzeichnen.
+        # Wichtig: Der Hauptgraph und GO-Runtime verwenden best_r % T.
+        # Die Korrelationslandschaft hat zwar eine rohe r-Achse [0, 2T),
+        # aber fuer die visuelle Uebereinstimmung muss hier standardmaessig
+        # derselbe effektive Offset wie im Hauptfenster gezeichnet werden.
+        # Raw-r wird nur als kleines Kreuz mitgezeichnet, wenn er von best_r%T
+        # sichtbar abweicht.
         if self.pa.lut_points:
-            pts_folded   = [p for p in self.pa.lut_points if p.folded]
-            pts_unfolded = [p for p in self.pa.lut_points if not p.folded]
-            if pts_folded:
-                ax.scatter([p.n for p in pts_folded], [p.raw_r for p in pts_folded],
-                           c="white", marker="o", s=25, zorder=5,
-                           edgecolors="black", linewidths=0.5,
-                           label="LUT gefaltet")
-            if pts_unfolded:
-                ax.scatter([p.n for p in pts_unfolded], [p.raw_r for p in pts_unfolded],
-                           c="orange", marker="D", s=25, zorder=5,
-                           edgecolors="black", linewidths=0.5,
-                           label="LUT raw")
+            pts_sorted = sorted(self.pa.lut_points, key=lambda p: p.n)
+            xs_eff = [p.n for p in pts_sorted]
+            ys_eff = [p.best_r % T for p in pts_sorted]
+            ax.scatter(xs_eff, ys_eff,
+                       c="white", marker="o", s=28, zorder=6,
+                       edgecolors="black", linewidths=0.6,
+                       label="LUT effektiv (best_r mod T)")
+
+            pts_raw_diff = [p for p in pts_sorted if abs((p.raw_r % T) - (p.raw_r)) > 1e-9]
+            if pts_raw_diff:
+                ax.scatter([p.n for p in pts_raw_diff], [p.raw_r for p in pts_raw_diff],
+                           c="orange", marker="x", s=22, zorder=5,
+                           linewidths=0.8, label="LUT raw")
 
         # T-Linie
         ax.axhline(T, color="cyan", linewidth=0.8, linestyle="--",
@@ -2093,7 +2550,8 @@ class CorrLandscapeWindow:
                    labelcolor=C_TEXT, fontsize=8,
                    loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
 
-        self._fig.tight_layout(rect=[0, 0, 0.82, 1])
+        # Rechts Platz fuer die Legende lassen; unten Platz fuer die horizontale Colorbar.
+        self._fig.tight_layout(rect=[0, 0.08, 0.82, 1])
         self._canvas.draw()
 
     def _export_csv(self):
