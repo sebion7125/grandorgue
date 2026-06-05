@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v93-copy-dp"
+TOOL_VERSION = "v94-unwrapped-track"
 
 try:
     import matplotlib
@@ -50,6 +50,9 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v94: v90-v93 revertiert. closest_branch_copy in _global_branch_path wiederhergestellt.
+#      Natuerliche T-Uebergaenge (Drift durch T-Grenze) kostenlos; artificielle Spruenge
+#      werden durch smooth_pen+kink_pen bestraft. Stabiles Verhalten fuer alle Pfeifen.
 # v93: Dreistufiger Ansatz. Stufe3: Copy-DP ueber copy_id=raw_r//T verhindert
 #      Alternieren (54→5→54) wenn Scores zwischen T-Kopien schwanken.
 #      BRANCH_COPY_SWITCH_PENALTY=0.20; bester konsistenter T-Copy gewaehlt.
@@ -989,54 +992,14 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
         allowed = max(2.0, T_int * BRANCH_GLOBAL_ALLOWED_FACTOR)
 
-        # v92: Zweistufen-Ansatz fuer zirkulaeres Tracking (search_periods == 2).
-        #
-        # Problem v91: Zirkulaere Kosten ohne Phasenraum-DP fuehren zu T-Fenster-
-        # Alternierung: DP wechselt frei zwischen r und r+T, weil err=0 fuer T-Spruenge.
-        #
-        # Loesung v92:
-        # Stufe 1 — DP laeuft in echtem [0,T)-Phasenraum.
-        #   pro Phase: bester T-Copy (raw_r) gemerkt, Score korrekt zugeordnet.
-        #   DP-Kandidaten: (phase_r, max_score_ueber_T_Kopien) in [0,T).
-        #   Kein T-Fenster-Wechsel moeglich → kein Alternieren.
-        # Stufe 2 — Rekonstruktion: phase_r → actual_raw_r (der T-Copy mit bestem Score).
-        #   best_r = raw_r der besten T-Kopie (Score korrekt zugeordnet).
-        #   track_r = phase_r (bleibt in [0,T) fuer Drift-Diagnose).
-        # _try_fold() entscheidet danach ob raw_r%T score-neutral zurueckgefaltet wird.
-        use_circular = (search_periods == 2)
+        # v94: closest_branch_copy wiederhergestellt im globalen Viterbi.
+        # Dadurch sind natuerliche T-Uebergaenge (Drift durch T-Grenze) kostenlos;
+        # artificielle Spruenge innerhalb eines Periodenfensters werden bestraft.
+        # Ein Branch-Switch durch pred < 0 oder pred > T wird automatisch durch
+        # closest_branch_copy auf die naechste T-Kopie gemappt → err klein.
+        # Kink-Penalty (v89) bleibt: echte Beschleunigungen werden bestraft.
 
-        # Phasen-Kandidatenlisten und Lookup raw_r fuer Stufe 2.
-        if use_circular:
-            dp_cand_lists    = []   # Phase-DP: (phase_r, best_score_ueber_T_Kopien)
-            all_copies_lists = []   # Stufe-3: phase_r → {raw_r: score} (alle T-Kopien)
-            for cands in cand_lists:
-                by_phase = {}  # phase_r → {raw_r: score}
-                for raw_r, sc in cands:
-                    phr = int(raw_r) % T_int
-                    if phr not in by_phase:
-                        by_phase[phr] = {}
-                    by_phase[phr][int(raw_r)] = float(sc)
-                # Phase-Kandidaten fuer DP: bester Score pro Phase
-                sorted_p = sorted(by_phase.items(),
-                                  key=lambda x: max(x[1].values()), reverse=True)[:BRANCH_TOP_K]
-                dp_cand_lists.append([(phr, max(copies.values())) for phr, copies in sorted_p])
-                all_copies_lists.append({phr: copies for phr, copies in sorted_p})
-        else:
-            dp_cand_lists    = cand_lists
-            all_copies_lists = [{r: {r: sc} for r, sc in cands} for cands in cand_lists]
-
-        def _circ_phase_err(phase_cur, pred_phase):
-            if use_circular:
-                return shortest_circular_delta(pred_phase % T_int, phase_cur, T_int)
-            return phase_cur - pred_phase
-
-        def _circ_phase_slope(phase_a, phase_b, dn):
-            if use_circular:
-                return shortest_circular_delta(phase_a, phase_b, T_int) / dn
-            return (phase_b - phase_a) / dn
-
-        # Anker fuer small-T: robuster Median der ersten Dense-Punkte im echten Suchraum.
-        # Verhindert, dass Anchor-Penalty gegen echten Drift bei T>=16 wirkt.
+        # Anker fuer small-T: nur aktiv wenn search_periods > 2.
         anchor_r      = None
         max_abs_drift = None
         if search_periods > 2:
@@ -1046,15 +1009,16 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 anchor_r      = float(np.median([float(p.best_r) for p in dense_pts_for_anchor]))
                 max_abs_drift = max(float(T_int) * 0.75, 8.0)
 
-        # Initialzustand: Kandidatenpaar (0,1). DP laeuft ueber dp_cand_lists.
+        # Initialzustand: Kandidatenpaar (0,1).
+        # closest_branch_copy waehlt T-Kopie von raw1, die am naechsten an tr0 liegt.
         states = {}
         backrefs = []
-        for i0, (ph0, sc0) in enumerate(dp_cand_lists[0]):
-            tr0 = float(ph0)
-            for i1, (ph1, sc1) in enumerate(dp_cand_lists[1]):
-                tr1 = float(ph1)
+        for i0, (raw0, sc0) in enumerate(cand_lists[0]):
+            tr0 = float(raw0)
+            for i1, (raw1, sc1) in enumerate(cand_lists[1]):
+                tr1 = closest_branch_copy(int(raw1), tr0, T_int)
                 dn01 = max(1, pts[1].n - pts[0].n)
-                slope = _circ_phase_slope(tr0, tr1, dn01)
+                slope = (tr1 - tr0) / dn01
                 cost = -float(sc0) - float(sc1)
                 states[(i0, i1)] = (cost, tr0, tr1, slope, None)
         backrefs.append({})
@@ -1071,13 +1035,16 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
             dn_cur = max(1, n_cur - n_prev1)
             for (i_prev2, i_prev1), (cost_prev, tr_prev2, tr_prev1, slope_prev, _) in states.items():
                 pred = tr_prev1 + slope_prev * dn_cur
-                for i_cur, (ph_cur, sc_cur) in enumerate(dp_cand_lists[pi]):
-                    tr_cur = float(ph_cur)
-                    err = _circ_phase_err(ph_cur, pred)
+                for i_cur, (raw_cur, sc_cur) in enumerate(cand_lists[pi]):
+                    # closest_branch_copy: naechste T-Kopie zu pred.
+                    # Natuerlicher T-Uebergang (Drift durch T-Grenze): err ≈ 0.
+                    # Kuenstlicher Sprung (falscher Ast): err gross → bestraft.
+                    tr_cur = closest_branch_copy(int(raw_cur), pred, T_int)
+                    err = tr_cur - pred
                     smooth_pen = BRANCH_GLOBAL_SMOOTH_PENALTY * (err / allowed) ** 2
 
-                    # Kink-Penalty: Steigungsaenderung in Phasenraum (2. Ableitung).
-                    slope_cur_tentative = _circ_phase_slope(tr_prev1, tr_cur, dn_cur)
+                    # Kink-Penalty: echte Steigungsaenderung (2. Ableitung, v89).
+                    slope_cur_tentative = (tr_cur - tr_prev1) / dn_cur
                     slope_change = slope_cur_tentative - slope_prev
                     max_slope_change = max(0.05, float(T_int) / BRANCH_KINK_REF_DIVISOR)
                     kink_pen = BRANCH_KINK_PENALTY * (slope_change / max_slope_change) ** 2
@@ -1086,17 +1053,12 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                                      else 0.0)
 
                     if search_periods > 2:
-                        # Fenster-Wechsel-Strafe
                         bid_prev = int(tr_prev1 // T_int)
                         bid_cur  = int(tr_cur   // T_int)
                         branch_switch_pen = BRANCH_SWITCH_PENALTY * abs(bid_cur - bid_prev)
-
-                        # Anker-Strafe gegen langsamen Pseudo-Drift ueber mehrere Fenster
                         anchor_pen = (BRANCH_ANCHOR_PENALTY
                                       * (abs(tr_cur - anchor_r) / max_abs_drift) ** 2
                                       if anchor_r is not None else 0.0)
-
-                        # Sprung-Strafe gegen harte Endpunkt-Rueckspruenge
                         jump = abs(tr_cur - tr_prev1)
                         max_jump = max(2.0, T_int / 4.0)
                         jump_pen = BRANCH_JUMP_PENALTY * (jump / max_jump) ** 2
@@ -1108,7 +1070,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                     cost = cost_prev - float(sc_cur) + smooth_pen + kink_pen + hard_kink_pen + branch_switch_pen + anchor_pen + jump_pen
                     key = (i_prev1, i_cur)
                     if key not in new_states or cost < new_states[key][0]:
-                        slope_cur = _circ_phase_slope(tr_prev1, tr_cur, dn_cur)
+                        slope_cur = (tr_cur - tr_prev1) / dn_cur
                         new_states[key] = (cost, tr_prev1, tr_cur, slope_cur, (i_prev2, i_prev1))
                         back[key] = (i_prev2, i_prev1)
             if not new_states:
@@ -1131,82 +1093,35 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         if any(i is None for i in idx_path):
             return points_in
 
-        # Stufe 2: gewaehlte Phasenpositionen extrahieren.
-        selected_phases  = []
-        selected_copies  = []  # alle T-Kopien pro Punkt (fuer Copy-DP)
-        for dp_cands_p, all_copies_p, ci in zip(dp_cand_lists, all_copies_lists, idx_path):
-            ph, _ = dp_cands_p[int(ci)]
-            selected_phases.append(int(ph))
-            selected_copies.append(all_copies_p.get(ph, {int(ph): 0.5}))
-
-        # Stufe 3: Copy-DP — waehle konsistente T-Kopie (copy_id = raw_r // T_int).
-        # Kosten: -score(raw_r) + COPY_SWITCH_PENALTY * |copy_cur - copy_prev|
-        # Verhindert Alternieren 54 → 5 → 54 wenn Scores zwischen T-Kopien schwanken.
-        copy_hist  = []   # step i → {copy_id: (total_cost, best_raw_r)}
-        copy_bkref = []   # step i → {copy_id: best_prev_copy_id}
-        prev_copy_states = None
-        for copies_dict in selected_copies:
-            cur = {}
-            bkr = {}
-            for raw_r, sc in copies_dict.items():
-                cid = int(raw_r) // T_int
-                if prev_copy_states is None:
-                    cost = -float(sc)
-                    best_prev = None
-                else:
-                    best_prev = min(prev_copy_states,
-                                   key=lambda pc: prev_copy_states[pc][0]
-                                                  + BRANCH_COPY_SWITCH_PENALTY * abs(cid - pc))
-                    cost = (prev_copy_states[best_prev][0] - float(sc)
-                            + BRANCH_COPY_SWITCH_PENALTY * abs(cid - best_prev))
-                if cid not in cur or cost < cur[cid][0]:
-                    cur[cid] = (cost, int(raw_r))
-                    bkr[cid] = best_prev
-            if not cur:
-                # Fallback: erster Kandidat
-                rr = next(iter(copies_dict))
-                cid = int(rr) // T_int
-                cost = 0.0 if prev_copy_states is None else min(prev_copy_states.values(), key=lambda x: x[0])[0]
-                cur[cid] = (cost, int(rr))
-                bkr[cid] = None
-            copy_hist.append(cur)
-            copy_bkref.append(bkr)
-            prev_copy_states = cur
-
-        # Copy-DP rueckwaerts: besten raw_r pro Punkt bestimmen.
-        selected_raw_rs = [None] * len(pts)
-        if copy_hist:
-            best_final_cid = min(copy_hist[-1], key=lambda c: copy_hist[-1][c][0])
-            cur_cid = best_final_cid
-            for i in range(len(pts) - 1, -1, -1):
-                selected_raw_rs[i] = copy_hist[i].get(cur_cid, (None, selected_phases[i]))[1]
-                prev_cid = copy_bkref[i].get(cur_cid)
-                if prev_cid is not None:
-                    cur_cid = prev_cid
-        else:
-            selected_raw_rs = list(selected_phases)
-
-        # Rekonstruktion: LutPoints mit korrektem raw_r und track_r in [0,T).
+        # Track-Rs konsistent aus dem rekonstruierten Pfad erzeugen.
+        # closest_branch_copy ergibt unveraendertes Track in "entfalteter" Raumdarstellung;
+        # der reale Release-Offset (best_r = raw_r) bleibt korrekt zugeordnet.
         out = []
         prev_track = None
-        for p, ph, rr, dp_cands_p, all_copies_p in zip(
-                pts, selected_phases, selected_raw_rs, dp_cand_lists, all_copies_lists):
-            if rr is None:
-                rr = ph
-            sc = all_copies_p.get(ph, {}).get(rr, 0.5)
-            track = float(ph)
+        prevprev_track = None
+        prev_n = None
+        prevprev_n = None
+        for p, cands, ci in zip(pts, cand_lists, idx_path):
+            raw, sc = cands[int(ci)]
+            if prev_track is None:
+                track = float(raw)
+            elif prevprev_track is None:
+                track = closest_branch_copy(int(raw), prev_track, T_int)
+            else:
+                slope = (prev_track - prevprev_track) / max(1, prev_n - prevprev_n)
+                pred_r = prev_track + slope * max(1, p.n - prev_n)
+                track = closest_branch_copy(int(raw), pred_r, T_int)
             npnt = LutPoint(n=p.n, loop_pos=p.loop_pos,
-                            best_r=int(rr), best_score=float(sc), phase=p.phase,
-                            raw_r=int(rr), raw_score=float(sc),
+                            best_r=int(raw), best_score=float(sc), phase=p.phase,
+                            raw_r=int(raw), raw_score=float(sc),
                             folded=False, fold_ratio=1.0)
             npnt.track_r = float(track)
             npnt.predicted_r = None
             npnt.pred_error = 0.0 if prev_track is None else abs(track - prev_track)
-            # Kandidaten mit raw_r fuer _try_fold (alle T-Kopien dieser Phase).
-            all_c = [(rr2, sc2) for rr2, sc2 in all_copies_p.get(ph, {ph: sc}).items()]
-            npnt.candidates = all_c
+            npnt.candidates = cands
             out.append(npnt)
-            prev_track = track
+            prevprev_track, prev_track = prev_track, track
+            prevprev_n, prev_n = prev_n, p.n
 
         # Nicht ausgefilterte Originalpunkte, falls es sie gab, hinten anhaengen.
         return out
