@@ -442,10 +442,26 @@ def fit_linear_drift(points, T: int):
     return float(a), float(b), resid
 
 
+def refine_peak_parabolic(y: np.ndarray, i: int) -> float:
+    """Subsample-Position eines Maximums per Parabelinterpolation."""
+    if i <= 0 or i >= len(y) - 1:
+        return float(i)
+    ym1 = float(y[i - 1])
+    y0  = float(y[i])
+    yp1 = float(y[i + 1])
+    denom = ym1 - 2.0 * y0 + yp1
+    if abs(denom) < 1e-12:
+        return float(i)
+    delta = 0.5 * (ym1 - yp1) / denom
+    if abs(delta) > 1.0:
+        return float(i)
+    return float(i) + delta
+
+
 def estimate_period_by_autocorr(samples: np.ndarray,
                                   min_period: int,
                                   max_period: int,
-                                  yin_threshold: float = 0.15) -> int:
+                                  yin_threshold: float = 0.15) -> tuple:
     """YIN-style CMNDF period estimator (Nachbau EstimatePeriodByAutocorr).
 
     Finds the FIRST lag where the cumulative-mean normalised difference dips
@@ -454,7 +470,7 @@ def estimate_period_by_autocorr(samples: np.ndarray,
     """
     N = len(samples)
     if N < max_period * 2:
-        return min_period, {'cmndf_half': float('nan'), 'cmndf_T': float('nan'), 'cmndf_2T': float('nan')}
+        return float(min_period), {'cmndf_half': float('nan'), 'cmndf_T': float('nan'), 'cmndf_2T': float('nan')}
 
     # DC removal then Hann window (matches ChatGPT reference: seg -= mean before FFT).
     # Removing DC prevents the mean offset from inflating sub-harmonic ACF peaks.
@@ -492,10 +508,15 @@ def estimate_period_by_autocorr(samples: np.ndarray,
         elif in_valley:
             break
     if in_valley:
-        result = yin_lag
+        idx = int(yin_lag - min_period)
+        refined_idx = refine_peak_parabolic(ndp_arr, idx)
+        result = float(min_period) + refined_idx
     else:
-        # Fallback: penalised NDP
-        result = int(lags[np.argmax(ndp_arr * (1.0 - 0.10 * lags / max_period))])
+        # Fallback: penalised NDP fuer Auswahl, echtes NDP fuer Subsample-Refinement
+        weighted = ndp_arr * (1.0 - 0.10 * lags / max_period)
+        best_idx = int(np.argmax(weighted))
+        refined_idx = refine_peak_parabolic(ndp_arr, best_idx)
+        result = float(min_period) + refined_idx
 
     # Diagnostic: CMNDF values at T/2, T, 2T for the RETURNED period.
     def _cmndf_at(lag: int) -> float:
@@ -504,10 +525,11 @@ def estimate_period_by_autocorr(samples: np.ndarray,
         i = lag - min_period
         return float(cmndf[i]) if 0 <= i < len(cmndf) else float('nan')
 
+    result_i = int(round(result))
     diag = {
-        'cmndf_half': _cmndf_at(result // 2),
-        'cmndf_T':    _cmndf_at(result),
-        'cmndf_2T':   _cmndf_at(result * 2),
+        'cmndf_half': _cmndf_at(result_i // 2),
+        'cmndf_T':    _cmndf_at(result_i),
+        'cmndf_2T':   _cmndf_at(result_i * 2),
     }
     return result, diag
 
@@ -911,13 +933,13 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             if len(autocorr_region) >= max_p * 2:
                 t_est, diag = estimate_period_by_autocorr(
                     autocorr_region, min_p, max_p)
-                pa.T_int           = t_est
                 pa.T_float         = float(t_est)
+                pa.T_int           = int(round(pa.T_float))
                 pa.cmndf_at_T_half = diag['cmndf_half']
                 pa.cmndf_at_T      = diag['cmndf_T']
                 pa.cmndf_at_2T     = diag['cmndf_2T']
 
-        pa.n_total  = pa.loop_len // pa.T_int
+        pa.n_total  = int(pa.loop_len / pa.T_float)
 
         # Crossfade-Länge
         xfade_ms = desc.get("crossfade_len_ms", 0)
