@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v83-branch-fixes"
+TOOL_VERSION = "v84-adaptive-search"
 
 try:
     import matplotlib
@@ -50,6 +50,8 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v84: Adaptives Suchfenster: T<16 → 4T statt 2T; Kandidaten pro Periodenfenster
+#      gesichert; Plot zeigt T/2T/3T/4T-Linien; r_search_max im Detailpanel.
 # v83: Review-Fixes: Fold-Schwelle best_sc-0.01, MAX_PRUNE_GAP_N, Gap-Pruning
 #      nur bei echtem Sprung, Zoom-Button-Fix, ALLOW_SHORT_PERIOD=True.
 # v82: Lokales Folding entfernt: best_corr_vectorized(), unwrap_phase_points(),
@@ -141,6 +143,11 @@ BRANCH_GLOBAL_SMOOTH_PENALTY = 0.70 # Strafe fuer Knicke im globalen Astpfad
 BRANCH_GLOBAL_ALLOWED_FACTOR = 0.10  # erlaubter Knickfehler relativ zu T
 MAX_PRUNE_GAP_N = 50                 # max. n-Abstand zwischen Nachbarn beim Pruning (Perioden)
 
+# v84: Adaptives Suchfenster für kleine Perioden
+SMALL_T_THRESHOLD      = 16   # T_int < Schwelle → erweitertes Suchfenster
+SMALL_T_SEARCH_PERIODS = 4    # Anzahl Perioden im Suchfenster bei kleinem T
+DEFAULT_SEARCH_PERIODS = 2    # Standardfall
+
 
 # ─── Datenklassen ─────────────────────────────────────────────────────────────
 
@@ -205,6 +212,8 @@ class PipeAnalysis:
     lut_points_raw_count: int = 0  # Anzahl Punkte vor Pruning
     lut_score_p10: float = 0.0   # 10. Perzentil der LUT-Scores
     lut_fold_reason: str = ""    # Grund fuer Fold-Entscheidung
+    lut_r_search_max: int = 0    # r_max des Suchfensters in Samples
+    lut_search_periods: int = 2  # Anzahl Perioden im Suchfenster
     stable_at_n:   Optional[int] = None
     stabilized:    bool = False
     phase3_count:  int  = 0
@@ -447,6 +456,60 @@ def _local_maxima_indices(scores: np.ndarray, min_distance: int = 3) -> list:
     return selected
 
 
+def _compute_corr_scores(lw: np.ndarray, release_mono: np.ndarray,
+                          r_max: int, window_len: int):
+    """Berechnet den vollen Korrelations-Score-Vektor [0, r_max).
+    Rückgabe: (scores: np.ndarray, r_max_actual: int) oder (None, 0) bei Fehler."""
+    if r_max + window_len > len(release_mono):
+        r_max = max(1, len(release_mono) - window_len)
+    na = np.linalg.norm(lw)
+    if na < 1e-12 or r_max <= 0:
+        return None, 0
+    lw_n = lw / na
+    from numpy.lib.stride_tricks import as_strided
+    s = release_mono.strides[0]
+    rel_mat = as_strided(release_mono, shape=(r_max, window_len), strides=(s, s))
+    norms = np.linalg.norm(rel_mat, axis=1)
+    norms = np.where(norms < 1e-12, 1.0, norms)
+    return rel_mat.dot(lw_n) / norms, r_max
+
+
+def _scores_to_candidates(scores: np.ndarray,
+                           top_k: int = BRANCH_TOP_K,
+                           score_margin: float = BRANCH_SCORE_MARGIN,
+                           min_peak_distance: int = BRANCH_MIN_PEAK_DISTANCE) -> list:
+    """Extrahiert Top-K Kandidaten aus einem Score-Vektor."""
+    peak_idx = _local_maxima_indices(scores, min_peak_distance)
+    if not peak_idx:
+        peak_idx = [int(np.argmax(scores))]
+    best_score = float(scores[peak_idx[0]])
+    candidates = []
+    for idx in peak_idx:
+        sc = float(scores[idx])
+        if len(candidates) >= top_k:
+            break
+        if sc < best_score - score_margin and len(candidates) > 0:
+            continue
+        candidates.append((int(idx), sc))
+    if not candidates:
+        candidates.append((int(np.argmax(scores)), float(np.max(scores))))
+    return candidates
+
+
+def _corr_scores_and_candidates(lw: np.ndarray, release_mono: np.ndarray,
+                                 r_max: int, window_len: int,
+                                 top_k: int = BRANCH_TOP_K,
+                                 score_margin: float = BRANCH_SCORE_MARGIN,
+                                 min_peak_distance: int = BRANCH_MIN_PEAK_DISTANCE):
+    """Gibt (candidates, scores_array) zurück. scores_array wird für
+    _ensure_per_window_candidates benötigt."""
+    scores, r_actual = _compute_corr_scores(lw, release_mono, r_max, window_len)
+    if scores is None:
+        return [(0, 0.0)], np.zeros(1)
+    cands = _scores_to_candidates(scores, top_k, score_margin, min_peak_distance)
+    return cands, scores
+
+
 def corr_candidates_vectorized(lw: np.ndarray, release_mono: np.ndarray,
                                r_max: int, window_len: int,
                                top_k: int = BRANCH_TOP_K,
@@ -458,42 +521,34 @@ def corr_candidates_vectorized(lw: np.ndarray, release_mono: np.ndarray,
     Rückgabe: Liste von Tupeln (raw_r, score), nach Score absteigend.
     raw_r liegt im realen r-Suchraum [0, r_max). Keine T-Faltung.
     """
-    if r_max + window_len > len(release_mono):
-        r_max = max(1, len(release_mono) - window_len)
+    cands, _ = _corr_scores_and_candidates(
+        lw, release_mono, r_max, window_len, top_k, score_margin, min_peak_distance)
+    return cands
 
-    na = np.linalg.norm(lw)
-    if na < 1e-12 or r_max <= 0:
-        return [(0, 0.0)]
-    lw_n = lw / na
 
-    from numpy.lib.stride_tricks import as_strided
-    s = release_mono.strides[0]
-    rel_mat = as_strided(release_mono,
-                          shape=(r_max, window_len),
-                          strides=(s, s))
-
-    norms = np.linalg.norm(rel_mat, axis=1)
-    norms = np.where(norms < 1e-12, 1.0, norms)
-    scores = rel_mat.dot(lw_n) / norms
-
-    peak_idx = _local_maxima_indices(scores, min_peak_distance)
-    if not peak_idx:
-        peak_idx = [int(np.argmax(scores))]
-
-    best_score = float(scores[peak_idx[0]])
-    candidates = []
-    for idx in peak_idx:
-        sc = float(scores[idx])
-        if len(candidates) >= top_k:
-            break
-        if sc < best_score - score_margin and len(candidates) > 0:
+def _ensure_per_window_candidates(candidates: list, scores: np.ndarray,
+                                   T_int_d: int, search_periods: int) -> list:
+    """Stellt sicher dass aus jedem Periodenfenster [k*T, (k+1)*T) mindestens
+    ein Kandidat enthalten ist. Wichtig bei search_periods > 2 (kleines T),
+    damit nicht alle Top-K aus demselben Ast kommen.
+    candidates: Liste von (idx, score) aus corr_candidates_vectorized (downsampled).
+    Rückgabe: ergänzte und deduplizierte Liste."""
+    if T_int_d <= 0 or search_periods <= 2:
+        return candidates
+    by_raw = {int(r): float(sc) for r, sc in candidates}
+    for k in range(search_periods):
+        lo = k * T_int_d
+        hi = min((k + 1) * T_int_d, len(scores))
+        if lo >= hi:
             continue
-        candidates.append((int(idx), sc))
-
-    if not candidates:
-        idx = int(np.argmax(scores))
-        candidates.append((idx, float(scores[idx])))
-    return candidates
+        # Schon ein Kandidat aus diesem Fenster?
+        if any(lo <= r < hi for r in by_raw):
+            continue
+        # Besten lokalen Kandidaten aus diesem Fenster holen.
+        window_best = int(lo + np.argmax(scores[lo:hi]))
+        sc = float(scores[window_best])
+        by_raw[window_best] = sc
+    return sorted(by_raw.items(), key=lambda x: x[1], reverse=True)
 
 
 def closest_branch_copy(raw_r: int, predicted_r: float, T_int: int) -> float:
@@ -725,7 +780,10 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
     if window_len < 4 or loop_len < window_len or release_len < window_len:
         return [], meta
-    r_max = min(2 * T_int, release_len - window_len)
+    search_periods = SMALL_T_SEARCH_PERIODS if T_int < SMALL_T_THRESHOLD else DEFAULT_SEARCH_PERIODS
+    r_max = min(search_periods * T_int, release_len - window_len)
+    meta["r_search_max"]    = r_max
+    meta["search_periods"]  = search_periods
     if r_max == 0 or int(loop_len / T_float) < 4:
         return [], meta
 
@@ -778,11 +836,10 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
             return LutPoint(n=n, loop_pos=cs, best_r=0, best_score=-2.0, phase=phase)
         lw = loop_seg[cs_d:cs_d + window_len_d]
 
-        candidates = corr_candidates_vectorized(
-            lw, release_ds, r_max_d, window_len_d,
-            top_k=BRANCH_TOP_K,
-            score_margin=BRANCH_SCORE_MARGIN,
-            min_peak_distance=max(1, BRANCH_MIN_PEAK_DISTANCE // ds))
+        raw_cands_d, _scores_d = _corr_scores_and_candidates(
+            lw, release_ds, r_max_d, window_len_d)
+        candidates = _ensure_per_window_candidates(
+            raw_cands_d, _scores_d, max(1, T_int // ds), search_periods)
 
         # Downsampling zurück auf echte Sample-Offsets.
         candidates = [(int(r_d * ds), float(sc)) for r_d, sc in candidates]
@@ -1532,6 +1589,8 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.lut_fold_reason = str(lut_meta.get("fold_reason", ""))
         pruned_count = int(lut_meta.get("pruned_count", 0) or 0)
         pa.lut_points_raw_count = len(pa.lut_points) + pruned_count
+        pa.lut_r_search_max  = int(lut_meta.get("r_search_max",  2 * pa.T_int))
+        pa.lut_search_periods = int(lut_meta.get("search_periods", 2))
 
         if not pa.lut_points:
             pa.error = "Keine LUT-Punkte"
@@ -2688,9 +2747,18 @@ class CorrLandscapeWindow:
                        edgecolors="black", linewidths=0.6,
                        label="LUT best_r")
 
-        # T-Linie
-        ax.axhline(T, color="cyan", linewidth=0.8, linestyle="--",
-                    alpha=0.7, label=f"T={T}")
+        # Perioden-Linien T, 2T, 3T, 4T je nach Suchfenster
+        sp = getattr(self.pa, "lut_search_periods", 2)
+        r_sm = getattr(self.pa, "lut_r_search_max", 2 * T)
+        for k in range(1, sp + 1):
+            r_line = k * T
+            if r_line > r_sm + T:
+                break
+            ax.axhline(r_line, color="cyan" if k == 1 else "deepskyblue",
+                        linewidth=0.8 if k == 1 else 0.5,
+                        linestyle="--" if k == 1 else ":",
+                        alpha=0.7 if k == 1 else 0.45,
+                        label=f"{k}T={r_line}")
 
         # LUT-Zoom-Grenzen berechnen
         full_xlim = (float(ns[0]),  float(ns[-1]))  if len(ns)      else None
@@ -3303,7 +3371,11 @@ class LUTAnalyzerApp(tk.Tk):
                 f"Drift: {pa.drift_per_period:.3f} Samples/Periode  Residuum={pa.drift_residual:.2f}  max_gap_n={pa.max_interp_gap_n}",
                 f"Amplitude Attack/Release: {pa.amplitude_ratio:.1f}×",
                 f"LUT-Punkte: {len(pa.lut_points)}  (Phase-3-Gaps: {pa.phase3_count}, dense_step={pa.dense_step_used})",
-                f"LUT-Raum: {'[0,T) gefaltet' if getattr(pa, 'lut_folded', True) else '[0,2T) ungefaltet'}  Fold-Grund: {getattr(pa, 'lut_fold_reason', '')}",
+                ("LUT-Raum: [0,T) gefaltet" if getattr(pa, "lut_folded", True)
+                 else f"LUT-Raum: [0,{getattr(pa,'lut_r_search_max',2*pa.T_int)}) ungefaltet")
+                + f"  search_periods={getattr(pa,'lut_search_periods',2)}"
+                + f"  r_max={getattr(pa,'lut_r_search_max',2*pa.T_int)}"
+                + f"  Fold: {getattr(pa,'lut_fold_reason','')}",
                 f"Punkte: {getattr(pa, 'lut_points_raw_count', len(pa.lut_points))} vor Pruning -> {len(pa.lut_points)} nach Pruning  (entfernt: {getattr(pa, 'lut_points_raw_count', len(pa.lut_points)) - len(pa.lut_points)})",
                 f"score_p10={getattr(pa, 'lut_score_p10', 0.0):.3f}  score_min={pa.score_min:.3f}  score_mean={pa.score_mean:.3f}",
                 f"Legacy-Fallback: {'ja (' + pa.legacy_reason + ')' if pa.legacy_fallback else 'nein'}",
@@ -3400,11 +3472,18 @@ class LUTAnalyzerApp(tk.Tk):
                            color=col, marker="D", s=36, zorder=3,
                            label=f"{phase} (ungefaltet)")
 
-        ax.axhline(T, color=C_BAD, linewidth=0.7,
-                    linestyle="--", alpha=0.6, label=f"T={T}")
+        r_search_max   = getattr(pa, "lut_r_search_max",  2 * T)
+        search_periods = getattr(pa, "lut_search_periods", 2)
         ax.axhline(0, color=C_BORDER, linewidth=0.5)
-        if not lut_folded:
-            ax.axhline(2 * T, color=C_DRIFT, linewidth=0.5, linestyle=":", alpha=0.5)
+        for k in range(1, search_periods + 1):
+            r_line = k * T
+            if r_line > r_search_max + T:
+                break
+            style = "--" if k == 1 else ":"
+            color = C_BAD if k == 1 else C_DRIFT
+            alpha = 0.6 if k == 1 else 0.4
+            ax.axhline(r_line, color=color, linewidth=0.7,
+                        linestyle=style, alpha=alpha, label=f"{k}T={r_line}")
 
         if pa.stable_at_n:
             label = f"Drift n={pa.stable_at_n}" if pa.drift_mode else f"stabil n={pa.stable_at_n}"
@@ -3416,8 +3495,8 @@ class LUTAnalyzerApp(tk.Tk):
             ax.set_ylabel("best_r [0,T)", color=C_TEXT2)
             ax.set_ylim(-5, T + 5)
         else:
-            ax.set_ylabel("best_r [0,2T)", color=C_TEXT2)
-            ax.set_ylim(-5, 2 * T + 5)
+            ax.set_ylabel(f"best_r [0,{r_search_max})", color=C_TEXT2)
+            ax.set_ylim(-5, r_search_max + 5)
         title = "LUT-Stuetzpunkte + " + ("GO-Kreisinterpolation" if lut_folded else "Lineare Interpolation")
         if pa.drift_mode:
             title += f"  (Drift {pa.drift_per_period:.3f} smp/Periode)"
