@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v89-kink-fix"
+TOOL_VERSION = "v90-circular-dp"
 
 try:
     import matplotlib
@@ -50,6 +50,9 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v90: _global_branch_path zirkulaerer Modus fuer search_periods==2: Kandidaten
+#      auf [0,T) gefaltet, Distanzen zirkulaer. T-Spruenge (r→r+kT) kostenlos.
+#      Diagnose: Knick war search_periods==2-Pfad der T-Sprung als err=T bestrafte.
 # v89: Kink-Penalty-Fix: max_slope_change war T_int/allowed/dn_cur → kollabiert
 #      zu smooth_pen. Jetzt feste Referenz T_int/100 Samples/Periode. Damit misst
 #      kink_pen wirklich Steigungsaenderung (2. Ableitung). HARD_KINK_PENALTY 8→20.
@@ -976,6 +979,33 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
         allowed = max(2.0, T_int * BRANCH_GLOBAL_ALLOWED_FACTOR)
 
+        # v90: Zirkulaerer Modus fuer normale Pfeifen (search_periods == 2).
+        # In [0,T)-Kreisraum sind T-Kopien aequivalent: r und r+T haben
+        # zirkulaere Distanz 0. Kein Penalty fuer T-Spruenge — sie sind kostenlos.
+        # Bei search_periods > 2 (small-T): linearer [0,nT)-Modus bleibt.
+        use_circular = (search_periods == 2)
+
+        if use_circular:
+            # Kandidaten auf [0,T) falten — T-Kopien deduplizieren, besten Score behalten.
+            new_cand_lists = []
+            for cands in cand_lists:
+                by_r = {}
+                for r, sc in cands:
+                    r_f = int(r) % T_int
+                    if r_f not in by_r or sc > by_r[r_f]:
+                        by_r[r_f] = sc
+                new_cand_lists.append(
+                    sorted(by_r.items(), key=lambda x: x[1], reverse=True)[:BRANCH_TOP_K])
+            cand_lists = new_cand_lists
+
+        def _step_err(tr_cur, pred, tr_prev):
+            """Positionsfehler und Steigung — zirkulaer oder linear je nach Modus."""
+            if use_circular:
+                # Kuerzester Weg auf dem Kreis [0,T) vom Vorhersagewert zur aktuellen Pos.
+                err = shortest_circular_delta(pred % T_int, tr_cur, T_int)
+                return err
+            return tr_cur - pred
+
         # Anker fuer small-T: robuster Median der ersten Dense-Punkte im echten Suchraum.
         # Verhindert, dass Anchor-Penalty gegen echten Drift bei T>=16 wirkt.
         anchor_r      = None
@@ -988,10 +1018,6 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 max_abs_drift = max(float(T_int) * 0.75, 8.0)
 
         # Initialzustand: Kandidatenpaar (0,1).
-        # v82: Kein closest_branch_copy mehr — Kandidaten bleiben im echten
-        # [0,2T)-Raum. [0,2T) ist ein linearer, kein zirkulärer Suchraum:
-        # Ein Pfad der von knapp unter 2T nach nahe 0 springt wird als
-        # großer Knick gewertet und bestraft. Das ist so gewollt.
         states = {}
         backrefs = []
         for i0, (raw0, sc0) in enumerate(cand_lists[0]):
@@ -999,9 +1025,12 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
             for i1, (raw1, sc1) in enumerate(cand_lists[1]):
                 tr1 = float(raw1)
                 dn01 = max(1, pts[1].n - pts[0].n)
-                slope = (tr1 - tr0) / dn01
-                start_pen = 0.0
-                cost = -float(sc0) - float(sc1) + start_pen
+                # Anfangssteigung zirkulaer oder linear.
+                if use_circular:
+                    slope = shortest_circular_delta(tr0, tr1, T_int) / dn01
+                else:
+                    slope = (tr1 - tr0) / dn01
+                cost = -float(sc0) - float(sc1)
                 states[(i0, i1)] = (cost, tr0, tr1, slope, None)
         backrefs.append({})
 
@@ -1019,19 +1048,18 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 pred = tr_prev1 + slope_prev * dn_cur
                 for i_cur, (raw_cur, sc_cur) in enumerate(cand_lists[pi]):
                     tr_cur = float(raw_cur)
-                    err = tr_cur - pred
+                    err = _step_err(tr_cur, pred, tr_prev1)
                     smooth_pen = BRANCH_GLOBAL_SMOOTH_PENALTY * (err / allowed) ** 2
 
-                    # v88/v89: Kink-Penalty — misst echte Steigungsaenderung (2. Ableitung).
-                    # slope_change = Δslope in Samples/Periode.
-                    # max_slope_change ist eine FESTE Referenz (T_int-skaliert), NICHT
-                    # durch dn_cur geteilt — sonst gilt slope_change*dn_cur = err und
-                    # kink_pen kollabiert algebraisch zu smooth_pen (selbe Information).
-                    slope_cur_tentative = (tr_cur - tr_prev1) / dn_cur
+                    # Kink-Penalty: echte Steigungsaenderung (2. Ableitung).
+                    # Im zirkulaeren Modus ist slope_cur der zirkulaere Schritt/dn_cur.
+                    if use_circular:
+                        slope_cur_tentative = shortest_circular_delta(tr_prev1, tr_cur, T_int) / dn_cur
+                    else:
+                        slope_cur_tentative = (tr_cur - tr_prev1) / dn_cur
                     slope_change = slope_cur_tentative - slope_prev
                     max_slope_change = max(0.05, float(T_int) / BRANCH_KINK_REF_DIVISOR)
                     kink_pen = BRANCH_KINK_PENALTY * (slope_change / max_slope_change) ** 2
-                    # Harte Sperre: Fehler > HARD_KINK_FACTOR * allowed → Zusatzstrafe
                     hard_kink_pen = (BRANCH_HARD_KINK_PENALTY
                                      if abs(err) > BRANCH_HARD_KINK_FACTOR * allowed
                                      else 0.0)
@@ -1059,7 +1087,10 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                     cost = cost_prev - float(sc_cur) + smooth_pen + kink_pen + hard_kink_pen + branch_switch_pen + anchor_pen + jump_pen
                     key = (i_prev1, i_cur)
                     if key not in new_states or cost < new_states[key][0]:
-                        slope_cur = (tr_cur - tr_prev1) / dn_cur
+                        if use_circular:
+                            slope_cur = shortest_circular_delta(tr_prev1, tr_cur, T_int) / dn_cur
+                        else:
+                            slope_cur = (tr_cur - tr_prev1) / dn_cur
                         new_states[key] = (cost, tr_prev1, tr_cur, slope_cur, (i_prev2, i_prev1))
                         back[key] = (i_prev2, i_prev1)
             if not new_states:
