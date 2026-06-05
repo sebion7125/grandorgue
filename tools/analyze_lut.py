@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v84-adaptive-search"
+TOOL_VERSION = "v85-search-consistent"
 
 try:
     import matplotlib
@@ -50,6 +50,8 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v85: CorrLandschaft+Crossfade-Simulation auf pa.lut_r_search_max umgestellt;
+#      Fensterkandidaten in _global_branch_path nach Top-K-Schnitt erneut gesichert.
 # v84: Adaptives Suchfenster: T<16 → 4T statt 2T; Kandidaten pro Periodenfenster
 #      gesichert; Plot zeigt T/2T/3T/4T-Linien; r_search_max im Detailpanel.
 # v83: Review-Fixes: Fold-Schwelle best_sc-0.01, MAX_PRUNE_GAP_N, Gap-Pruning
@@ -929,6 +931,20 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 if raw not in by_raw or sc > by_raw[raw]:
                     by_raw[raw] = sc
             cands = sorted(by_raw.items(), key=lambda it: it[1], reverse=True)[:BRANCH_TOP_K]
+            # Fensterkandidaten nach Top-K-Schnitt erneut garantieren:
+            # Fuer jedes Periodenfenster [k*T, (k+1)*T) einen Kandidaten sichern,
+            # falls der Top-K-Schnitt alle Vertreter dieses Fensters entfernt hat.
+            if search_periods > 2:
+                top_k_set = dict(cands)
+                for k in range(search_periods):
+                    lo, hi = k * T_int, (k + 1) * T_int
+                    if not any(lo <= r < hi for r in top_k_set):
+                        window_best = max(
+                            ((r, sc) for r, sc in by_raw.items() if lo <= r < hi),
+                            key=lambda x: x[1], default=None)
+                        if window_best:
+                            top_k_set[window_best[0]] = window_best[1]
+                cands = sorted(top_k_set.items(), key=lambda x: x[1], reverse=True)
             cand_lists.append(cands)
 
         allowed = max(2.0, T_int * BRANCH_GLOBAL_ALLOWED_FACTOR)
@@ -2170,7 +2186,8 @@ class CrossfadeSimWindow:
             T   = pa.T_int
             ds  = min(4, T // 500) if T >= 500 else 1
             window_len = pa.crossfade_len_samples if pa.crossfade_len_samples >= 4 else 2 * T
-            r_max = min(2 * T, len(rel) - window_len)
+            r_search_max = getattr(pa, "lut_r_search_max", 0) or (2 * T)
+            r_max = min(r_search_max, len(rel) - window_len)
             if r_max <= 0:
                 return
 
@@ -2599,11 +2616,12 @@ class CorrLandscapeWindow:
             T_f     = pa.T_float
             ds      = min(4, T // 500) if T >= 500 else 1
             # window_len: Crossfade-Laenge (wie in GO: min(crossfade_len, 2T))
-            # r_max:      Suchbereich [0, 2T)
+            # r_max:      Suchbereich aus pa.lut_r_search_max (adaptiv: 2T oder 4T)
             window_len = min(pa.crossfade_len_samples, 2 * T)
             if window_len < 4:
                 window_len = 2 * T
-            r_max      = 2 * T
+            r_search_max = getattr(pa, "lut_r_search_max", 0) or (2 * T)
+            r_max        = r_search_max
             # Kuerzen wenn Release zu kurz
             available  = len(rel_mono) - window_len
             if available <= 0:
