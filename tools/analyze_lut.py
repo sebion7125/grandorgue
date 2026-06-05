@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v88-kink-penalty"
+TOOL_VERSION = "v89-kink-fix"
 
 try:
     import matplotlib
@@ -50,6 +50,9 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v89: Kink-Penalty-Fix: max_slope_change war T_int/allowed/dn_cur → kollabiert
+#      zu smooth_pen. Jetzt feste Referenz T_int/100 Samples/Periode. Damit misst
+#      kink_pen wirklich Steigungsaenderung (2. Ableitung). HARD_KINK_PENALTY 8→20.
 # v88: Kink-/Beschleunigungsstrafe in _global_branch_path(): kink_pen bestraft
 #      Steigungsaenderung (quadratisch), hard_kink_pen addiert Pauschalstrafe bei
 #      err > 2*allowed. Linearer Drift bleibt billig; Astwechsel mit Knick teuer.
@@ -160,10 +163,13 @@ BRANCH_SWITCH_PENALTY  = 0.50  # Kosten pro Periodenfenster-Wechsel (branch_id-D
 BRANCH_ANCHOR_PENALTY  = 0.40  # Kosten fuer Abweichung vom Start-Ast-Anker
 BRANCH_JUMP_PENALTY    = 0.30  # Kosten fuer harte Spruenge zwischen aufeinanderfolgenden Punkten
 
-# v88: Kink-/Beschleunigungsstrafe — allgemein, nicht small-T-spezifisch
-BRANCH_KINK_PENALTY      = 3.0   # Strafe fuer Aenderung der Steigung (quadratisch)
+# v88/v89: Kink-/Beschleunigungsstrafe — allgemein, nicht small-T-spezifisch
+# Referenz: T_int / 100.0 Samples/Periode als "natuerliche" Steigungsaenderung.
+# NICHT durch dn_cur teilen — sonst kollabiert kink_pen algebraisch zu smooth_pen.
+BRANCH_KINK_PENALTY      = 4.0   # Strafe fuer echte Steigungsaenderung (Samples/Periode)
+BRANCH_KINK_REF_DIVISOR  = 100.0 # max_slope_change = T_int / REF_DIVISOR
 BRANCH_HARD_KINK_FACTOR  = 2.0   # err > Faktor*allowed → harter Knick
-BRANCH_HARD_KINK_PENALTY = 8.0   # additive Strafe bei hartem Knick
+BRANCH_HARD_KINK_PENALTY = 20.0  # additive Strafe bei hartem Knick (gross genug gg. Score)
 
 # v84: Adaptives Suchfenster für kleine Perioden
 SMALL_T_THRESHOLD      = 16   # T_int < Schwelle → erweitertes Suchfenster
@@ -1016,12 +1022,14 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                     err = tr_cur - pred
                     smooth_pen = BRANCH_GLOBAL_SMOOTH_PENALTY * (err / allowed) ** 2
 
-                    # v88: Kink-Penalty — bestraft Aenderung der Steigung.
-                    # Linearer Drift hat konstante Steigung → geringe Kink-Kosten.
-                    # Harter Astwechsel → Steigungsaenderung hoch → Kink-Kosten hoch.
+                    # v88/v89: Kink-Penalty — misst echte Steigungsaenderung (2. Ableitung).
+                    # slope_change = Δslope in Samples/Periode.
+                    # max_slope_change ist eine FESTE Referenz (T_int-skaliert), NICHT
+                    # durch dn_cur geteilt — sonst gilt slope_change*dn_cur = err und
+                    # kink_pen kollabiert algebraisch zu smooth_pen (selbe Information).
                     slope_cur_tentative = (tr_cur - tr_prev1) / dn_cur
                     slope_change = slope_cur_tentative - slope_prev
-                    max_slope_change = max(allowed / max(1.0, float(dn_cur)), 1e-9)
+                    max_slope_change = max(0.05, float(T_int) / BRANCH_KINK_REF_DIVISOR)
                     kink_pen = BRANCH_KINK_PENALTY * (slope_change / max_slope_change) ** 2
                     # Harte Sperre: Fehler > HARD_KINK_FACTOR * allowed → Zusatzstrafe
                     hard_kink_pen = (BRANCH_HARD_KINK_PENALTY
