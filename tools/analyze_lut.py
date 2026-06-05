@@ -2577,10 +2577,6 @@ class LUTAnalyzerApp(tk.Tk):
             tk.messagebox.showinfo("Korrelationslandschaft",
                                    f"Keine Daten: {pa.error}", parent=self)
             return
-        if pa.legacy_fallback and pa.legacy_reason == "short_period":
-            tk.messagebox.showinfo("Korrelationslandschaft",
-                                   "Periode zu kurz (T<16) — kein Fenster möglich.", parent=self)
-            return
         CorrLandscapeWindow(self, pa)
 
     def _on_report_select(self, event):
