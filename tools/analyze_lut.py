@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v85-search-consistent"
+TOOL_VERSION = "v86-small-t-cost"
 
 try:
     import matplotlib
@@ -50,6 +50,9 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v86: Small-T-only Kostenterme in _global_branch_path (search_periods > 2):
+#      BRANCH_SWITCH_PENALTY (Fenster-Wechsel), BRANCH_ANCHOR_PENALTY (Pseudo-Drift),
+#      BRANCH_JUMP_PENALTY (Endpunkt-Ruecksprung). Fuer T>=16 unveraendert.
 # v85: CorrLandschaft+Crossfade-Simulation auf pa.lut_r_search_max umgestellt;
 #      Fensterkandidaten in _global_branch_path nach Top-K-Schnitt erneut gesichert.
 # v84: Adaptives Suchfenster: T<16 → 4T statt 2T; Kandidaten pro Periodenfenster
@@ -144,6 +147,11 @@ BRANCH_HARD_LOCK_FACTOR  = 0.75   # Kandidaten in dieser Naehe zum Predicted-Ast
 BRANCH_GLOBAL_SMOOTH_PENALTY = 0.70 # Strafe fuer Knicke im globalen Astpfad
 BRANCH_GLOBAL_ALLOWED_FACTOR = 0.10  # erlaubter Knickfehler relativ zu T
 MAX_PRUNE_GAP_N = 50                 # max. n-Abstand zwischen Nachbarn beim Pruning (Perioden)
+
+# v86: Small-T-only Kostenterme (nur aktiv wenn search_periods > 2)
+BRANCH_SWITCH_PENALTY  = 0.50  # Kosten pro Periodenfenster-Wechsel (branch_id-Diff)
+BRANCH_ANCHOR_PENALTY  = 0.40  # Kosten fuer Abweichung vom Start-Ast-Anker
+BRANCH_JUMP_PENALTY    = 0.30  # Kosten fuer harte Spruenge zwischen aufeinanderfolgenden Punkten
 
 # v84: Adaptives Suchfenster für kleine Perioden
 SMALL_T_THRESHOLD      = 16   # T_int < Schwelle → erweitertes Suchfenster
@@ -949,6 +957,17 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
         allowed = max(2.0, T_int * BRANCH_GLOBAL_ALLOWED_FACTOR)
 
+        # Anker fuer small-T: robuster Median der ersten Dense-Punkte im echten Suchraum.
+        # Verhindert, dass Anchor-Penalty gegen echten Drift bei T>=16 wirkt.
+        anchor_r      = None
+        max_abs_drift = None
+        if search_periods > 2:
+            dense_pts_for_anchor = [p for p in pts if getattr(p, "phase", "") == "dense"
+                                    and p.best_score > -1.5][:8]
+            if dense_pts_for_anchor:
+                anchor_r      = float(np.median([float(p.best_r) for p in dense_pts_for_anchor]))
+                max_abs_drift = max(float(T_int) * 0.75, 8.0)
+
         # Initialzustand: Kandidatenpaar (0,1).
         # v82: Kein closest_branch_copy mehr — Kandidaten bleiben im echten
         # [0,2T)-Raum. [0,2T) ist ein linearer, kein zirkulärer Suchraum:
@@ -983,7 +1002,28 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                     tr_cur = float(raw_cur)
                     err = tr_cur - pred
                     smooth_pen = BRANCH_GLOBAL_SMOOTH_PENALTY * (err / allowed) ** 2
-                    cost = cost_prev - float(sc_cur) + smooth_pen
+
+                    if search_periods > 2:
+                        # Fenster-Wechsel-Strafe
+                        bid_prev = int(tr_prev1 // T_int)
+                        bid_cur  = int(tr_cur   // T_int)
+                        branch_switch_pen = BRANCH_SWITCH_PENALTY * abs(bid_cur - bid_prev)
+
+                        # Anker-Strafe gegen langsamen Pseudo-Drift ueber mehrere Fenster
+                        anchor_pen = (BRANCH_ANCHOR_PENALTY
+                                      * (abs(tr_cur - anchor_r) / max_abs_drift) ** 2
+                                      if anchor_r is not None else 0.0)
+
+                        # Sprung-Strafe gegen harte Endpunkt-Rueckspruenge
+                        jump = abs(tr_cur - tr_prev1)
+                        max_jump = max(2.0, T_int / 4.0)
+                        jump_pen = BRANCH_JUMP_PENALTY * (jump / max_jump) ** 2
+                    else:
+                        branch_switch_pen = 0.0
+                        anchor_pen        = 0.0
+                        jump_pen          = 0.0
+
+                    cost = cost_prev - float(sc_cur) + smooth_pen + branch_switch_pen + anchor_pen + jump_pen
                     key = (i_prev1, i_cur)
                     if key not in new_states or cost < new_states[key][0]:
                         slope_cur = (tr_cur - tr_prev1) / dn_cur
