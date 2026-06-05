@@ -563,7 +563,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     if window_len < 4 or loop_len < window_len or release_len < window_len:
         return [], meta
     r_max = min(2 * T_int, release_len - window_len)
-    if r_max == 0 or (loop_len // T_int) < 4:
+    if r_max == 0 or (loop_len // T_float) < 4:
         return [], meta
 
     ds           = (min(4, T_int // 500) if T_int >= 500 else 1) if downsampling else 1
@@ -918,7 +918,7 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         # aber ein Mixtur-Rank mit geradem HN kann ungerade Obertöne enthalten, die
         # die echte Wellenformperiode auf 2*T_smpl verdoppeln. Pruefen mit Bereich
         # [T_smpl, 3*T_smpl] — YIN erkennt ob T_smpl oder 2*T_smpl korrekt ist.
-        T_smpl = pa.T_int
+        T_smpl = int(round(pa.T_float))
         if corr_is_octave_stop(pa.harmonic_number):
             min_p = T_smpl
             max_p = min(T_smpl * 3, sr // 20)
