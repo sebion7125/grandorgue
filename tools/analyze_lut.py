@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v94-unwrapped-track"
+TOOL_VERSION = "v95-status-text"
 
 try:
     import matplotlib
@@ -50,6 +50,9 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v95: Erklaerungstext pro Release (status_text Property). Weniger falsche Warnungen:
+#      score_p10 statt score_min, phase3_count-Bedingung entfernt, stable_at_n>60→>100.
+#      Status-Spalte auf 400px verbreitert, linksbündig.
 # v94: v90-v93 revertiert. closest_branch_copy in _global_branch_path wiederhergestellt.
 #      Natuerliche T-Uebergaenge (Drift durch T-Grenze) kostenlos; artificielle Spruenge
 #      werden durch smooth_pen+kink_pen bestraft. Stabiles Verhalten fuer alle Pfeifen.
@@ -296,16 +299,55 @@ class PipeAnalysis:
         scores = [p.best_score for p in self.lut_points if p.phase in ("sparse","gap")]
         if scores and min(scores) < SCORE_BAD:
             return 2
-        # stable_at_n > 60 nur für das kürzeste Release prüfen —
-        # das ist das Release mit min_key_press_ms=0.
-        # Längere Releases fangen erst spät an, stable_at_n ist dann normal.
-        if self.is_shortest_release and self.stable_at_n is not None and self.stable_at_n > 60:
+        # Warn-Kriterien: score_p10 statt score_min (robuster gegen Einzelausreisser).
+        # phase3_count entfernt — kein sinnvoller Qualitaetsindikator nach v94.
+        score_p10 = getattr(self, "lut_score_p10", 0.0)
+        if score_p10 > 0 and score_p10 < SCORE_WARN:
             return 1
-        if scores and min(scores) < SCORE_WARN:
+        elif scores and min(scores) < SCORE_WARN:
             return 1
-        if self.phase3_count > 3:
+        # Spaete Stabilisierung nur fuer kuerzestes Release und erst ab n>100 warnen.
+        if self.is_shortest_release and self.stable_at_n is not None and self.stable_at_n > 100:
             return 1
         return 0
+
+    @property
+    def status_text(self) -> str:
+        """Erklaerungstext fuer Status — eine Zeile, warum Warn/Error/Legacy."""
+        if self.error:
+            return f"❌ {self.error[:60]}"
+        if self.legacy_fallback:
+            reason_map = {
+                "drift":        f"⚡ Legacy Drift — {self.drift_per_period:.4f} smp/Prd",
+                "instabil":     "⚡ Legacy — Korrelation instabil",
+                "short_period": "⚡ Legacy — Periode T<16 (Grenzfall)",
+            }
+            if self.legacy_reason in reason_map:
+                return reason_map[self.legacy_reason]
+            if self.legacy_reason.startswith("bad_lut:"):
+                detail = self.legacy_reason.split(":", 1)[1]
+                return f"⚡ Legacy — LUT schwach: {detail}"
+            return f"⚡ Legacy ({self.legacy_reason})"
+        if not self.stabilized:
+            return f"❌ Nicht stabilisiert  n_total={self.n_total}"
+        # Warn-Gruende sammeln
+        warn_parts = []
+        score_p10 = getattr(self, "lut_score_p10", 0.0)
+        scores = [p.best_score for p in self.lut_points if p.phase in ("sparse","gap")]
+        if score_p10 > 0 and score_p10 < SCORE_WARN:
+            warn_parts.append(f"score_p10={score_p10:.2f}<{SCORE_WARN}")
+        elif scores and min(scores) < SCORE_WARN:
+            warn_parts.append(f"score_min={min(scores):.2f}<{SCORE_WARN}")
+        if self.is_shortest_release and self.stable_at_n and self.stable_at_n > 100:
+            warn_parts.append(f"stabil erst n={self.stable_at_n}")
+        # OK-Zeile
+        n_pts = len(self.lut_points)
+        p10_str = f"  p10={score_p10:.2f}" if score_p10 > 0 else ""
+        drift_str = f"  drift={self.drift_per_period:.3f}" if abs(self.drift_per_period) > 0.001 else ""
+        base = f"n={self.stable_at_n}  {n_pts}Pkt{p10_str}{drift_str}"
+        if warn_parts:
+            return "⚠ " + "  ".join(warn_parts) + "  " + base
+        return "✓ " + base
 
     @property
     def severity_label(self) -> str:
@@ -3088,9 +3130,9 @@ class LUTAnalyzerApp(tk.Tk):
         self._tree = ttk.Treeview(tree_frame, columns=("info",),
                                    show="tree headings", selectmode="browse")
         self._tree.heading("#0",    text="Eintrag")
-        self._tree.heading("info",  text="Status")
+        self._tree.heading("info",  text="Status / Erklärung")
         self._tree.column("#0",     width=220)
-        self._tree.column("info",   width=120, anchor=tk.CENTER)
+        self._tree.column("info",   width=400, anchor=tk.W)
         vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL,
                              command=self._tree.yview)
         self._tree.configure(yscrollcommand=vsb.set)
@@ -3369,9 +3411,8 @@ class LUTAnalyzerApp(tk.Tk):
         if pipe_item is None:
             return
         colors = [C_OK, C_WARN, C_BAD]
-        status = pa.error or (f"n={pa.stable_at_n}" if pa.stabilized else "nicht stabil")
         self._tree.item(pipe_item,
-                        values=(pa.severity_label + " " + status,),
+                        values=(pa.status_text,),
                         tags=("pipe", key))
         self._tree.tag_configure(key, foreground=colors[pa.severity])
 
