@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v82-no-local-fold"
+TOOL_VERSION = "v83-branch-fixes"
 
 try:
     import matplotlib
@@ -50,6 +50,8 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v83: Review-Fixes: Fold-Schwelle best_sc-0.01, MAX_PRUNE_GAP_N, Gap-Pruning
+#      nur bei echtem Sprung, Zoom-Button-Fix, ALLOW_SHORT_PERIOD=True.
 # v82: Lokales Folding entfernt: best_corr_vectorized(), unwrap_phase_points(),
 #      fit_linear_drift() und FOLD_*-Konstanten geloescht (toter Code).
 #      Gap-Detection verwendet track_r statt best_r % T_int.
