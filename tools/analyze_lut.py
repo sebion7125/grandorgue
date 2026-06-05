@@ -696,7 +696,6 @@ def estimate_period_by_autocorr(samples: np.ndarray,
                 near_integer_multiple = nearest >= 2 and abs(ratio - nearest) < 0.18
             if much_deeper and (much_better_ndp or near_integer_multiple):
                 chosen_c, chosen_lag, chosen_ndp = c, lag, ndp
-                break
 
         abs_idx = int(chosen_lag - 1)
         refined_abs_idx = refine_peak_parabolic(ndp_all, abs_idx)
@@ -1283,50 +1282,9 @@ def parse_organ_file(organ_path: str) -> list:
 
             # Pfad auflösen
             def resolve(rel_path):
-                """
-                Strenger Resolver. Wichtig bei Samplesets mit mehreren Dateien
-                gleichen Namens, z.B. mehreren Mixturen mit 082-A#.wav.
-
-                Reihenfolge:
-                1. direkter relativer Pfad zur .organ-Datei
-                2. eindeutiger Treffer, dessen kompletter normalisierter Pfad
-                   auf rel_path endet
-                3. eindeutiger Treffer auf die letzten 3 Pfadkomponenten
-
-                Wenn der Fallback mehrdeutig ist, wird NICHT stillschweigend die
-                erste Datei genommen. Dann soll die Pfeife als nicht auflösbar
-                erscheinen, statt mit der falschen Mixtur analysiert zu werden.
-                """
                 rel_norm = rel_path.replace("\\", "/").lstrip("/")
                 full = os.path.normpath(os.path.join(organ_dir, rel_norm.replace("/", os.sep)))
-                if os.path.isfile(full):
-                    return full
-
-                parts = rel_norm.split("/")
-                basename = parts[-1]
-                exact = []
-                tail3 = []
-                tail = "/".join(parts[-3:]) if len(parts) >= 3 else basename
-
-                for root, dirs, files in os.walk(organ_dir):
-                    if basename not in files:
-                        continue
-                    candidate = os.path.join(root, basename)
-                    cand_norm = candidate.replace("\\", "/")
-                    if cand_norm.endswith(rel_norm):
-                        exact.append(candidate)
-                    elif cand_norm.endswith(tail):
-                        tail3.append(candidate)
-
-                if len(exact) == 1:
-                    return exact[0]
-                if len(exact) > 1:
-                    return None
-                if len(tail3) == 1:
-                    return tail3[0]
-                if len(tail3) > 1:
-                    return None
-                return None
+                return full if os.path.isfile(full) else None
 
             atk_path = resolve(attack_rel)
             if not atk_path:
@@ -3607,7 +3565,7 @@ def export_csv_batch(organ_path: str, output_path: str = None):
 
 
 
-def test_wav_period(wav_path: str, harmonic_number: int = 24):
+def test_wav_period(wav_path: str, harmonic_number: int = 8):
     """CLI-Selbsttest fuer die Periodenerkennung an einer einzelnen WAV.
 
     Nutzung:
@@ -3637,6 +3595,9 @@ def test_wav_period(wav_path: str, harmonic_number: int = 24):
     loop_len = loop_end - loop_start + 1
     loop_mid = loop_start + loop_len // 2
     autocorr_region = atk_mono[loop_mid:loop_mid + max_p * 8]
+    if len(autocorr_region) < max_p * 2:
+        print(f"FEHLER: autocorr_region zu kurz ({len(autocorr_region)} < {max_p * 2}), WAV zu kurz oder loop_mid zu gross.")
+        return 1
     t_est, diag = estimate_period_by_autocorr(autocorr_region, min_p, max_p, expected_period=smpl_T)
     print(f"TOOL_VERSION={TOOL_VERSION}")
     print(f"wav={wav_path}")
@@ -3651,7 +3612,9 @@ def test_wav_period(wav_path: str, harmonic_number: int = 24):
 
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == '--test-wav':
-        hn = int(sys.argv[3]) if len(sys.argv) > 3 else 24
+        if len(sys.argv) <= 3:
+            print("HINWEIS: Kein harmonic_number angegeben, verwende 8 (Oktavregister-Pfad).", file=sys.stderr)
+        hn = int(sys.argv[3]) if len(sys.argv) > 3 else 8
         raise SystemExit(test_wav_period(sys.argv[2], hn))
 
     # CLI batch mode: analyze_lut_v57.py <organ> --export-csv [output.csv]
