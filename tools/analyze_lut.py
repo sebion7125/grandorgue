@@ -48,6 +48,8 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v64: YIN-CMNDF-Refinement nutzt globales ndp_all, vermeidet Integer-Rundung am Suchrand.
+# v63: YIN-CMNDF normalisiert ab Lag 1, verhindert 2T-Schätzung bei Oktav-Stops.
 # v57: DC-Entfernung vor Hann-Fenster in estimate_period_by_autocorr.
 #      Ohne DC-Removal blaehte der Gleichanteil alle NDP-Werte Richtung 1
 #      auf → YIN fand T/2 statt T. Entspricht ChatGPT-Referenzskript.
@@ -480,19 +482,27 @@ def estimate_period_by_autocorr(samples: np.ndarray,
     W    = N - max_period
     ref_n = x[:W] / (np.linalg.norm(x[:W]) + 1e-12)
 
-    lags    = np.arange(min_period, max_period + 1)
-    ndp_arr = np.empty(len(lags), dtype=np.float64)
-    for i, lag in enumerate(lags):
+    lags_all = np.arange(1, max_period + 1)
+    ndp_all  = np.empty(len(lags_all), dtype=np.float64)
+    for i, lag in enumerate(lags_all):
         sh = x[lag:lag + W]
         nrm = np.linalg.norm(sh)
-        ndp_arr[i] = float(np.dot(ref_n, sh / nrm)) if nrm > 1e-12 else 0.0
+        ndp_all[i] = float(np.dot(ref_n, sh / nrm)) if nrm > 1e-12 else 0.0
 
-    # YIN CMNDF: d'[i]=1-NDP[i];  cmndf[i]=d'[i]/mean(d'[0..i])
-    d_prime = 1.0 - ndp_arr
-    cumsum  = np.cumsum(d_prime)
-    cmndf   = np.where(cumsum > 0,
-                       d_prime * np.arange(1, len(lags)+1) / cumsum,
-                       1.0)
+    # YIN CMNDF: d'[i]=1-NDP[i]; cmndf[i]=d'[i]/mean(d'[0..i]) ab Lag 1
+    d_prime_all = 1.0 - ndp_all
+    cumsum_all  = np.cumsum(d_prime_all)
+    cmndf_all   = np.where(
+        cumsum_all > 0,
+        d_prime_all * np.arange(1, len(lags_all) + 1) / cumsum_all,
+        1.0,
+    )
+
+    search_start = max(1, min_period)
+    search_stop  = max_period
+    lags    = np.arange(search_start, search_stop + 1)
+    ndp_arr = ndp_all[search_start - 1:search_stop]
+    cmndf   = cmndf_all[search_start - 1:search_stop]
 
     # First local minimum below threshold
     in_valley  = False
@@ -508,22 +518,23 @@ def estimate_period_by_autocorr(samples: np.ndarray,
         elif in_valley:
             break
     if in_valley:
-        idx = int(yin_lag - min_period)
-        refined_idx = refine_peak_parabolic(ndp_arr, idx)
-        result = float(min_period) + refined_idx
+        abs_idx = int(yin_lag - 1)
+        refined_abs_idx = refine_peak_parabolic(ndp_all, abs_idx)
+        result = 1.0 + refined_abs_idx
     else:
         # Fallback: penalised NDP fuer Auswahl, echtes NDP fuer Subsample-Refinement
         weighted = ndp_arr * (1.0 - 0.10 * lags / max_period)
         best_idx = int(np.argmax(weighted))
-        refined_idx = refine_peak_parabolic(ndp_arr, best_idx)
-        result = float(min_period) + refined_idx
+        abs_idx = int((search_start - 1) + best_idx)
+        refined_abs_idx = refine_peak_parabolic(ndp_all, abs_idx)
+        result = 1.0 + refined_abs_idx
 
     # Diagnostic: CMNDF values at T/2, T, 2T for the RETURNED period.
     def _cmndf_at(lag: int) -> float:
-        if lag < min_period or lag > max_period:
+        if lag < 1 or lag > max_period:
             return float('nan')
-        i = lag - min_period
-        return float(cmndf[i]) if 0 <= i < len(cmndf) else float('nan')
+        i = lag - 1
+        return float(cmndf_all[i]) if 0 <= i < len(cmndf_all) else float('nan')
 
     result_i = int(round(result))
     diag = {
@@ -563,7 +574,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     if window_len < 4 or loop_len < window_len or release_len < window_len:
         return [], meta
     r_max = min(2 * T_int, release_len - window_len)
-    if r_max == 0 or (loop_len // T_float) < 4:
+    if r_max == 0 or int(loop_len / T_float) < 4:
         return [], meta
 
     ds           = (min(4, T_int // 500) if T_int >= 500 else 1) if downsampling else 1

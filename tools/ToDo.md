@@ -2,6 +2,7 @@ This ist my ToDo List for things left to do:
 
 Release Alignment:
 ==================
+- for T float versions a more precise aproach and bugfix in the analyze_lut.py has been applied. The changes have to be applied to GO as well
 - [DONE / already optimized] LUTCache period range: ComputeCorrelationLut
   already restricts n_start/n_end from min/max_key_press_ms, and builds
   loop_mono only up to n_end-1.  Nothing to do.
