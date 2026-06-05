@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v95-status-text"
+TOOL_VERSION = "v96-linear-drift-ok"
 
 try:
     import matplotlib
@@ -294,7 +294,8 @@ class PipeAnalysis:
             return 0
         if self.error:
             return 2
-        if not self.stabilized:
+        # Linearer Drift (drift_mode=True) ist kein Fehler — Branch-Tracker folgt ihm.
+        if not self.stabilized and not self.drift_mode:
             return 2
         scores = [p.best_score for p in self.lut_points if p.phase in ("sparse","gap")]
         if scores and min(scores) < SCORE_BAD:
@@ -328,6 +329,9 @@ class PipeAnalysis:
                 detail = self.legacy_reason.split(":", 1)[1]
                 return f"⚡ Legacy — LUT schwach: {detail}"
             return f"⚡ Legacy ({self.legacy_reason})"
+        if not self.stabilized and self.drift_mode:
+            n_pts = len(self.lut_points)
+            return f"↗ Drift verfolgt  drift={self.drift_per_period:.4f}  {n_pts}Pkt"
         if not self.stabilized:
             return f"❌ Nicht stabilisiert  n_total={self.n_total}"
         # Warn-Gruende sammeln
@@ -1781,7 +1785,9 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         # v65: Linearer/leicht gekruemmter Drift ist mit Branch-Tracking kein
         # automatischer Legacy-Grund mehr. Legacy nur noch, wenn keine stabile
         # Punktfolge oder eine qualitativ schlechte LUT entsteht.
-        if not pa.stabilized:
+        # v96: drift_mode=True bedeutet linearer Drift — Branch-Tracker folgt ihm.
+        # Kein Legacy-Trigger, auch wenn stable_at_n=None.
+        if not pa.stabilized and not pa.drift_mode:
             pa.legacy_fallback = True
             pa.legacy_reason = "instabil"
         else:
