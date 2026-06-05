@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v81-mixture-period-guard"
+TOOL_VERSION = "v82-no-local-fold"
 
 try:
     import matplotlib
@@ -50,6 +50,9 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v82: Lokales Folding entfernt: best_corr_vectorized(), unwrap_phase_points(),
+#      fit_linear_drift() und FOLD_*-Konstanten geloescht (toter Code).
+#      Gap-Detection verwendet track_r statt best_r % T_int.
 # v81: Periodenerkennung fuer Mixturen: schwache fruehe YIN-Senken werden
 #      durch deutlich bessere spaetere lokale Senken ersetzt.
 
@@ -117,10 +120,6 @@ LEGACY_PHASE3_MAX          = 8
 # v13: Drift-Erkennung für Mixturen/Sesquialtera
 DRIFT_FIT_WIN = 12
 DRIFT_MAX_RESID_FACTOR = 1.0 # Residuum <= stable_thresh * Faktor
-
-# v10: Fold-Akzeptanz-Parameter
-FOLD_ACCEPT_RATIO    = 0.85
-FOLD_SEARCH_RADIUS_D = 2
 
 # v65: Branch-Tracking-Parameter
 # Statt pro n blind das globale Maximum zu nehmen, werden mehrere lokale Maxima
@@ -419,46 +418,6 @@ def normalized_dot_product(a: np.ndarray, b: np.ndarray,
     return float(np.dot(aw / na, bw / nb))
 
 
-def best_corr_vectorized(lw: np.ndarray, release_mono: np.ndarray,
-                          r_max: int, window_len: int,
-                          T_int: int) -> tuple:
-    """
-    Vektorisierte Suche nach dem besten Korrelationsoffset in [0, r_max).
-    Gibt (best_r, best_score, raw_r, raw_score, folded, fold_ratio) zurück.
-    """
-    if r_max + window_len > len(release_mono):
-        r_max = max(1, len(release_mono) - window_len)
-
-    na = np.linalg.norm(lw)
-    if na < 1e-12:
-        return 0, 0.0, 0, 0.0, False, 1.0
-    lw_n = lw / na
-
-    from numpy.lib.stride_tricks import as_strided
-    s = release_mono.strides[0]
-    rel_mat = as_strided(release_mono,
-                          shape=(r_max, window_len),
-                          strides=(s, s))
-
-    norms = np.linalg.norm(rel_mat, axis=1)
-    norms = np.where(norms < 1e-12, 1.0, norms)
-    scores = rel_mat.dot(lw_n) / norms
-
-    raw_idx = int(np.argmax(scores))
-    raw_score = float(scores[raw_idx])
-
-    folded_idx = raw_idx % T_int
-    lo = max(0, folded_idx - FOLD_SEARCH_RADIUS_D)
-    hi = min(r_max, folded_idx + FOLD_SEARCH_RADIUS_D + 1)
-    folded_score = float(np.max(scores[lo:hi])) if hi > lo else raw_score
-    fold_ratio = folded_score / (raw_score + 1e-12)
-
-    if fold_ratio >= FOLD_ACCEPT_RATIO:
-        best_r = int(lo + np.argmax(scores[lo:hi]))
-        return best_r, folded_score, raw_idx, raw_score, True, fold_ratio
-    return raw_idx, raw_score, raw_idx, raw_score, False, fold_ratio
-
-
 def _local_maxima_indices(scores: np.ndarray, min_distance: int = 3) -> list:
     """Lokale Maxima in einer 1D-Scorekurve, sortiert nach Score absteigend."""
     if len(scores) == 0:
@@ -564,29 +523,6 @@ def shortest_circular_delta(a: float, b: float, T: int) -> float:
     while d < -half:
         d += T
     return d
-
-
-def unwrap_phase_points(points, T: int):
-    """Gibt (ns, unwrapped best_r mod T) für LUT-Punkte zurück."""
-    if not points:
-        return np.array([], dtype=float), np.array([], dtype=float)
-    ns = np.array([p.n for p in points], dtype=float)
-    phases = [float(p.best_r % T) for p in points]
-    vals = [phases[0]]
-    for prev, cur in zip(phases, phases[1:]):
-        vals.append(vals[-1] + shortest_circular_delta(prev, cur, T))
-    return ns, np.array(vals, dtype=float)
-
-
-def fit_linear_drift(points, T: int):
-    """Lineare Regression auf unwrapped Phase. Rückgabe: slope, intercept, max_resid."""
-    if len(points) < 2:
-        return 0.0, 0.0, float('inf')
-    ns, vals = unwrap_phase_points(points, T)
-    a, b = np.polyfit(ns, vals, 1)
-    pred = a * ns + b
-    resid = float(np.max(np.abs(vals - pred))) if len(vals) else float('inf')
-    return float(a), float(b), resid
 
 
 def refine_peak_parabolic(y: np.ndarray, i: int) -> float:
@@ -1153,18 +1089,20 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     gap_thresh = T_int // 4
     idx = 0
     while idx + 1 < len(points) and len(points) < MAX_TOTAL:
-        # v66: Gap-Fill nicht mehr nur auf modulo-T-Distanz.
-        # Branch-Spruenge koennen kleiner als T/4 sein; entscheidend ist die
-        # Abweichung des naechsten Punkts vom lokal vorhergesagten track_r.
-        gap = circ_dist(points[idx].best_r % T_int, points[idx+1].best_r % T_int, T_int)
+        # v82: Gap-Erkennung im echten [0, 2T)-Raum via track_r.
+        # Kein % T_int mehr — track_r ist der branch-konsistente Pfadwert.
+        track_r_a = getattr(points[idx],     "track_r", float(points[idx].best_r))
+        track_r_b = getattr(points[idx + 1], "track_r", float(points[idx + 1].best_r))
+        raw_gap = abs(track_r_b - track_r_a)
         track_gap = 0.0
-        if getattr(points[idx], "track_r", None) is not None and getattr(points[idx+1], "track_r", None) is not None:
-            if idx >= 1 and getattr(points[idx-1], "track_r", None) is not None:
-                dn0 = max(1, points[idx].n - points[idx-1].n)
-                slope0 = (float(points[idx].track_r) - float(points[idx-1].track_r)) / dn0
-                pred_next = float(points[idx].track_r) + slope0 * (points[idx+1].n - points[idx].n)
-                track_gap = abs(float(points[idx+1].track_r) - pred_next)
-        if gap > gap_thresh or track_gap > max(2.0, T_int / 10.0):
+        if idx >= 1:
+            track_r_prev = getattr(points[idx - 1], "track_r", None)
+            if track_r_prev is not None:
+                dn0 = max(1, points[idx].n - points[idx - 1].n)
+                slope0 = (track_r_a - float(track_r_prev)) / dn0
+                pred_next = track_r_a + slope0 * (points[idx + 1].n - points[idx].n)
+                track_gap = abs(track_r_b - pred_next)
+        if raw_gap > gap_thresh or track_gap > max(2.0, T_int / 10.0):
             na = int(round(points[idx].loop_pos / T_float))
             nb = int(round(points[idx+1].loop_pos / T_float))
             nm = (na + nb) // 2
