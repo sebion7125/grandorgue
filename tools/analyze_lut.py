@@ -114,6 +114,7 @@ SCORE_BAD   = 0.2
 # sie nur durch viele Gap-Fill-Punkte zusammengeflickt wird, schlechte
 # Scores hat oder die best_r-Werte kreisstatistisch breit streuen.
 LEGACY_SCORE_MIN_THRESHOLD = 0.35
+ALLOW_SHORT_PERIOD = False  # Experiment: True deaktiviert die T<16-Legacy-Sperre
 LEGACY_COHERENCE_THRESHOLD = 0.75
 LEGACY_PHASE3_MAX          = 8
 
@@ -197,6 +198,10 @@ class PipeAnalysis:
     dense_step_used: int = DENSE_STEP
 
     lut_points:    list = field(default_factory=list)   # List[LutPoint]
+    lut_folded:    bool = True    # True = Pfad auf [0,T) gefaltet
+    lut_points_raw_count: int = 0  # Anzahl Punkte vor Pruning
+    lut_score_p10: float = 0.0   # 10. Perzentil der LUT-Scores
+    lut_fold_reason: str = ""    # Grund fuer Fold-Entscheidung
     stable_at_n:   Optional[int] = None
     stabilized:    bool = False
     phase3_count:  int  = 0
@@ -872,12 +877,10 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         for i0, (raw0, sc0) in enumerate(cand_lists[0]):
             tr0 = float(raw0)
             for i1, (raw1, sc1) in enumerate(cand_lists[1]):
-                tr1 = closest_branch_copy(int(raw1), tr0, T_int)
+                tr1 = float(raw1)
                 dn01 = max(1, pts[1].n - pts[0].n)
                 slope = (tr1 - tr0) / dn01
-                # Nur sehr extreme Anfangsspruenge leicht bestrafen; linearer
-                # Drift soll nicht unterdrueckt werden.
-                start_pen = 0.05 * (abs(tr1 - tr0) / max(allowed, 1e-9)) ** 2
+                start_pen = 0.0
                 cost = -float(sc0) - float(sc1) + start_pen
                 states[(i0, i1)] = (cost, tr0, tr1, slope, None)
         backrefs.append({})
@@ -895,7 +898,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
             for (i_prev2, i_prev1), (cost_prev, tr_prev2, tr_prev1, slope_prev, _) in states.items():
                 pred = tr_prev1 + slope_prev * dn_cur
                 for i_cur, (raw_cur, sc_cur) in enumerate(cand_lists[pi]):
-                    tr_cur = closest_branch_copy(int(raw_cur), pred, T_int)
+                    tr_cur = float(raw_cur)
                     err = tr_cur - pred
                     smooth_pen = BRANCH_GLOBAL_SMOOTH_PENALTY * (err / allowed) ** 2
                     cost = cost_prev - float(sc_cur) + smooth_pen
@@ -935,11 +938,11 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
             if prev_track is None:
                 track = float(raw)
             elif prevprev_track is None:
-                track = closest_branch_copy(int(raw), prev_track, T_int)
+                track = float(raw)
             else:
                 slope = (prev_track - prevprev_track) / max(1, prev_n - prevprev_n)
                 pred = prev_track + slope * max(1, p.n - prev_n)
-                track = closest_branch_copy(int(raw), pred, T_int)
+                track = float(raw)
             npnt = LutPoint(n=p.n, loop_pos=p.loop_pos,
                             best_r=int(raw), best_score=float(sc), phase=p.phase,
                             raw_r=int(raw), raw_score=float(sc),
@@ -954,6 +957,33 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
         # Nicht ausgefilterte Originalpunkte, falls es sie gab, hinten anhaengen.
         return out
+
+    def _try_fold(points_in: list) -> tuple:
+        """Bestimmt ob der [0, 2T)-Pfad auf [0, T) gefaltet werden kann."""
+        if not points_in:
+            return False, "no_points"
+        for pt in points_in:
+            if pt.best_r >= T_int:
+                folded_r = pt.best_r % T_int
+                cands = list(getattr(pt, "candidates", []) or [])
+                if not cands:
+                    return False, "score_drop"
+                best_sc = pt.best_score
+                found = False
+                for r_c, sc_c in cands:
+                    if abs(r_c - folded_r) <= 2 and sc_c >= best_sc * 0.85:
+                        found = True
+                        break
+                if not found:
+                    return False, "score_drop"
+        fold_rs = [pt.best_r % T_int for pt in points_in]
+        track_rs = [float(getattr(pt, "track_r", pt.best_r)) for pt in points_in]
+        for i in range(len(points_in) - 1):
+            circ_d = circ_dist(fold_rs[i], fold_rs[i + 1], T_int)
+            raw_d = abs(track_rs[i + 1] - track_rs[i])
+            if circ_d > raw_d + T_int / 8.0:
+                return False, "wrap_introduced"
+        return True, "score_ok+smooth"
 
     # Tighter tolerance for non-octave stops (aliquots/mixtures), matching GO.
     stable_thresh = max(T_int // (8 if corr_is_octave_stop(harmonic_number) else 6), 4)
@@ -1143,7 +1173,68 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     # ansonsten glatten Pfad erzeugen.
     points = _global_branch_path(points)
 
+    # v82: Fold-Entscheidung: kann der [0,2T)-Pfad auf [0,T) gefaltet werden?
+    can_fold, fold_reason = _try_fold(points)
+    if can_fold:
+        for pt in points:
+            fold_sc_ratio = 1.0
+            folded_r = pt.best_r % T_int
+            cands = list(getattr(pt, "candidates", []) or [])
+            for r_c, sc_c in cands:
+                if abs(r_c - folded_r) <= 2 and pt.best_score > 0:
+                    fold_sc_ratio = sc_c / pt.best_score
+                    break
+            pt.best_r = folded_r
+            pt.raw_r  = pt.raw_r % T_int
+            pt.folded = True
+            pt.fold_ratio = fold_sc_ratio
+        meta["folded"] = True
+        meta["fold_reason"] = fold_reason
+    else:
+        meta["folded"] = False
+        meta["fold_reason"] = fold_reason
+
     points = [p for p in points if p.best_score > -1.5]
+
+    # v82: LUT-Pruning: redundante Punkte entfernen.
+    def _prune_lut(pts: list) -> list:
+        if len(pts) <= 2:
+            return pts
+        all_scores = [p.best_score for p in pts]
+        mean_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
+        keep = [True] * len(pts)
+        track_rs_prune = [float(getattr(p, "track_r", p.best_r)) for p in pts]
+        ns_prune = [p.n for p in pts]
+        for i in range(1, len(pts) - 1):
+            n_prev = ns_prune[i - 1]
+            n_next = ns_prune[i + 1]
+            n_cur  = ns_prune[i]
+            dn = max(1, n_next - n_prev)
+            t_frac = (n_cur - n_prev) / dn
+            r_interp = track_rs_prune[i - 1] + t_frac * (track_rs_prune[i + 1] - track_rs_prune[i - 1])
+            tol = max(1.5, T_int / 200.0)
+            if abs(track_rs_prune[i] - r_interp) > tol:
+                continue
+            pt = pts[i]
+            if pt.best_score < mean_score - 0.15:
+                continue
+            if pt.phase == "gap":
+                continue
+            if (n_cur - ns_prune[i - 1]) > T_int // 2 or (ns_prune[i + 1] - n_cur) > T_int // 2:
+                continue
+            if abs(track_rs_prune[i] - track_rs_prune[i - 1]) > T_int / 4.0:
+                continue
+            if abs(track_rs_prune[i + 1] - track_rs_prune[i]) > T_int / 4.0:
+                continue
+            keep[i] = False
+        return [pts[i] for i in range(len(pts)) if keep[i]]
+
+    meta["pruned_count"] = 0
+    if len(points) > 2:
+        n_before_prune = len(points)
+        points = _prune_lut(points)
+        meta["pruned_count"] = n_before_prune - len(points)
+
     if len(points) >= 4:
         a, b, resid = _fit_track(points)
         meta["drift_per_period"] = a
@@ -1332,7 +1423,7 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.T_int       = int(round(pa.T_float))
         pa.release_len = len(rel_mono)
 
-        if pa.T_int < 16:
+        if pa.T_int < 16 and not ALLOW_SHORT_PERIOD:
             pa.legacy_fallback = True
             pa.legacy_reason = "short_period"
             pa.error = None
@@ -1425,6 +1516,10 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.drift_residual = float(lut_meta.get("drift_residual", 0.0))
         pa.max_interp_gap_n = int(lut_meta.get("max_interp_gap_n", 0) or 0)
         pa.dense_step_used = int(lut_meta.get("dense_step_used", DENSE_STEP) or DENSE_STEP)
+        pa.lut_folded = bool(lut_meta.get("folded", True))
+        pa.lut_fold_reason = str(lut_meta.get("fold_reason", ""))
+        pruned_count = int(lut_meta.get("pruned_count", 0) or 0)
+        pa.lut_points_raw_count = len(pa.lut_points) + pruned_count
 
         if not pa.lut_points:
             pa.error = "Keine LUT-Punkte"
@@ -1479,8 +1574,13 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             pa.legacy_reason = "instabil"
         else:
             bad_reasons = []
-            if pa.score_min and pa.score_min < LEGACY_SCORE_MIN_THRESHOLD:
-                bad_reasons.append(f"score_min<{LEGACY_SCORE_MIN_THRESHOLD:.2f}")
+            if pa.lut_points:
+                all_scores_sorted = sorted([p.best_score for p in pa.lut_points])
+                p10_idx = max(0, int(len(all_scores_sorted) * 0.10) - 1)
+                score_p10 = all_scores_sorted[p10_idx]
+                pa.lut_score_p10 = score_p10
+                if score_p10 < LEGACY_SCORE_MIN_THRESHOLD:
+                    bad_reasons.append(f"score_p10<{LEGACY_SCORE_MIN_THRESHOLD:.2f}")
             # v72: R und Anzahl der Gap-Punkte sind fuer branch-getrackte,
             # linear driftende Pfade keine verlaesslichen Fehlerkriterien mehr.
             # Ein sauberer linearer Drift verteilt best_r % T ueber den Kreis
@@ -1504,16 +1604,24 @@ def circ_interp(r_a: int, r_b: int, t: float, T: int) -> int:
     return int(round(r_a + delta * t)) % T
 
 
-def get_position_for_correlation(loop_pos: int, lut_points: list, T: int) -> int:
+def get_position_for_correlation(loop_pos: int, lut_points: list, T: int,
+                                     folded: bool = True) -> int:
     """Simuliert GOs GetPositionForCorrelation mit circ_interp und Step-Funktion.
-    v47: Step-Funktion für |diff| > T/4 (kein Interpolieren über Branch-Grenze),
-         entspricht dem GO-Runtime-Verhalten seit Branch-Consensus-Entfernung."""
+    v47: Step-Funktion fur |diff| > T/4 (kein Interpolieren ueber Branch-Grenze),
+         entspricht dem GO-Runtime-Verhalten seit Branch-Consensus-Entfernung.
+    v82: folded=False -> lineare Interpolation im [0,2T)-Raum ohne circ_interp."""
     if not lut_points:
         return 0
-    if loop_pos <= lut_points[0].loop_pos:
-        return lut_points[0].best_r % T
-    if loop_pos >= lut_points[-1].loop_pos:
-        return lut_points[-1].best_r % T
+    if folded:
+        if loop_pos <= lut_points[0].loop_pos:
+            return lut_points[0].best_r % T
+        if loop_pos >= lut_points[-1].loop_pos:
+            return lut_points[-1].best_r % T
+    else:
+        if loop_pos <= lut_points[0].loop_pos:
+            return int(lut_points[0].best_r)
+        if loop_pos >= lut_points[-1].loop_pos:
+            return int(lut_points[-1].best_r)
     lo, hi = 0, len(lut_points) - 1
     while lo + 1 < hi:
         mid = (lo + hi) // 2
@@ -1524,18 +1632,26 @@ def get_position_for_correlation(loop_pos: int, lut_points: list, T: int) -> int
     pa_pt = lut_points[lo]
     pb_pt = lut_points[hi]
     span  = pb_pt.loop_pos - pa_pt.loop_pos
-    if span <= 0:
-        return pa_pt.best_r % T
-    t = (loop_pos - pa_pt.loop_pos) / span
-    r_a = pa_pt.best_r % T
-    r_b = pb_pt.best_r % T
-    # v47: Step-Funktion bei Branch-Abstand > T/4 (wie GO-Runtime).
-    # Interpolation über Branch-Grenzen erzeugt Werte auf keinem Branch —
-    # ein harter Sprung bei t=0.5 ist immer besser als ein sinnloser Mittelwert.
-    diff = shortest_circular_delta(float(r_a), float(r_b), T)
-    if abs(diff) > T / 4.0:
-        return r_a if t < 0.5 else r_b
-    return circ_interp(r_a, r_b, t, T)
+    t = (loop_pos - pa_pt.loop_pos) / span if span > 0 else 0.0
+    if folded:
+        if span <= 0:
+            return pa_pt.best_r % T
+        r_a = pa_pt.best_r % T
+        r_b = pb_pt.best_r % T
+        # v47: Step-Funktion bei Branch-Abstand > T/4 (wie GO-Runtime).
+        diff = shortest_circular_delta(float(r_a), float(r_b), T)
+        if abs(diff) > T / 4.0:
+            return r_a if t < 0.5 else r_b
+        return circ_interp(r_a, r_b, t, T)
+    else:
+        if span <= 0:
+            return int(pa_pt.best_r)
+        r_a = float(pa_pt.best_r)
+        r_b = float(pb_pt.best_r)
+        if abs(r_b - r_a) > T / 2.0:
+            return int(r_a) if t < 0.5 else int(r_b)
+        result = r_a + t * (r_b - r_a)
+        return int(round(result))
 
 
 # ─── Legacy Release Alignment (Nachbau GOSoundReleaseAlignTable) ─────────────
@@ -2105,8 +2221,12 @@ class CrossfadeSimWindow:
         n_int  = int(t_attack_samples / T_float)   # floor, kein round
         t_n    = int(round(n_int * T_float))
         offset = t_attack_samples - t_n             # immer >= 0
-        r_base = get_position_for_correlation(t_n, pa.lut_points, pa.T_int)
-        return (r_base + offset) % max(1, pa.T_int)
+        r_base = get_position_for_correlation(t_n, pa.lut_points, pa.T_int,
+                                                     folded=getattr(pa, "lut_folded", True))
+        if getattr(pa, "lut_folded", True):
+            return (r_base + offset) % max(1, pa.T_int)
+        else:
+            return r_base + offset
 
     def _get_r_direct(self, t_attack_samples: int) -> int:
         """r direkt per argmax aus Score-Matrix, kein mod-Fold."""
@@ -2295,6 +2415,12 @@ class CorrLandscapeWindow:
         self.ns     = None   # x-Achse: n-Werte
         self._computing = False
         self._stop_event = threading.Event()
+        self._zoom_xlim = None
+        self._zoom_ylim = None
+        self._lut_xlim  = None
+        self._lut_ylim  = None
+        self._full_xlim = None
+        self._full_ylim = None
 
         self.win = tk.Toplevel(parent)
         self.win.title(f"Korrelationslandschaft — {pa.rank_name} {midi_to_name(pa.midi_note)} "
@@ -2331,6 +2457,11 @@ class CorrLandscapeWindow:
         tk.Button(bar, text="▶  Berechnen",
                   command=self._compute, **btn_kw).pack(side=tk.LEFT, padx=12)
 
+        tk.Button(bar, text="LUT-Zoom",
+                  command=self._zoom_to_lut, **btn_kw).pack(side=tk.LEFT, padx=4)
+        tk.Button(bar, text="Gesamtansicht",
+                  command=self._zoom_to_full, **btn_kw).pack(side=tk.LEFT, padx=4)
+
         self._btn_csv = tk.Button(bar, text="💾  CSV exportieren",
                                    command=self._export_csv,
                                    state=tk.DISABLED, **btn_kw)
@@ -2363,6 +2494,18 @@ class CorrLandscapeWindow:
         else:
             tk.Label(self.win, text="matplotlib nicht verfügbar",
                      bg=C_BG, fg=C_BAD, font=("Consolas", 10)).pack(pady=20)
+
+    def _zoom_to_lut(self):
+        if self._lut_xlim and self._lut_ylim:
+            self._replot_with_limits(self._lut_xlim, self._lut_ylim)
+
+    def _zoom_to_full(self):
+        self._replot_with_limits(None, None)
+
+    def _replot_with_limits(self, xlim, ylim):
+        self._zoom_xlim = xlim
+        self._zoom_ylim = ylim
+        self._plot()
 
     def _on_window_change(self):
         # Wenn Matrix schon berechnet: neu plotten mit neuer Fensterfunktion
@@ -2533,21 +2676,44 @@ class CorrLandscapeWindow:
         if self.pa.lut_points:
             pts_sorted = sorted(self.pa.lut_points, key=lambda p: p.n)
             xs_eff = [p.n for p in pts_sorted]
-            ys_eff = [p.best_r % T for p in pts_sorted]
+            ys_eff = [p.best_r for p in pts_sorted]  # kein % T - best_r ist korrekt gefaltet/ungefaltet
             ax.scatter(xs_eff, ys_eff,
                        c="white", marker="o", s=28, zorder=6,
                        edgecolors="black", linewidths=0.6,
-                       label="LUT effektiv (best_r mod T)")
-
-            pts_raw_diff = [p for p in pts_sorted if abs((p.raw_r % T) - (p.raw_r)) > 1e-9]
-            if pts_raw_diff:
-                ax.scatter([p.n for p in pts_raw_diff], [p.raw_r for p in pts_raw_diff],
-                           c="orange", marker="x", s=22, zorder=5,
-                           linewidths=0.8, label="LUT raw")
+                       label="LUT best_r")
 
         # T-Linie
         ax.axhline(T, color="cyan", linewidth=0.8, linestyle="--",
                     alpha=0.7, label=f"T={T}")
+
+        # Gesamtansicht-Grenzen speichern (vor Auto-Zoom)
+        self._full_xlim = ax.get_xlim()
+        self._full_ylim = ax.get_ylim()
+
+        # Auto-Zoom auf LUT-Bereich
+        if self.pa.lut_points:
+            ns_lut = [p.n for p in pts_sorted]
+            rs_lut = [p.best_r for p in pts_sorted]
+            x_margin = max(2, 0.05 * (max(ns_lut) - min(ns_lut)))
+            y_margin = max(10, T / 4)
+            lut_xlim = (min(ns_lut) - x_margin, max(ns_lut) + x_margin)
+            lut_ylim = (max(0, min(rs_lut) - y_margin),
+                        min(r_ticks[-1] if len(r_ticks) else 2*T, max(rs_lut) + y_margin))
+            self._lut_xlim = lut_xlim
+            self._lut_ylim = lut_ylim
+        else:
+            self._lut_xlim = None
+            self._lut_ylim = None
+
+        # Manuellen Zoom-Override anwenden
+        if getattr(self, "_zoom_xlim", None) is not None:
+            ax.set_xlim(self._zoom_xlim)
+        elif self._lut_xlim is not None:
+            ax.set_xlim(self._lut_xlim)
+        if getattr(self, "_zoom_ylim", None) is not None:
+            ax.set_ylim(self._zoom_ylim)
+        elif self._lut_ylim is not None:
+            ax.set_ylim(self._lut_ylim)
 
         win_name = self._win_var.get()
         ax.set_xlabel("Periodenindex n", color=C_TEXT2)
@@ -3136,6 +3302,9 @@ class LUTAnalyzerApp(tk.Tk):
                 f"Drift: {pa.drift_per_period:.3f} Samples/Periode  Residuum={pa.drift_residual:.2f}  max_gap_n={pa.max_interp_gap_n}",
                 f"Amplitude Attack/Release: {pa.amplitude_ratio:.1f}×",
                 f"LUT-Punkte: {len(pa.lut_points)}  (Phase-3-Gaps: {pa.phase3_count}, dense_step={pa.dense_step_used})",
+                f"LUT-Raum: {'[0,T) gefaltet' if getattr(pa, 'lut_folded', True) else '[0,2T) ungefaltet'}  Fold-Grund: {getattr(pa, 'lut_fold_reason', '')}",
+                f"Punkte: {getattr(pa, 'lut_points_raw_count', len(pa.lut_points))} vor Pruning -> {len(pa.lut_points)} nach Pruning  (entfernt: {getattr(pa, 'lut_points_raw_count', len(pa.lut_points)) - len(pa.lut_points)})",
+                f"score_p10={getattr(pa, 'lut_score_p10', 0.0):.3f}  score_min={pa.score_min:.3f}  score_mean={pa.score_mean:.3f}",
                 f"Legacy-Fallback: {'ja (' + pa.legacy_reason + ')' if pa.legacy_fallback else 'nein'}",
             ]
             info = "\n".join(info_parts)
@@ -3175,34 +3344,45 @@ class LUTAnalyzerApp(tk.Tk):
 
         pts_sorted = sorted(pa.lut_points, key=lambda p: p.n)
         T = pa.T_int
+        lut_folded = getattr(pa, "lut_folded", True)
 
-        # Interpolationslinie: nicht naive Gerade, sondern shortest-circular-delta.
-        # Das entspricht der geplanten GO-Interpolation auf best_r mod T.
+        # Interpolationslinie
         interp_x = []
         interp_y = []
         for p0, p1 in zip(pts_sorted, pts_sorted[1:]):
             n0, n1 = p0.n, p1.n
             if n1 <= n0:
                 continue
-            r0 = float(p0.best_r % T)
-            r1 = float(p1.best_r % T)
-            d = shortest_circular_delta(r0, r1, T)
-            steps = max(2, min(200, n1 - n0 + 1))
-            last_y = None
-            for i in range(steps):
-                t = i / (steps - 1)
-                x = n0 + t * (n1 - n0)
-                y = (r0 + t * d) % T
-                # Bei sichtbarem Wrap Linie unterbrechen, damit keine falsche Senkrechte entsteht.
-                if last_y is not None and abs(y - last_y) > T / 2:
-                    interp_x.append(float('nan'))
-                    interp_y.append(float('nan'))
-                interp_x.append(x)
-                interp_y.append(y)
-                last_y = y
+            if lut_folded:
+                r0 = float(p0.best_r)
+                r1 = float(p1.best_r)
+                d = shortest_circular_delta(r0, r1, T)
+                steps = max(2, min(200, n1 - n0 + 1))
+                last_y = None
+                for i in range(steps):
+                    t_frac = i / (steps - 1)
+                    x = n0 + t_frac * (n1 - n0)
+                    y = (r0 + t_frac * d) % T
+                    if last_y is not None and abs(y - last_y) > T / 2:
+                        interp_x.append(float("nan"))
+                        interp_y.append(float("nan"))
+                    interp_x.append(x)
+                    interp_y.append(y)
+                    last_y = y
+            else:
+                r0 = float(p0.best_r)
+                r1 = float(p1.best_r)
+                steps = max(2, min(200, n1 - n0 + 1))
+                for i in range(steps):
+                    t_frac = i / (steps - 1)
+                    x = n0 + t_frac * (n1 - n0)
+                    y = r0 + t_frac * (r1 - r0)
+                    interp_x.append(x)
+                    interp_y.append(y)
         if interp_x:
+            label_interp = "GO-Kreisinterpolation" if lut_folded else "Lineare Interpolation"
             ax.plot(interp_x, interp_y, color=C_TEXT, linewidth=1.2,
-                    alpha=0.75, zorder=1, label="GO-Kreisinterpolation")
+                    alpha=0.75, zorder=1, label=label_interp)
 
         # Rohpunkte nach Phase/Fold-Status getrennt zeichnen.
         phase_color = {"dense": C_DENSE, "sparse": C_SPARSE, "gap": C_GAP, "drift": C_DRIFT}
@@ -3211,17 +3391,19 @@ class LUTAnalyzerApp(tk.Tk):
             pts_unfold = [p for p in pts_sorted if p.phase == phase and not p.folded]
             col = phase_color[phase]
             if pts_fold:
-                ax.scatter([p.n for p in pts_fold], [p.best_r % T for p in pts_fold],
+                ax.scatter([p.n for p in pts_fold], [p.best_r for p in pts_fold],
                            color=col, marker="o", s=36, zorder=3,
                            label=f"{phase} (gefaltet)")
             if pts_unfold:
-                ax.scatter([p.n for p in pts_unfold], [p.best_r % T for p in pts_unfold],
+                ax.scatter([p.n for p in pts_unfold], [p.best_r for p in pts_unfold],
                            color=col, marker="D", s=36, zorder=3,
-                           label=f"{phase} (raw)")
+                           label=f"{phase} (ungefaltet)")
 
         ax.axhline(T, color=C_BAD, linewidth=0.7,
                     linestyle="--", alpha=0.6, label=f"T={T}")
         ax.axhline(0, color=C_BORDER, linewidth=0.5)
+        if not lut_folded:
+            ax.axhline(2 * T, color=C_DRIFT, linewidth=0.5, linestyle=":", alpha=0.5)
 
         if pa.stable_at_n:
             label = f"Drift n={pa.stable_at_n}" if pa.drift_mode else f"stabil n={pa.stable_at_n}"
@@ -3229,15 +3411,19 @@ class LUTAnalyzerApp(tk.Tk):
                         linestyle=":", alpha=0.8, label=label)
 
         ax.set_xlabel("Periodenindex n", color=C_TEXT2)
-        ax.set_ylabel("best_r mod T", color=C_TEXT2)
-        title = "LUT-Stützpunkte + GO-Kreisinterpolation"
+        if lut_folded:
+            ax.set_ylabel("best_r [0,T)", color=C_TEXT2)
+            ax.set_ylim(-5, T + 5)
+        else:
+            ax.set_ylabel("best_r [0,2T)", color=C_TEXT2)
+            ax.set_ylim(-5, 2 * T + 5)
+        title = "LUT-Stuetzpunkte + " + ("GO-Kreisinterpolation" if lut_folded else "Lineare Interpolation")
         if pa.drift_mode:
             title += f"  (Drift {pa.drift_per_period:.3f} smp/Periode)"
         ax.set_title(title, color=C_TEXT, fontsize=10)
         ax.legend(facecolor=C_BG2, edgecolor=C_BORDER,
                    labelcolor=C_TEXT, fontsize=8,
                    loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
-        ax.set_ylim(-5, T + 5)
         self._fig.tight_layout(rect=[0, 0, 0.82, 1])
         self._canvas.draw()
 
