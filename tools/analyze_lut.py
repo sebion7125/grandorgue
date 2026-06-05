@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v91-circular-costs"
+TOOL_VERSION = "v92-two-stage-circular"
 
 try:
     import matplotlib
@@ -50,6 +50,9 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v92: Zweistufen-zirkulaerer DP. Stufe1: DP in [0,T) Phasenraum (kein T-Fenster-
+#      Alternieren). Stufe2: phase_r→raw_r mit bestem Score (korrekte Kopplung).
+#      Loest v91-Problem (freies Alternieren zwischen r und r+T).
 # v91: v90-Fix: Kandidaten bleiben bei raw_r (Score/raw_r-Kopplung korrekt).
 #      Nur DP-Kosten zirkulaer: err=circ_delta(pred%T, raw_r%T, T),
 #      slope=circ_delta(prev%T, cur%T, T)/dn. Fold bleibt _try_fold()-Entscheidung.
@@ -982,25 +985,48 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
         allowed = max(2.0, T_int * BRANCH_GLOBAL_ALLOWED_FACTOR)
 
-        # v90/v91: Zirkulaerer Modus fuer normale Pfeifen (search_periods == 2).
-        # Kandidaten bleiben bei raw_r — Score bleibt korrekt zugeordnet.
-        # Nur die DP-KOSTEN (smooth_pen, kink_pen) werden zirkulaer berechnet:
-        #   err = circ_delta(pred%T, tr_cur%T, T)
-        # Ein Sprung raw_r → raw_r+T hat phase-Distanz 0 → kostenlos.
-        # Ob raw_r auf raw_r%T gefaltet wird, entscheidet spaeter _try_fold().
+        # v92: Zweistufen-Ansatz fuer zirkulaeres Tracking (search_periods == 2).
+        #
+        # Problem v91: Zirkulaere Kosten ohne Phasenraum-DP fuehren zu T-Fenster-
+        # Alternierung: DP wechselt frei zwischen r und r+T, weil err=0 fuer T-Spruenge.
+        #
+        # Loesung v92:
+        # Stufe 1 — DP laeuft in echtem [0,T)-Phasenraum.
+        #   pro Phase: bester T-Copy (raw_r) gemerkt, Score korrekt zugeordnet.
+        #   DP-Kandidaten: (phase_r, max_score_ueber_T_Kopien) in [0,T).
+        #   Kein T-Fenster-Wechsel moeglich → kein Alternieren.
+        # Stufe 2 — Rekonstruktion: phase_r → actual_raw_r (der T-Copy mit bestem Score).
+        #   best_r = raw_r der besten T-Kopie (Score korrekt zugeordnet).
+        #   track_r = phase_r (bleibt in [0,T) fuer Drift-Diagnose).
+        # _try_fold() entscheidet danach ob raw_r%T score-neutral zurueckgefaltet wird.
         use_circular = (search_periods == 2)
 
-        def _circ_phase_err(raw_cur, pred_raw):
-            """Phasenfehler in [0,T)-Kreisraum. raw_r bleibt unveraendert."""
-            if use_circular:
-                return shortest_circular_delta(pred_raw % T_int, raw_cur % T_int, T_int)
-            return raw_cur - pred_raw
+        # Phasen-Kandidatenlisten und Lookup raw_r fuer Stufe 2.
+        if use_circular:
+            dp_cand_lists  = []   # fuer DP: (phase_r, score)
+            raw_r_per_phase = []  # Lookup phase_r → best_raw_r
+            for cands in cand_lists:
+                by_phase = {}  # phase_r → (best_score, best_raw_r)
+                for raw_r, sc in cands:
+                    phr = int(raw_r) % T_int
+                    if phr not in by_phase or sc > by_phase[phr][0]:
+                        by_phase[phr] = (float(sc), int(raw_r))
+                sorted_p = sorted(by_phase.items(), key=lambda x: x[1][0], reverse=True)[:BRANCH_TOP_K]
+                dp_cand_lists.append([(phr, sc) for phr, (sc, _) in sorted_p])
+                raw_r_per_phase.append({phr: rr for phr, (_, rr) in sorted_p})
+        else:
+            dp_cand_lists  = cand_lists
+            raw_r_per_phase = [{r: r for r, sc in cands} for cands in cand_lists]
 
-        def _circ_phase_slope(raw_a, raw_b, dn):
-            """Steigung als zirkulaere Phasenaenderung pro Periode."""
+        def _circ_phase_err(phase_cur, pred_phase):
             if use_circular:
-                return shortest_circular_delta(raw_a % T_int, raw_b % T_int, T_int) / dn
-            return (raw_b - raw_a) / dn
+                return shortest_circular_delta(pred_phase % T_int, phase_cur, T_int)
+            return phase_cur - pred_phase
+
+        def _circ_phase_slope(phase_a, phase_b, dn):
+            if use_circular:
+                return shortest_circular_delta(phase_a, phase_b, T_int) / dn
+            return (phase_b - phase_a) / dn
 
         # Anker fuer small-T: robuster Median der ersten Dense-Punkte im echten Suchraum.
         # Verhindert, dass Anchor-Penalty gegen echten Drift bei T>=16 wirkt.
@@ -1013,15 +1039,15 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 anchor_r      = float(np.median([float(p.best_r) for p in dense_pts_for_anchor]))
                 max_abs_drift = max(float(T_int) * 0.75, 8.0)
 
-        # Initialzustand: Kandidatenpaar (0,1).
+        # Initialzustand: Kandidatenpaar (0,1). DP laeuft ueber dp_cand_lists.
         states = {}
         backrefs = []
-        for i0, (raw0, sc0) in enumerate(cand_lists[0]):
-            tr0 = float(raw0)
-            for i1, (raw1, sc1) in enumerate(cand_lists[1]):
-                tr1 = float(raw1)
+        for i0, (ph0, sc0) in enumerate(dp_cand_lists[0]):
+            tr0 = float(ph0)
+            for i1, (ph1, sc1) in enumerate(dp_cand_lists[1]):
+                tr1 = float(ph1)
                 dn01 = max(1, pts[1].n - pts[0].n)
-                slope = _circ_phase_slope(raw0, raw1, dn01)
+                slope = _circ_phase_slope(tr0, tr1, dn01)
                 cost = -float(sc0) - float(sc1)
                 states[(i0, i1)] = (cost, tr0, tr1, slope, None)
         backrefs.append({})
@@ -1038,9 +1064,9 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
             dn_cur = max(1, n_cur - n_prev1)
             for (i_prev2, i_prev1), (cost_prev, tr_prev2, tr_prev1, slope_prev, _) in states.items():
                 pred = tr_prev1 + slope_prev * dn_cur
-                for i_cur, (raw_cur, sc_cur) in enumerate(cand_lists[pi]):
-                    tr_cur = float(raw_cur)
-                    err = _circ_phase_err(raw_cur, pred)
+                for i_cur, (ph_cur, sc_cur) in enumerate(dp_cand_lists[pi]):
+                    tr_cur = float(ph_cur)
+                    err = _circ_phase_err(ph_cur, pred)
                     smooth_pen = BRANCH_GLOBAL_SMOOTH_PENALTY * (err / allowed) ** 2
 
                     # Kink-Penalty: Steigungsaenderung in Phasenraum (2. Ableitung).
@@ -1098,30 +1124,28 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         if any(i is None for i in idx_path):
             return points_in
 
-        # Track-Rs konsistent aus dem rekonstruierten Pfad erzeugen.
+        # Rekonstruktion: phase_r → actual_raw_r (Stufe 2 des Zweistufen-Ansatzes).
+        # track_r bleibt in [0,T) Phasenraum; best_r = T-Copy mit bestem Score.
         out = []
         prev_track = None
         prevprev_track = None
         prev_n = None
         prevprev_n = None
-        for p, cands, ci in zip(pts, cand_lists, idx_path):
-            raw, sc = cands[int(ci)]
-            if prev_track is None:
-                track = float(raw)
-            elif prevprev_track is None:
-                track = float(raw)
-            else:
-                slope = (prev_track - prevprev_track) / max(1, prev_n - prevprev_n)
-                pred = prev_track + slope * max(1, p.n - prev_n)
-                track = float(raw)
+        for p, dp_cands, rr_lookup, ci in zip(pts, dp_cand_lists, raw_r_per_phase, idx_path):
+            phase_r, sc = dp_cands[int(ci)]
+            # Stufe 2: bester tatsaechlicher Release-Offset fuer diese Phase.
+            actual_raw_r = rr_lookup.get(phase_r, phase_r)
+            track = float(phase_r)
             npnt = LutPoint(n=p.n, loop_pos=p.loop_pos,
-                            best_r=int(raw), best_score=float(sc), phase=p.phase,
-                            raw_r=int(raw), raw_score=float(sc),
+                            best_r=int(actual_raw_r), best_score=float(sc), phase=p.phase,
+                            raw_r=int(actual_raw_r), raw_score=float(sc),
                             folded=False, fold_ratio=1.0)
-            npnt.track_r = float(track)
+            npnt.track_r = float(track)     # Phasenraum-Position fuer Drift-Diagnose
             npnt.predicted_r = None
             npnt.pred_error = 0.0 if prev_track is None else abs(track - prev_track)
-            npnt.candidates = cands
+            npnt.candidates = [(r, sc2) for r, sc2 in zip(
+                [rr_lookup.get(ph, ph) for ph, _ in dp_cands],
+                [s for _, s in dp_cands])]  # Kandidaten mit raw_r fuer _try_fold
             out.append(npnt)
             prevprev_track, prev_track = prev_track, track
             prevprev_n, prev_n = prev_n, p.n
