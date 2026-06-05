@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
+TOOL_VERSION = "v81-mixture-period-guard"
+
 try:
     import matplotlib
     matplotlib.use("TkAgg")
@@ -48,6 +50,15 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v81: Periodenerkennung fuer Mixturen: schwache fruehe YIN-Senken werden
+#      durch deutlich bessere spaetere lokale Senken ersetzt.
+
+# v77: Eindeutige Versionsanzeige im Fenstertitel/Detailpanel und CLI-Selbsttest
+#      --test-wav <file.wav>; Submultiple-Guard sichtbar verifizierbar.
+# v76: Perioden-Debug im Detailpanel: smpl_T, autocorr_T, min_p/max_p und Attack-Pfad.
+#      Submultiple-Guard verschaerft: bei eindeutig gutem smpl-T wird T/k nicht akzeptiert.
+# v75: Submultiple-Guard fuer Mixturen: wenn YIN T/k findet, aber smpl-T im
+#      selben Fenster deutlich plausibler ist, wird auf smpl-T korrigiert.
 # v74: Simulationsfenster-Defaults: Crossfade-Kurve standardmaessig Sin2;
 #      beim Oeffnen nur Attack und Release NDP (interpoliert) sichtbar.
 # v73: Simulationsfenster: Crossfade-Laenge kollabiert am rechten Rand der
@@ -162,6 +173,10 @@ class PipeAnalysis:
     loop_end:      int   = 0
     loop_len:      int   = 0
     release_len:   int   = 0
+    smpl_T_float:  float = 0.0
+    autocorr_T_float: float = 0.0
+    autocorr_min_p: int = 0
+    autocorr_max_p: int = 0
     n_total:       int   = 0
     crossfade_len_samples: int = 0
 
@@ -593,7 +608,8 @@ def refine_peak_parabolic(y: np.ndarray, i: int) -> float:
 def estimate_period_by_autocorr(samples: np.ndarray,
                                   min_period: int,
                                   max_period: int,
-                                  yin_threshold: float = 0.15) -> tuple:
+                                  yin_threshold: float = 0.15,
+                                  expected_period: Optional[float] = None) -> tuple:
     """YIN-style CMNDF period estimator (Nachbau EstimatePeriodByAutocorr).
 
     Finds the FIRST lag where the cumulative-mean normalised difference dips
@@ -634,21 +650,55 @@ def estimate_period_by_autocorr(samples: np.ndarray,
     ndp_arr = ndp_all[search_start - 1:search_stop]
     cmndf   = cmndf_all[search_start - 1:search_stop]
 
-    # First local minimum below threshold
-    in_valley  = False
-    best_cmndf = 2.0
-    yin_lag    = 0
-    for i in range(len(cmndf)):
-        c = cmndf[i]
-        if c < yin_threshold:
-            if not in_valley or c < best_cmndf:
-                best_cmndf = c;  yin_lag = int(lags[i]);  in_valley = True
-            else:
+    # YIN-Variante:
+    # Klassisches YIN nimmt die erste Senke unter yin_threshold. Bei Mixturen
+    # kann aber ein hoher Teilton eine fruehe, nur maessig gute Senke erzeugen
+    # (z.B. T/3), waehrend die gemeinsame Periode T spaeter eine viel tiefere
+    # Senke hat. Deshalb sammeln wir lokale CMNDF-Senken und ersetzen eine
+    # schwache fruehe Senke durch eine deutlich bessere spaetere Senke.
+    valley_candidates = []  # (cmndf, lag, ndp)
+    for i in range(1, len(cmndf) - 1):
+        c = float(cmndf[i])
+        if c < yin_threshold and c <= float(cmndf[i - 1]) and c <= float(cmndf[i + 1]):
+            valley_candidates.append((c, int(lags[i]), float(ndp_arr[i])))
+
+    # Fallback falls die erste/letzte Stelle selbst die Senke bildet.
+    if not valley_candidates:
+        in_valley  = False
+        best_cmndf = 2.0
+        yin_lag    = 0
+        for i in range(len(cmndf)):
+            c = float(cmndf[i])
+            if c < yin_threshold:
+                if not in_valley or c < best_cmndf:
+                    best_cmndf = c;  yin_lag = int(lags[i]);  in_valley = True
+                else:
+                    break
+            elif in_valley:
                 break
-        elif in_valley:
-            break
-    if in_valley:
-        abs_idx = int(yin_lag - 1)
+        if in_valley:
+            valley_candidates.append((best_cmndf, yin_lag, float(ndp_all[yin_lag - 1])))
+
+    if valley_candidates:
+        # Erste akzeptable YIN-Senke bleibt Default.
+        chosen_c, chosen_lag, chosen_ndp = valley_candidates[0]
+
+        # Aber: wenn eine spaetere Senke sehr viel besser ist, dann war die
+        # erste Senke wahrscheinlich nur ein Teilton-/Mixtur-Artefakt.
+        # Beispiel Problempfeife: lag16 cmndf=0.091, lag49 cmndf=0.0055.
+        for c, lag, ndp in valley_candidates[1:]:
+            much_deeper = c <= max(0.050, chosen_c * 0.35)
+            much_better_ndp = ndp >= chosen_ndp + 0.03
+            near_integer_multiple = False
+            if chosen_lag > 0:
+                ratio = lag / float(chosen_lag)
+                nearest = round(ratio)
+                near_integer_multiple = nearest >= 2 and abs(ratio - nearest) < 0.18
+            if much_deeper and (much_better_ndp or near_integer_multiple):
+                chosen_c, chosen_lag, chosen_ndp = c, lag, ndp
+                break
+
+        abs_idx = int(chosen_lag - 1)
         refined_abs_idx = refine_peak_parabolic(ndp_all, abs_idx)
         result = 1.0 + refined_abs_idx
     else:
@@ -658,6 +708,35 @@ def estimate_period_by_autocorr(samples: np.ndarray,
         abs_idx = int((search_start - 1) + best_idx)
         refined_abs_idx = refine_peak_parabolic(ndp_all, abs_idx)
         result = 1.0 + refined_abs_idx
+
+    # v75/v76: Submultiple-Guard.
+    # Bei Mixturen kann die erste CMNDF-Senke auf einem starken Teilton liegen
+    # (z.B. T/3). Der smpl-Chunk liefert fuer WAV-Dateien aber oft die reale
+    # Sample-Periode. Wenn das gefundene Ergebnis ein ganzzahliges Submultiple
+    # von expected_period ist und expected_period selbst im selben Fenster eine
+    # sehr gute Periodizitaet zeigt, wird auf expected_period korrigiert.
+    if expected_period is not None and expected_period > 0:
+        exp_i = int(round(expected_period))
+        res_i = int(round(result))
+        if 1 <= exp_i <= max_period and 1 <= res_i <= max_period and result > 0:
+            ratio = float(expected_period) / float(result)
+            k = int(round(ratio))
+            if 2 <= k <= 8 and abs(ratio - k) <= 0.18:
+                cm_res = float(cmndf_all[res_i - 1])
+                cm_exp = float(cmndf_all[exp_i - 1])
+                ndp_res = float(ndp_all[res_i - 1])
+                ndp_exp = float(ndp_all[exp_i - 1])
+
+                # Konservativ, aber nicht zu streng: Bei der Problemdatei ist
+                # T/3 harmonisch relevant, aber smpl_T ist extrem eindeutig.
+                exp_good = (cm_exp <= 0.03) or (ndp_exp >= 0.96)
+                res_suspicious = result < expected_period * 0.70
+                exp_not_worse = (cm_exp <= cm_res * 1.25) or (ndp_exp >= ndp_res - 0.03)
+                exp_clearly_better = (cm_exp < cm_res * 0.50) or (ndp_exp > ndp_res + 0.03)
+
+                if exp_good and res_suspicious and (exp_not_worse or exp_clearly_better or (cm_exp <= 0.05 and ndp_exp >= 0.90)):
+                    refined_exp_idx = refine_peak_parabolic(ndp_all, exp_i - 1)
+                    result = 1.0 + refined_exp_idx
 
     # Diagnostic: CMNDF values at T/2, T, 2T for the RETURNED period.
     def _cmndf_at(lag: int) -> float:
@@ -1204,19 +1283,49 @@ def parse_organ_file(organ_path: str) -> list:
 
             # Pfad auflösen
             def resolve(rel_path):
-                # Prüfe ob rel_path direkt existiert
-                full = os.path.join(organ_dir, rel_path.replace("\\", os.sep).replace("/", os.sep))
+                """
+                Strenger Resolver. Wichtig bei Samplesets mit mehreren Dateien
+                gleichen Namens, z.B. mehreren Mixturen mit 082-A#.wav.
+
+                Reihenfolge:
+                1. direkter relativer Pfad zur .organ-Datei
+                2. eindeutiger Treffer, dessen kompletter normalisierter Pfad
+                   auf rel_path endet
+                3. eindeutiger Treffer auf die letzten 3 Pfadkomponenten
+
+                Wenn der Fallback mehrdeutig ist, wird NICHT stillschweigend die
+                erste Datei genommen. Dann soll die Pfeife als nicht auflösbar
+                erscheinen, statt mit der falschen Mixtur analysiert zu werden.
+                """
+                rel_norm = rel_path.replace("\\", "/").lstrip("/")
+                full = os.path.normpath(os.path.join(organ_dir, rel_norm.replace("/", os.sep)))
                 if os.path.isfile(full):
                     return full
-                # Suche in übergeordneten Verzeichnissen (OrganInstallationPackages)
-                parts = rel_path.replace("\\", "/").split("/")
+
+                parts = rel_norm.split("/")
+                basename = parts[-1]
+                exact = []
+                tail3 = []
+                tail = "/".join(parts[-3:]) if len(parts) >= 3 else basename
+
                 for root, dirs, files in os.walk(organ_dir):
-                    candidate = os.path.join(root, parts[-1])
-                    if os.path.isfile(candidate):
-                        # Prüfe ob der Pfad stimmt
-                        tail = os.path.join(*parts[-3:]) if len(parts) >= 3 else parts[-1]
-                        if candidate.replace("\\", "/").endswith(tail.replace("\\", "/")):
-                            return candidate
+                    if basename not in files:
+                        continue
+                    candidate = os.path.join(root, basename)
+                    cand_norm = candidate.replace("\\", "/")
+                    if cand_norm.endswith(rel_norm):
+                        exact.append(candidate)
+                    elif cand_norm.endswith(tail):
+                        tail3.append(candidate)
+
+                if len(exact) == 1:
+                    return exact[0]
+                if len(exact) > 1:
+                    return None
+                if len(tail3) == 1:
+                    return tail3[0]
+                if len(tail3) > 1:
+                    return None
                 return None
 
             atk_path = resolve(attack_rel)
@@ -1323,6 +1432,7 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
 
         pa.sample_rate = sr
         pa.T_float     = sr / freq_hz
+        pa.smpl_T_float = pa.T_float
         pa.T_int       = int(round(pa.T_float))
         pa.release_len = len(rel_mono)
 
@@ -1358,13 +1468,17 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             min_p = 16
             max_p = sr // 20
 
+        pa.autocorr_min_p = int(min_p)
+        pa.autocorr_max_p = int(max_p)
+
         if max_p >= min_p * 2 and T_smpl >= 16:
             loop_mid = pa.loop_start + pa.loop_len // 2
             ac_window = max_p * 8
             autocorr_region = atk_mono[loop_mid:loop_mid + ac_window]
             if len(autocorr_region) >= max_p * 2:
                 t_est, diag = estimate_period_by_autocorr(
-                    autocorr_region, min_p, max_p)
+                    autocorr_region, min_p, max_p, expected_period=pa.smpl_T_float)
+                pa.autocorr_T_float = float(t_est)
                 pa.T_float         = float(t_est)
                 pa.T_int           = int(round(pa.T_float))
                 pa.cmndf_at_T_half = diag['cmndf_half']
@@ -2640,7 +2754,7 @@ def midi_to_name(n: int) -> str:
 class LUTAnalyzerApp(tk.Tk):
     def __init__(self, initial_organ: str = None):
         super().__init__()
-        self.title("GrandOrgue LUT Analyzer")
+        self.title(f"GrandOrgue LUT Analyzer — {TOOL_VERSION}")
         self.geometry("1400x900")
         self.configure(bg=C_BG)
 
@@ -2942,7 +3056,7 @@ class LUTAnalyzerApp(tk.Tk):
                     # Speichere Descriptor im Analyse-Dict (noch ohne Ergebnis)
                     self._analyses[key] = d  # temporär Descriptor
 
-        self._title(f"GrandOrgue LUT Analyzer — {os.path.basename(path)}")
+        self._title(f"GrandOrgue LUT Analyzer — {TOOL_VERSION} — {os.path.basename(path)}")
 
     def _title(self, t):
         self.title(t)
@@ -3115,9 +3229,12 @@ class LUTAnalyzerApp(tk.Tk):
             info = f"❌ Fehler: {pa.error}"
         else:
             info_parts = [
+                f"Tool-Version: {TOOL_VERSION}",
                 f"T_float={pa.T_float:.2f}  T_int={pa.T_int}  SR={pa.sample_rate}Hz"
                 + (f"  CMNDF: T/2={pa.cmndf_at_T_half:.3f}  T={pa.cmndf_at_T:.3f}  2T={pa.cmndf_at_2T:.3f}"
                    if not (pa.cmndf_at_T_half != pa.cmndf_at_T_half) else ""),  # nan check
+                f"Perioden-Debug: smpl_T={pa.smpl_T_float:.4f}  autocorr_T={pa.autocorr_T_float:.4f}  search=[{pa.autocorr_min_p},{pa.autocorr_max_p}]",
+                f"Attack: {pa.attack_path}",
                 f"Loop: {pa.loop_start}–{pa.loop_end}  ({pa.loop_len} Samples, {pa.n_total} Perioden)",
                 f"Stabilisiert: {'Drift bei n=' + str(pa.stable_at_n) if pa.drift_mode else ('ja bei n=' + str(pa.stable_at_n) if pa.stabilized else '⚠ nein')}",
                 f"Drift: {pa.drift_per_period:.3f} Samples/Periode  Residuum={pa.drift_residual:.2f}  max_gap_n={pa.max_interp_gap_n}",
@@ -3489,7 +3606,54 @@ def export_csv_batch(organ_path: str, output_path: str = None):
         print(f"Written to {output_path}", file=sys.stderr)
 
 
+
+def test_wav_period(wav_path: str, harmonic_number: int = 24):
+    """CLI-Selbsttest fuer die Periodenerkennung an einer einzelnen WAV.
+
+    Nutzung:
+      python analyze_lut_v77_unambiguous_period_guard.py --test-wav 082-A#.wav
+    """
+    smpl = parse_smpl_chunk(wav_path)
+    if smpl["midi_note"] is None:
+        print(f"{TOOL_VERSION}: Kein smpl-Chunk: {wav_path}")
+        return 2
+    atk_mono, sr, atk_frames, atk_ch = read_wav_mono_float(wav_path)
+    midi_note = smpl["midi_note"]
+    pitch_frac = smpl["pitch_frac"] / 2**32
+    freq_hz = 440.0 * 2**((midi_note + pitch_frac - 69) / 12)
+    smpl_T = sr / freq_hz
+    loops = smpl["loops"]
+    if loops:
+        loop_start, loop_end = loops[0]
+    else:
+        loop_start, loop_end = 0, len(atk_mono) - 1
+    T_smpl_i = int(round(smpl_T))
+    if corr_is_octave_stop(harmonic_number):
+        min_p = T_smpl_i
+        max_p = min(T_smpl_i * 3, sr // 20)
+    else:
+        min_p = 16
+        max_p = sr // 20
+    loop_len = loop_end - loop_start + 1
+    loop_mid = loop_start + loop_len // 2
+    autocorr_region = atk_mono[loop_mid:loop_mid + max_p * 8]
+    t_est, diag = estimate_period_by_autocorr(autocorr_region, min_p, max_p, expected_period=smpl_T)
+    print(f"TOOL_VERSION={TOOL_VERSION}")
+    print(f"wav={wav_path}")
+    print(f"sr={sr} frames={atk_frames} channels={atk_ch}")
+    print(f"smpl_midi={midi_note} pitch_frac={smpl['pitch_frac']} freq_hz={freq_hz:.6f}")
+    print(f"smpl_T={smpl_T:.6f} T_smpl_int={T_smpl_i}")
+    print(f"harmonic_number_for_test={harmonic_number} search=[{min_p},{max_p}]")
+    print(f"loop={loop_start}-{loop_end} autocorr_region_len={len(autocorr_region)}")
+    print(f"T_est={t_est:.6f} T_int={int(round(t_est))}")
+    print(f"CMNDF_half={diag['cmndf_half']:.6g} CMNDF_T={diag['cmndf_T']:.6g} CMNDF_2T={diag['cmndf_2T']:.6g}")
+    return 0
+
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == '--test-wav':
+        hn = int(sys.argv[3]) if len(sys.argv) > 3 else 24
+        raise SystemExit(test_wav_period(sys.argv[2], hn))
+
     # CLI batch mode: analyze_lut_v57.py <organ> --export-csv [output.csv]
     if len(sys.argv) >= 3 and sys.argv[2] == '--export-csv':
         out = sys.argv[3] if len(sys.argv) > 3 else None
