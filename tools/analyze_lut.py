@@ -137,6 +137,7 @@ BRANCH_ADAPT_ERR_FACTOR  = 0.75   # erlaubter Fehler = allowed * Faktor
 BRANCH_HARD_LOCK_FACTOR  = 0.75   # Kandidaten in dieser Naehe zum Predicted-Ast haben Vorrang
 BRANCH_GLOBAL_SMOOTH_PENALTY = 0.70 # Strafe fuer Knicke im globalen Astpfad
 BRANCH_GLOBAL_ALLOWED_FACTOR = 0.10  # erlaubter Knickfehler relativ zu T
+MAX_PRUNE_GAP_N = 50                 # max. n-Abstand zwischen Nachbarn beim Pruning (Perioden)
 
 
 # ─── Datenklassen ─────────────────────────────────────────────────────────────
@@ -796,6 +797,9 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
             # Ast liegt, hat dieser Korridor Vorrang. Das verhindert den
             # typischen End-of-WAV-Astwechsel, bei dem ein Nachbarast lokal
             # minimal besser ist, obwohl der bisherige Ast linear stabil war.
+            # Hinweis: closest_branch_copy ist hier nur Vorhersagehilfe im
+            # lokalen Vorwärts-Pass. Der globale Pfad (_global_branch_path)
+            # verwendet keine T-Kopien mehr (realer [0,2T)-Raum).
             allowed = max(2.0, T_int / 10.0)
             enriched = []
             for raw_r, sc in candidates:
@@ -870,8 +874,11 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
         allowed = max(2.0, T_int * BRANCH_GLOBAL_ALLOWED_FACTOR)
 
-        # Initialzustand: Kandidatenpaar (0,1). Track-R von Punkt 1 wird als
-        # naechste T-Kopie zu Punkt 0 gewaehlt; dadurch sind Modulo-Wraps erlaubt.
+        # Initialzustand: Kandidatenpaar (0,1).
+        # v82: Kein closest_branch_copy mehr — Kandidaten bleiben im echten
+        # [0,2T)-Raum. [0,2T) ist ein linearer, kein zirkulärer Suchraum:
+        # Ein Pfad der von knapp unter 2T nach nahe 0 springt wird als
+        # großer Knick gewertet und bestraft. Das ist so gewollt.
         states = {}
         backrefs = []
         for i0, (raw0, sc0) in enumerate(cand_lists[0]):
@@ -971,7 +978,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 best_sc = pt.best_score
                 found = False
                 for r_c, sc_c in cands:
-                    if abs(r_c - folded_r) <= 2 and sc_c >= best_sc * 0.85:
+                    if abs(r_c - folded_r) <= 2 and sc_c >= best_sc - 0.01:
                         found = True
                         break
                 if not found:
@@ -1218,9 +1225,12 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
             pt = pts[i]
             if pt.best_score < mean_score - 0.15:
                 continue
+            # Gap-Punkte nur behalten wenn sie einen echten Sprung abdecken.
             if pt.phase == "gap":
-                continue
-            if (n_cur - ns_prune[i - 1]) > T_int // 2 or (ns_prune[i + 1] - n_cur) > T_int // 2:
+                span = abs(track_rs_prune[i + 1] - track_rs_prune[i - 1])
+                if span > T_int / 4.0:
+                    continue
+            if (n_cur - ns_prune[i - 1]) > MAX_PRUNE_GAP_N or (ns_prune[i + 1] - n_cur) > MAX_PRUNE_GAP_N:
                 continue
             if abs(track_rs_prune[i] - track_rs_prune[i - 1]) > T_int / 4.0:
                 continue
@@ -2415,12 +2425,9 @@ class CorrLandscapeWindow:
         self.ns     = None   # x-Achse: n-Werte
         self._computing = False
         self._stop_event = threading.Event()
-        self._zoom_xlim = None
-        self._zoom_ylim = None
+        self._zoom_mode = "lut"   # "lut" = Auto-Zoom auf LUT, "full" = Gesamtansicht
         self._lut_xlim  = None
         self._lut_ylim  = None
-        self._full_xlim = None
-        self._full_ylim = None
 
         self.win = tk.Toplevel(parent)
         self.win.title(f"Korrelationslandschaft — {pa.rank_name} {midi_to_name(pa.midi_note)} "
@@ -2496,15 +2503,12 @@ class CorrLandscapeWindow:
                      bg=C_BG, fg=C_BAD, font=("Consolas", 10)).pack(pady=20)
 
     def _zoom_to_lut(self):
-        if self._lut_xlim and self._lut_ylim:
-            self._replot_with_limits(self._lut_xlim, self._lut_ylim)
+        self._zoom_mode = "lut"
+        self._plot()
 
     def _zoom_to_full(self):
-        self._replot_with_limits(None, None)
-
-    def _replot_with_limits(self, xlim, ylim):
-        self._zoom_xlim = xlim
-        self._zoom_ylim = ylim
+        self._zoom_mode = "full"
+        self._plot()
         self._plot()
 
     def _on_window_change(self):
@@ -2686,33 +2690,28 @@ class CorrLandscapeWindow:
         ax.axhline(T, color="cyan", linewidth=0.8, linestyle="--",
                     alpha=0.7, label=f"T={T}")
 
-        # Gesamtansicht-Grenzen speichern (vor Auto-Zoom)
-        self._full_xlim = ax.get_xlim()
-        self._full_ylim = ax.get_ylim()
-
-        # Auto-Zoom auf LUT-Bereich
+        # LUT-Zoom-Grenzen berechnen
+        full_xlim = (float(ns[0]),  float(ns[-1]))  if len(ns)      else None
+        full_ylim = (0.0, float(r_ticks[-1])) if len(r_ticks) else None
         if self.pa.lut_points:
             ns_lut = [p.n for p in pts_sorted]
             rs_lut = [p.best_r for p in pts_sorted]
             x_margin = max(2, 0.05 * (max(ns_lut) - min(ns_lut)))
             y_margin = max(10, T / 4)
-            lut_xlim = (min(ns_lut) - x_margin, max(ns_lut) + x_margin)
-            lut_ylim = (max(0, min(rs_lut) - y_margin),
-                        min(r_ticks[-1] if len(r_ticks) else 2*T, max(rs_lut) + y_margin))
-            self._lut_xlim = lut_xlim
-            self._lut_ylim = lut_ylim
+            self._lut_xlim = (min(ns_lut) - x_margin, max(ns_lut) + x_margin)
+            self._lut_ylim = (max(0, min(rs_lut) - y_margin),
+                              min(r_ticks[-1] if len(r_ticks) else 2*T, max(rs_lut) + y_margin))
         else:
             self._lut_xlim = None
             self._lut_ylim = None
 
-        # Manuellen Zoom-Override anwenden
-        if getattr(self, "_zoom_xlim", None) is not None:
-            ax.set_xlim(self._zoom_xlim)
+        # Zoom anwenden
+        zoom = getattr(self, "_zoom_mode", "lut")
+        if zoom == "full" and full_xlim:
+            ax.set_xlim(full_xlim)
+            ax.set_ylim(full_ylim)
         elif self._lut_xlim is not None:
             ax.set_xlim(self._lut_xlim)
-        if getattr(self, "_zoom_ylim", None) is not None:
-            ax.set_ylim(self._zoom_ylim)
-        elif self._lut_ylim is not None:
             ax.set_ylim(self._lut_ylim)
 
         win_name = self._win_var.get()
