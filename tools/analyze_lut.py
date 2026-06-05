@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v86-small-t-cost"
+TOOL_VERSION = "v87-hn-period-fix"
 
 try:
     import matplotlib
@@ -50,6 +50,10 @@ def corr_is_octave_stop(harmonic_number: int) -> bool:
 SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
 SCORE_BAD   = 0.2
 
+# v87: HN-Periodenkorrektur: T_float = smpl_T * HN/8 (Tastennoten-Periode).
+#      smpl gibt physikalische Pfeifenschwingung; für HN!=8 war T_float zu klein.
+#      Autocorr-Suchbereich [0.5*T_hn, 2.0*T_hn], expected_period = hn_T_float.
+#      Neues Feld pa.hn_T_float; T<16-Guard prüft nun T_hn statt T_smpl.
 # v86: Small-T-only Kostenterme in _global_branch_path (search_periods > 2):
 #      BRANCH_SWITCH_PENALTY (Fenster-Wechsel), BRANCH_ANCHOR_PENALTY (Pseudo-Drift),
 #      BRANCH_JUMP_PENALTY (Endpunkt-Ruecksprung). Fuer T>=16 unveraendert.
@@ -193,7 +197,8 @@ class PipeAnalysis:
     loop_end:      int   = 0
     loop_len:      int   = 0
     release_len:   int   = 0
-    smpl_T_float:  float = 0.0
+    smpl_T_float:  float = 0.0   # Rohperiode aus smpl-Chunk (physikalische Pfeifenschwingung)
+    hn_T_float:    float = 0.0   # HN-korrigierte Tastennoten-Periode: smpl_T * HN/8
     autocorr_T_float: float = 0.0
     autocorr_min_p: int = 0
     autocorr_max_p: int = 0
@@ -1530,23 +1535,28 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
 
         midi_note  = smpl["midi_note"]
         pitch_frac = smpl["pitch_frac"] / 2**32  # in Semitones
-        # Frequenz direkt aus smpl-Chunk: MIDI-Note + Pitch-Fraction.
-        # Der smpl-Chunk enthaelt die physikalische Schwingungsfrequenz
-        # der aufgenommenen Pfeife — KEINE HarmonicNumber-Umrechnung noetig.
-        # HN/8 braucht man nur wenn man von der ODF-Tastennote auf die
-        # Frequenz schliesst (wie GO intern). Wir lesen die WAV direkt.
-        # HarmonicNumber wird nur fuer den Autocorr-Schwellwert verwendet.
+        # smpl-Chunk gibt die physikalische Schwingungsfrequenz der aufgenommenen
+        # Pfeife. Für HN=8 ist das identisch mit der Tastennoten-Frequenz.
+        # Für andere HN (z.B. HN=24, 2⅔'-Quinte) ist die Pfeife jedoch bei
+        # HN/8-fachem der Tastenfrequenz gestimmt, weshalb die korrekte
+        # Arbeitsperiode für die LUT-Korrelation lautet:
+        #   T_hn = T_smpl * HN / 8
+        # Nur T_hn gibt die Periodik an, bei der GrandOrgue den Crossfade ausrichtet.
         freq_hz    = 440.0 * 2**((midi_note + pitch_frac - 69) / 12)
 
         # WAV laden
         atk_mono, sr, atk_frames, atk_ch = read_wav_mono_float(pa.attack_path)
         rel_mono, _,  rel_frames, rel_ch  = read_wav_mono_float(pa.release_path)
 
-        pa.sample_rate = sr
-        pa.T_float     = sr / freq_hz
-        pa.smpl_T_float = pa.T_float
-        pa.T_int       = int(round(pa.T_float))
-        pa.release_len = len(rel_mono)
+        pa.sample_rate  = sr
+        smpl_T          = sr / freq_hz
+        pa.smpl_T_float = smpl_T
+        hn_factor       = pa.harmonic_number / 8.0
+        pa.hn_T_float   = smpl_T * hn_factor
+        # T_float = HN-korrigierte Tastennoten-Periode (Arbeitsperiode für LUT)
+        pa.T_float      = pa.hn_T_float
+        pa.T_int        = int(round(pa.T_float))
+        pa.release_len  = len(rel_mono)
 
         if pa.T_int < 16 and not ALLOW_SHORT_PERIOD:
             pa.legacy_fallback = True
@@ -1564,32 +1574,24 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             pa.loop_end   = len(atk_mono) - 1
         pa.loop_len = pa.loop_end - pa.loop_start + 1
 
-        # Periodenbestimmung per Autokorrelation fuer ALLE nicht-trivialen Stops.
-        #
-        # Nicht-Oktav (Aliquote/Mixturen): smpl-unabhaengiger Bereich [16, sr/20].
-        #
-        # Oktav-Stops (Zweierpotenz-HN): smpl gibt normalerweise die richtige Periode,
-        # aber ein Mixtur-Rank mit geradem HN kann ungerade Obertöne enthalten, die
-        # die echte Wellenformperiode auf 2*T_smpl verdoppeln. Pruefen mit Bereich
-        # [T_smpl, 3*T_smpl] — YIN erkennt ob T_smpl oder 2*T_smpl korrekt ist.
-        T_smpl = int(round(pa.T_float))
-        if corr_is_octave_stop(pa.harmonic_number):
-            min_p = T_smpl
-            max_p = min(T_smpl * 3, sr // 20)
-        else:
-            min_p = 16
-            max_p = sr // 20
+        # Periodenbestimmung per Autokorrelation.
+        # Suchbereich [0.5*T_hn, 1.5*T_hn] um die HN-korrigierte Tastennoten-Periode.
+        # T_hn ist bereits in pa.T_float — der Suchraum deckt ±50 % ab, was sowohl
+        # leichte Verstimmung als auch Oktavmehrdeutigkeit (T/2, 2T) abfängt.
+        T_hn_int = pa.T_int  # = round(pa.T_float) = round(T_hn)
+        min_p = max(16, int(round(0.5  * T_hn_int)))
+        max_p = min(sr // 20, int(round(2.0 * T_hn_int)))
 
         pa.autocorr_min_p = int(min_p)
         pa.autocorr_max_p = int(max_p)
 
-        if max_p >= min_p * 2 and T_smpl >= 16:
+        if max_p >= min_p * 2 and T_hn_int >= 16:
             loop_mid = pa.loop_start + pa.loop_len // 2
             ac_window = max_p * 8
             autocorr_region = atk_mono[loop_mid:loop_mid + ac_window]
             if len(autocorr_region) >= max_p * 2:
                 t_est, diag = estimate_period_by_autocorr(
-                    autocorr_region, min_p, max_p, expected_period=pa.smpl_T_float)
+                    autocorr_region, min_p, max_p, expected_period=pa.hn_T_float)
                 pa.autocorr_T_float = float(t_est)
                 pa.T_float         = float(t_est)
                 pa.T_int           = int(round(pa.T_float))
@@ -3422,7 +3424,7 @@ class LUTAnalyzerApp(tk.Tk):
                 f"T_float={pa.T_float:.2f}  T_int={pa.T_int}  SR={pa.sample_rate}Hz"
                 + (f"  CMNDF: T/2={pa.cmndf_at_T_half:.3f}  T={pa.cmndf_at_T:.3f}  2T={pa.cmndf_at_2T:.3f}"
                    if not (pa.cmndf_at_T_half != pa.cmndf_at_T_half) else ""),  # nan check
-                f"Perioden-Debug: smpl_T={pa.smpl_T_float:.4f}  autocorr_T={pa.autocorr_T_float:.4f}  search=[{pa.autocorr_min_p},{pa.autocorr_max_p}]",
+                f"Perioden-Debug: smpl_T={pa.smpl_T_float:.4f}  hn_T={pa.hn_T_float:.4f}  autocorr_T={pa.autocorr_T_float:.4f}  search=[{pa.autocorr_min_p},{pa.autocorr_max_p}]",
                 f"Attack: {pa.attack_path}",
                 f"Loop: {pa.loop_start}–{pa.loop_end}  ({pa.loop_len} Samples, {pa.n_total} Perioden)",
                 f"Stabilisiert: {'Drift bei n=' + str(pa.stable_at_n) if pa.drift_mode else ('ja bei n=' + str(pa.stable_at_n) if pa.stabilized else '⚠ nein')}",
