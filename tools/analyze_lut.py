@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v96-linear-drift-ok"
+TOOL_VERSION = "v97-raw-branch-penalty"
 
 try:
     import matplotlib
@@ -1057,6 +1057,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
         # Initialzustand: Kandidatenpaar (0,1).
         # closest_branch_copy waehlt T-Kopie von raw1, die am naechsten an tr0 liegt.
+        # Startpaare auf verschiedenen T-Fenstern werden bestraft (raw-basiert).
         states = {}
         backrefs = []
         for i0, (raw0, sc0) in enumerate(cand_lists[0]):
@@ -1065,7 +1066,9 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 tr1 = closest_branch_copy(int(raw1), tr0, T_int)
                 dn01 = max(1, pts[1].n - pts[0].n)
                 slope = (tr1 - tr0) / dn01
-                cost = -float(sc0) - float(sc1)
+                raw_jump_init = abs(int(raw1) - int(raw0))
+                init_pen = BRANCH_SWITCH_PENALTY * max(0.0, raw_jump_init - T_int * 0.5) / T_int
+                cost = -float(sc0) - float(sc1) + init_pen
                 states[(i0, i1)] = (cost, tr0, tr1, slope, None)
         backrefs.append({})
 
@@ -1098,20 +1101,19 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                                      if abs(err) > BRANCH_HARD_KINK_FACTOR * allowed
                                      else 0.0)
 
-                    if search_periods > 2:
-                        bid_prev = int(tr_prev1 // T_int)
-                        bid_cur  = int(tr_cur   // T_int)
-                        branch_switch_pen = BRANCH_SWITCH_PENALTY * abs(bid_cur - bid_prev)
+                    # Branch-Konsistenz: Sprung im raw r bestraft (fuer alle search_periods).
+                    # closest_branch_copy macht jeden T-Wechsel im Track-r unsichtbar (err≈0),
+                    # daher muss die Strafe auf dem ROHEN r-Wert basieren, nicht dem Track-r.
+                    # Sprung > T/2 = anderes T-Fenster = Astwechsel → bestraft.
+                    raw_prev_r   = cand_lists[pi - 1][i_prev1][0]
+                    raw_jump     = abs(int(raw_cur) - int(raw_prev_r))
+                    branch_switch_pen = BRANCH_SWITCH_PENALTY * max(0.0, raw_jump - T_int * 0.5) / T_int
+                    # Small-T: zusaetzlicher Anker gegen kuenstlichen Drift.
+                    anchor_pen = 0.0
+                    jump_pen   = 0.0
+                    if search_periods > 2 and anchor_r is not None:
                         anchor_pen = (BRANCH_ANCHOR_PENALTY
-                                      * (abs(tr_cur - anchor_r) / max_abs_drift) ** 2
-                                      if anchor_r is not None else 0.0)
-                        jump = abs(tr_cur - tr_prev1)
-                        max_jump = max(2.0, T_int / 4.0)
-                        jump_pen = BRANCH_JUMP_PENALTY * (jump / max_jump) ** 2
-                    else:
-                        branch_switch_pen = 0.0
-                        anchor_pen        = 0.0
-                        jump_pen          = 0.0
+                                      * (abs(tr_cur - anchor_r) / max_abs_drift) ** 2)
 
                     cost = cost_prev - float(sc_cur) + smooth_pen + kink_pen + hard_kink_pen + branch_switch_pen + anchor_pen + jump_pen
                     key = (i_prev1, i_cur)
