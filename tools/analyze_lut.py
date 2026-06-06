@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v125-directed-segments-plot-extent"
+TOOL_VERSION = "v126-release-extent-plot"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -3878,15 +3878,24 @@ class LUTAnalyzerApp(tk.Tk):
         visual_phase_wrap = False
 
         if len(pts_sorted) >= 2:
-            # v125: Die Plotlinie zeigt den ganzen Gueltigkeitsbereich: vor dem
-            # ersten Punkt horizontal ab n=0 (bzw. min_sample) und nach dem
-            # letzten Punkt den letzten linearen Trend bis zum Ende der Attack-
-            # Datei. So entspricht der Graph der Simulation/Runtime-Basis.
+            # v126: Plot-Gueltigkeitsbereich release-spezifisch.
+            # - Nur das kuerzeste/erste Release ist vor seinem ersten LUT-Punkt
+            #   gueltig; dort laeuft die Kurve horizontal ab n=0 bzw. min_sample.
+            # - Nur das laengste Release (max_key_press_ms=None) setzt den letzten
+            #   linearen Trend bis zum Ende der Attack-Datei fort.
+            # - Mittlere/kurze Releases enden im Plot am aeussersten LUT-Punkt.
             n_min_pts = min(p.n for p in pts_sorted)
             n_max_pts = max(p.n for p in pts_sorted)
-            n_min = 0.0 if getattr(pa, "min_sample", 0) == 0 else max(0.0, float(pa.min_sample) / max(pa.T_float, 1e-9))
-            n_max = float(getattr(pa, "n_total", 0) or n_max_pts)
+            first_release = bool(getattr(pa, "is_shortest_release", False))
+            longest_release = getattr(pa, "max_key_press_ms", None) is None
+            valid_start_n = max(0.0, float(getattr(pa, "min_sample", 0) or 0) / max(pa.T_float, 1e-9))
+            n_min = valid_start_n if first_release else float(n_min_pts)
+            if first_release:
+                n_min = min(n_min, float(n_min_pts))
+            n_max = float(getattr(pa, "n_total", 0) or n_max_pts) if longest_release else float(n_max_pts)
             n_max = max(n_max, float(n_max_pts))
+            if n_max < n_min:
+                n_min, n_max = float(n_min_pts), float(n_max_pts)
             # Fein genug fuer glatte Ansicht, aber begrenzt fuer GUI-Performance.
             sample_count = max(2, min(1600, int(max(1.0, n_max - n_min)) + 1))
             xs = np.linspace(float(n_min), float(n_max), sample_count)
