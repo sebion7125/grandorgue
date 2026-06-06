@@ -22,7 +22,11 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v97-raw-branch-penalty"
+TOOL_VERSION = "v125-directed-segments-plot-extent"
+
+# v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
+# but is too expensive for full-set scans.
+ENABLE_EXHAUSTIVE_DP_DEBUG = False
 
 try:
     import matplotlib
@@ -47,9 +51,39 @@ MAX_TOTAL   = 64
 # Non-power-of-2 (24=2⅔', 40=1⅗', 48=1⅓', mixtures) always use autocorr.
 def corr_is_octave_stop(harmonic_number: int) -> bool:
     return harmonic_number > 0 and (harmonic_number & (harmonic_number - 1)) == 0
-SCORE_WARN  = 0.5   # Korrelationsscore unter dem eine Warnung erscheint
-SCORE_BAD   = 0.2
+SCORE_WARN  = 0.35  # Warnung erst bei deutlich schwacher, aber nicht katastrophaler Korrelation
+SCORE_BAD   = 0.25
 
+# v112: Exportiert zusaetzlich den ungeprunten finalen Viterbi-DP-Pfad
+#       direkt nach dem Backtracking, vor Rebuild/Folding/Pruning.
+#       Damit laesst sich pruefen, ob der korrekte Pfad wirklich im DP verloren
+#       hat oder nur der Debug-/LUT-Export Zustandsraeume vermischt.
+# v114: Kink-Penalty gegen Gap-Jitter abgesichert. Gap-nahe Kinks werden
+#       skaliert (BRANCH_KINK_GAP_SCALE) und danach gedeckelt
+#       (BRANCH_KINK_PENALTY_CAP), damit dn=1-Rauschen keinen ganzen Ast tötet.
+# v103: DP-Full-Trace: Pro Kandidat wird minimaler globaler DP-Zustand gespeichert.
+#       Neue CSV-Felder: cost_prev (akkum. Vorgaengerpfadkosten), total_cost
+#       (= cost_prev + local_step_cost, das was DP wirklich minimiert hat),
+#       prev_raw_r/prev_track_r (welcher Vorgaenger optimal war), is_final_path.
+#       Damit sieht man ob raw=35 lokal billiger war (Penalty-Problem) oder ob
+#       sein bester Vorgaengerpfad teurer war (Pfadhistorie-Problem). Kein
+#       Algorithmus geaendert, nur Tracing.
+# v111: Midpoint-Kohärenz raw-space-korrekt: innerhalb [0,r_max) keine T-Copy im Midpoint-Test; Debug-Felder erweitert.
+# v109: Midpoint-Kohärenz-Penalty im globalen Viterbi. Für jeden DP-Übergang
+#       (pi-1 → pi) wird geprüft ob der Midpoint-Frame (n zwischen den beiden)
+#       einen Peak in der Nähe der interpolierten Track-Position hat. Ist der
+#       nächste Peak weit vom erwarteten Midpoint entfernt, bekommt der Übergang
+#       eine Penalty proportional zu (Abstand/allowed)^2. Ersetzt v104's hartes
+#       Blockieren; legitime T-Copies (Midpoint kohärent) werden kaum bestraft.
+# v99: Branch-Debug: globale DP speichert pro LUT-Punkt Kandidaten-Diagnose
+#      (raw_r, score, track_r, pred, err, penalties). Korrelationslandschaft
+#      kann interne Kandidaten und gewaehlten raw_r ueberlagern; Debug-CSV-Export.
+# v98: Korrelationslandschaft nutzt jetzt dieselbe NDP-Fensterlaenge wie compute_lut():
+#      window_len = crossfade_len_samples. 2*T/r_search_max ist nur das r-Suchfenster,
+#      nicht die NDP-Laenge. Dadurch stimmen Heatmap-Farben und LUT-Scores wieder ueberein.
+# v97: Raw-r Branch-Switch-Penalty im globalen Viterbi. closest_branch_copy machte
+#      T-Kopien im Track-Raum kostenfrei; Spruenge im rohen r-Raum > T/2 werden
+#      jetzt fuer alle Pfeifen bestraft, auch in den Startpaaren.
 # v95: Erklaerungstext pro Release (status_text Property). Weniger falsche Warnungen:
 #      score_p10 statt score_min, phase3_count-Bedingung entfernt, stable_at_n>60→>100.
 #      Status-Spalte auf 400px verbreitert, linksbündig.
@@ -150,7 +184,7 @@ SCORE_BAD   = 0.2
 # Eine formal stabilisierte LUT kann trotzdem unbrauchbar sein, wenn
 # sie nur durch viele Gap-Fill-Punkte zusammengeflickt wird, schlechte
 # Scores hat oder die best_r-Werte kreisstatistisch breit streuen.
-LEGACY_SCORE_MIN_THRESHOLD = 0.35
+LEGACY_SCORE_MIN_THRESHOLD = 0.25
 ALLOW_SHORT_PERIOD = True   # Experiment: T<16-Legacy-Sperre deaktiviert
 LEGACY_COHERENCE_THRESHOLD = 0.75
 LEGACY_PHASE3_MAX          = 8
@@ -162,10 +196,11 @@ DRIFT_MAX_RESID_FACTOR = 1.0 # Residuum <= stable_thresh * Faktor
 # v65: Branch-Tracking-Parameter
 # Statt pro n blind das globale Maximum zu nehmen, werden mehrere lokale Maxima
 # betrachtet und der Kandidat gewählt, der zum vorhergesagten Ast passt.
-BRANCH_TOP_K             = 32
+BRANCH_TOP_K             = 10     # v120: weniger, aber phasengetrennte Kandidaten
 BRANCH_SCORE_MARGIN      = 0.40   # Kandidaten bis best_score - margin behalten
 BRANCH_PREDICT_PENALTY   = 0.35   # Score-Abzug bei Abstand zum vorhergesagten Ast
 BRANCH_MIN_PEAK_DISTANCE = 3      # Mindestabstand lokaler Maxima in r-Samples
+BRANCH_PHASE_SEPARATION_FACTOR = 1.0 / 8.0  # v120: neue Kandidaten muessen ca. T/8 Phasenabstand haben
 BRANCH_FIT_WIN           = 8      # letzte Punkte fuer lokale lineare Vorhersage
 BRANCH_STABLE_RESID_FACTOR = 1.0
 BRANCH_WARMUP_POINTS     = 12     # dichte Startmessungen vor Sparse-Phase
@@ -175,6 +210,11 @@ BRANCH_HARD_LOCK_FACTOR  = 0.75   # Kandidaten in dieser Naehe zum Predicted-Ast
 BRANCH_GLOBAL_SMOOTH_PENALTY = 0.70 # Strafe fuer Knicke im globalen Astpfad
 BRANCH_GLOBAL_ALLOWED_FACTOR = 0.10  # erlaubter Knickfehler relativ zu T
 MAX_PRUNE_GAP_N = 50                 # max. n-Abstand zwischen Nachbarn beim Pruning (Perioden)
+# v118: Gap-Fill darf nicht Rauschen bis auf dn=1 herunter subdividieren.
+# n ist Periodenindex; Werte darunter liefern meist nur Peak-Quantisierung/Jitter,
+# aber kosten viele zusaetzliche Korrelationen und koennen den DP durch Rauschpunkte belasten.
+GAP_FILL_MIN_DN = 8
+GAP_FILL_MAX_INSERTS = 12
 BRANCH_COPY_SWITCH_PENALTY = 0.20   # Kosten fuer T-Copy-Wechsel in der Copy-DP (Stufe 3)
 
 # v86: Small-T-only Kostenterme (nur aktiv wenn search_periods > 2)
@@ -187,8 +227,15 @@ BRANCH_JUMP_PENALTY    = 0.30  # Kosten fuer harte Spruenge zwischen aufeinander
 # NICHT durch dn_cur teilen — sonst kollabiert kink_pen algebraisch zu smooth_pen.
 BRANCH_KINK_PENALTY      = 4.0   # Strafe fuer echte Steigungsaenderung (Samples/Periode)
 BRANCH_KINK_REF_DIVISOR  = 100.0 # max_slope_change = T_int / REF_DIVISOR
+# v114: Gap-Fill erzeugt oft dn=1-Punkte. Einzelnes ±1-Sample-Jitter darf
+# nicht als echter Kurswechsel gewertet werden. Deshalb: Kink an Gap-Punkten
+# stark reduzieren und den lokalen Kink-Term hart deckeln.
+BRANCH_KINK_GAP_SCALE    = 0.10
+BRANCH_KINK_PENALTY_CAP  = 3.0
 BRANCH_HARD_KINK_FACTOR  = 2.0   # err > Faktor*allowed → harter Knick
 BRANCH_HARD_KINK_PENALTY = 20.0  # additive Strafe bei hartem Knick (gross genug gg. Score)
+BRANCH_MIDPT_COHERENCE_PENALTY = 5.0  # v109-v111: Strafe wenn Midpoint-Frame kein Peak bei erwartetem r hat
+BRANCH_MIDPT_SCORE_PENALTY      = 1.5  # v111: Zusatzstrafe wenn der naechste Midpoint-Peak deutlich schwach ist
 
 # v84: Adaptives Suchfenster für kleine Perioden
 SMALL_T_THRESHOLD      = 16   # T_int < Schwelle → erweitertes Suchfenster
@@ -209,6 +256,10 @@ class LutPoint:
     raw_score:  float = 0.0
     folded:     bool  = False
     fold_ratio: float = 1.0
+    # Richtung des Segments vom vorherigen LUT-Punkt zu diesem Punkt.
+    # Wird aus track_r berechnet. Relevant fuer gefaltete LUTs nach Pruning:
+    # dann ist nicht mehr zwingend der kuerzeste Kreisweg der richtige Weg.
+    approach_up: bool = True
 
 
 @dataclass
@@ -258,7 +309,10 @@ class PipeAnalysis:
     lut_points:    list = field(default_factory=list)   # List[LutPoint]
     lut_folded:    bool = True    # True = Pfad auf [0,T) gefaltet
     lut_points_raw_count: int = 0  # Anzahl Punkte vor Pruning
-    lut_score_p10: float = 0.0   # 10. Perzentil der LUT-Scores
+    lut_score_p10: float = 0.0   # 10. Perzentil der LUT-Scores (nur Diagnose)
+    lut_score_median: float = 0.0 # Median der Qualitaets-Scores vor Pruning
+    lut_low_score_fraction: float = 0.0 # Anteil Scores < SCORE_BAD in Qualitaets-Punkten
+    lut_quality_score_count: int = 0 # Anzahl fuer Qualitaetsbewertung verwendeter Punkte
     lut_fold_reason: str = ""    # Grund fuer Fold-Entscheidung
     lut_r_search_max: int = 0    # r_max des Suchfensters in Samples
     lut_search_periods: int = 2  # Anzahl Perioden im Suchfenster
@@ -297,15 +351,16 @@ class PipeAnalysis:
         # Linearer Drift (drift_mode=True) ist kein Fehler — Branch-Tracker folgt ihm.
         if not self.stabilized and not self.drift_mode:
             return 2
-        scores = [p.best_score for p in self.lut_points if p.phase in ("sparse","gap")]
-        if scores and min(scores) < SCORE_BAD:
+        # Score-Warnungen nicht mehr aus Minimum/p10 der geprunten LUT ableiten:
+        # einzelne Transientenpunkte koennen zwangslaufig schlecht korrelieren.
+        # Bewertet wird der typische Score nach Stabilisierung, vor Pruning.
+        q_count = int(getattr(self, "lut_quality_score_count", 0) or 0)
+        score_median = float(getattr(self, "lut_score_median", 0.0) or 0.0)
+        low_frac = float(getattr(self, "lut_low_score_fraction", 0.0) or 0.0)
+        if q_count >= 4 and score_median > 0.0 and score_median < SCORE_BAD:
             return 2
-        # Warn-Kriterien: score_p10 statt score_min (robuster gegen Einzelausreisser).
-        # phase3_count entfernt — kein sinnvoller Qualitaetsindikator nach v94.
-        score_p10 = getattr(self, "lut_score_p10", 0.0)
-        if score_p10 > 0 and score_p10 < SCORE_WARN:
-            return 1
-        elif scores and min(scores) < SCORE_WARN:
+        if (q_count >= 4 and score_median > 0.0 and score_median < SCORE_WARN
+                and low_frac > SCORE_LOW_FRACTION_WARN):
             return 1
         # Spaete Stabilisierung nur fuer kuerzestes Release und erst ab n>100 warnen.
         if self.is_shortest_release and self.stable_at_n is not None and self.stable_at_n > 100:
@@ -336,19 +391,19 @@ class PipeAnalysis:
             return f"❌ Nicht stabilisiert  n_total={self.n_total}"
         # Warn-Gruende sammeln
         warn_parts = []
-        score_p10 = getattr(self, "lut_score_p10", 0.0)
-        scores = [p.best_score for p in self.lut_points if p.phase in ("sparse","gap")]
-        if score_p10 > 0 and score_p10 < SCORE_WARN:
-            warn_parts.append(f"score_p10={score_p10:.2f}<{SCORE_WARN}")
-        elif scores and min(scores) < SCORE_WARN:
-            warn_parts.append(f"score_min={min(scores):.2f}<{SCORE_WARN}")
+        score_median = float(getattr(self, "lut_score_median", 0.0) or 0.0)
+        low_frac = float(getattr(self, "lut_low_score_fraction", 0.0) or 0.0)
+        q_count = int(getattr(self, "lut_quality_score_count", 0) or 0)
+        if (q_count >= 4 and score_median > 0.0 and score_median < SCORE_WARN
+                and low_frac > SCORE_LOW_FRACTION_WARN):
+            warn_parts.append(f"score_med={score_median:.2f}  low={low_frac*100:.0f}%")
         if self.is_shortest_release and self.stable_at_n and self.stable_at_n > 100:
             warn_parts.append(f"stabil erst n={self.stable_at_n}")
         # OK-Zeile
         n_pts = len(self.lut_points)
-        p10_str = f"  p10={score_p10:.2f}" if score_p10 > 0 else ""
+        score_str = f"  med={score_median:.2f}" if score_median > 0 else ""
         drift_str = f"  drift={self.drift_per_period:.3f}" if abs(self.drift_per_period) > 0.001 else ""
-        base = f"n={self.stable_at_n}  {n_pts}Pkt{p10_str}{drift_str}"
+        base = f"n={self.stable_at_n}  {n_pts}Pkt{score_str}{drift_str}"
         if warn_parts:
             return "⚠ " + "  ".join(warn_parts) + "  " + base
         return "✓ " + base
@@ -679,6 +734,32 @@ def shortest_circular_delta(a: float, b: float, T: int) -> float:
     return d
 
 
+def _phase_separated_candidates(candidates: list, T_int: int, max_k: int = BRANCH_TOP_K) -> list:
+    """Reduziert Kandidaten auf starke, phasengetrennte Maxima.
+
+    Die DP braucht nicht 32 nahezu phasengleiche Peaks. Wir nehmen daher
+    greedy immer das hoechste verbleibende Maximum und akzeptieren weitere
+    Maxima nur, wenn ihre Phase mindestens ca. T/8 von bereits gewaehlten
+    Kandidaten entfernt ist. Dadurch bleiben verschiedene Aeste erhalten,
+    aber breite/rauschige Peak-Cluster kosten nicht mehr massiv DP-Zeit.
+    """
+    if not candidates or T_int <= 0 or max_k <= 0:
+        return candidates[:max_k]
+    min_sep = max(1, int(round(T_int * BRANCH_PHASE_SEPARATION_FACTOR)))
+    selected = []
+    for raw, sc in sorted(candidates, key=lambda it: it[1], reverse=True):
+        raw_i = int(raw)
+        phase_i = raw_i % T_int
+        if all(circ_dist(phase_i, int(sel_raw) % T_int, T_int) >= min_sep
+               for sel_raw, _ in selected):
+            selected.append((raw_i, float(sc)))
+            if len(selected) >= max_k:
+                break
+    if not selected:
+        selected = [max(candidates, key=lambda it: it[1])]
+    return selected
+
+
 def refine_peak_parabolic(y: np.ndarray, i: int) -> float:
     """Subsample-Position eines Maximums per Parabelinterpolation."""
     if i <= 0 or i >= len(y) - 1:
@@ -934,6 +1015,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
         # Downsampling zurück auf echte Sample-Offsets.
         candidates = [(int(r_d * ds), float(sc)) for r_d, sc in candidates]
+        candidates = _phase_separated_candidates(candidates, T_int, BRANCH_TOP_K)
         best_raw, best_score = max(candidates, key=lambda item: item[1])
 
         if predicted_r is None:
@@ -1019,7 +1101,9 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 sc = float(sc)
                 if raw not in by_raw or sc > by_raw[raw]:
                     by_raw[raw] = sc
-            cands = sorted(by_raw.items(), key=lambda it: it[1], reverse=True)[:BRANCH_TOP_K]
+            cands = _phase_separated_candidates(
+                sorted(by_raw.items(), key=lambda it: it[1], reverse=True),
+                T_int, BRANCH_TOP_K)
             # Fensterkandidaten nach Top-K-Schnitt erneut garantieren:
             # Fuer jedes Periodenfenster [k*T, (k+1)*T) einen Kandidaten sichern,
             # falls der Top-K-Schnitt alle Vertreter dieses Fensters entfernt hat.
@@ -1036,7 +1120,13 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 cands = sorted(top_k_set.items(), key=lambda x: x[1], reverse=True)
             cand_lists.append(cands)
 
+        # v119: Midpoint-Test deaktiviert. Die eigentliche Ursache war die
+        # Kink-Penalty auf dichtem Gap-Fill-Rauschen; die Midpoint-corr_at()
+        # Aufrufe waren teuer und sind fuer den aktuellen Algorithmus nicht mehr noetig.
+
         allowed = max(2.0, T_int * BRANCH_GLOBAL_ALLOWED_FACTOR)
+
+        # v119: _eval_midpoint_debug entfernt.
 
         # v94: closest_branch_copy wiederhergestellt im globalen Viterbi.
         # Dadurch sind natuerliche T-Uebergaenge (Drift durch T-Grenze) kostenlos;
@@ -1074,6 +1164,8 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
         # Dynamische Programmierung ueber Kandidatenpaare.
         all_back = []
+        # v115: exhaustive DP debug intentionally disabled for speed.
+        # The algorithm only needs all_back for final Viterbi reconstruction.
         for pi in range(2, len(pts)):
             new_states = {}
             back = {}
@@ -1087,16 +1179,28 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 for i_cur, (raw_cur, sc_cur) in enumerate(cand_lists[pi]):
                     # closest_branch_copy: naechste T-Kopie zu pred.
                     # Natuerlicher T-Uebergang (Drift durch T-Grenze): err ≈ 0.
-                    # Kuenstlicher Sprung (falscher Ast): err gross → bestraft.
+                    # Kuenstlicher Sprung (falscher Ast): Midpoint-Penalty straft.
                     tr_cur = closest_branch_copy(int(raw_cur), pred, T_int)
                     err = tr_cur - pred
                     smooth_pen = BRANCH_GLOBAL_SMOOTH_PENALTY * (err / allowed) ** 2
 
                     # Kink-Penalty: echte Steigungsaenderung (2. Ableitung, v89).
+                    # v114: Gap-Fill kann sehr dichte Punkte (dn=1) erzeugen.
+                    # Ein einzelnes Sample Quantisierungs-/Korrelationsrauschen darf
+                    # dann nicht als harter Kink den gesamten Ast abschießen.
                     slope_cur_tentative = (tr_cur - tr_prev1) / dn_cur
                     slope_change = slope_cur_tentative - slope_prev
                     max_slope_change = max(0.05, float(T_int) / BRANCH_KINK_REF_DIVISOR)
-                    kink_pen = BRANCH_KINK_PENALTY * (slope_change / max_slope_change) ** 2
+                    kink_pen_raw = BRANCH_KINK_PENALTY * (slope_change / max_slope_change) ** 2
+                    kink_gap_scaled = False
+                    if (getattr(pts[pi], "phase", "") == "gap"
+                            or getattr(pts[pi - 1], "phase", "") == "gap"
+                            or getattr(pts[pi - 2], "phase", "") == "gap"):
+                        kink_gap_scaled = True
+                        kink_pen_scaled = kink_pen_raw * BRANCH_KINK_GAP_SCALE
+                    else:
+                        kink_pen_scaled = kink_pen_raw
+                    kink_pen = min(kink_pen_scaled, BRANCH_KINK_PENALTY_CAP)
                     hard_kink_pen = (BRANCH_HARD_KINK_PENALTY
                                      if abs(err) > BRANCH_HARD_KINK_FACTOR * allowed
                                      else 0.0)
@@ -1115,12 +1219,20 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                         anchor_pen = (BRANCH_ANCHOR_PENALTY
                                       * (abs(tr_cur - anchor_r) / max_abs_drift) ** 2)
 
-                    cost = cost_prev - float(sc_cur) + smooth_pen + kink_pen + hard_kink_pen + branch_switch_pen + anchor_pen + jump_pen
+                    # v119: Midpoint-Test komplett deaktiviert.
+                    # Er verursachte pro Segment zusaetzliche corr_at()/NDP-Arbeit und
+                    # brachte nach dem Gap-Kink-Guard keinen erkennbaren Nutzen mehr.
+                    midpt_pen = 0.0
+                    cost = cost_prev - float(sc_cur) + smooth_pen + kink_pen + hard_kink_pen + branch_switch_pen + anchor_pen + jump_pen + midpt_pen
                     key = (i_prev1, i_cur)
                     if key not in new_states or cost < new_states[key][0]:
                         slope_cur = (tr_cur - tr_prev1) / dn_cur
                         new_states[key] = (cost, tr_prev1, tr_cur, slope_cur, (i_prev2, i_prev1))
                         back[key] = (i_prev2, i_prev1)
+
+                    # v115: exhaustive debug tracing removed.
+                    # Only the DP state and backref needed for the actual algorithm are kept.
+
             if not new_states:
                 return points_in
             all_back.append(back)
@@ -1141,38 +1253,86 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         if any(i is None for i in idx_path):
             return points_in
 
+        # v115: Exhaustive debug tables removed for speed.
+        dp_final_path = []
+        dp_all_states_unpruned = []
+        dp_raw_summary_unpruned = []
+        dp_candidate_lists_unpruned = []
+
         # Track-Rs konsistent aus dem rekonstruierten Pfad erzeugen.
-        # closest_branch_copy ergibt unveraendertes Track in "entfalteter" Raumdarstellung;
-        # der reale Release-Offset (best_r = raw_r) bleibt korrekt zugeordnet.
+        # v103-fix: best_r = track (entfaltet), nicht raw.
+        # raw liegt immer in [0, r_max); wenn der Track weiter als r_max driftet,
+        # alternieren die raw-T-Kopien mit Schritt ≈±T → springende LUT-Ausgabe.
+        # GrandOrgue interpoliert linear zwischen LUT-Eintraegen: korrekt nur wenn
+        # aufeinanderfolgende Werte monoton und < T/2 auseinanderliegen.
+        # Der unentfaltete Track ist glatt und loest das Aliasing-Problem.
         out = []
         prev_track = None
         prevprev_track = None
         prev_n = None
         prevprev_n = None
-        for p, cands, ci in zip(pts, cand_lists, idx_path):
+        for _pi_out, (p, cands, ci) in enumerate(zip(pts, cand_lists, idx_path)):
             raw, sc = cands[int(ci)]
+
+            # Dieselbe lokale Praediktion wie beim Track-Rebuild, aber zusaetzlich
+            # als Debug-Information festhalten. Wichtig: pred_r ist im entfalteten
+            # Track-Raum, raw_r bleibt die echte Release-Offset-Zeile der
+            # Korrelationslandschaft.
             if prev_track is None:
+                pred_r = None
                 track = float(raw)
             elif prevprev_track is None:
-                track = closest_branch_copy(int(raw), prev_track, T_int)
+                pred_r = prev_track
+                track = closest_branch_copy(int(raw), pred_r, T_int)
             else:
                 slope = (prev_track - prevprev_track) / max(1, prev_n - prevprev_n)
                 pred_r = prev_track + slope * max(1, p.n - prev_n)
                 track = closest_branch_copy(int(raw), pred_r, T_int)
+
+            # Negativer Track: Phase hat 0 unterschritten und wraps um T.
+            # max(0,...) wuerde zu flacher Nulllinie fuehren; mod T gibt
+            # korrekte Phase (z.B. track=-9, T=52 → 43).
+            if track < 0 and T_int > 0:
+                best_r_out = int(round(track % T_int))
+            else:
+                best_r_out = int(round(track))
             npnt = LutPoint(n=p.n, loop_pos=p.loop_pos,
-                            best_r=int(raw), best_score=float(sc), phase=p.phase,
+                            best_r=best_r_out, best_score=float(sc), phase=p.phase,
                             raw_r=int(raw), raw_score=float(sc),
                             folded=False, fold_ratio=1.0)
             npnt.track_r = float(track)
-            npnt.predicted_r = None
-            npnt.pred_error = 0.0 if prev_track is None else abs(track - prev_track)
+            npnt.predicted_r = None if pred_r is None else float(pred_r)
+            npnt.pred_error = 0.0 if pred_r is None else abs(float(track) - float(pred_r))
             npnt.candidates = cands
+            # v115: Keep only minimal chosen raw for optional display;
+            # do not build per-candidate debug tables.
+            npnt.debug_chosen_raw = int(raw)
+            npnt.debug_chosen_index = int(ci)
+            npnt.debug_candidates = []
+            npnt.dp_full_trace = []
             out.append(npnt)
             prevprev_track, prev_track = prev_track, track
             prevprev_n, prev_n = prev_n, p.n
 
         # Nicht ausgefilterte Originalpunkte, falls es sie gab, hinten anhaengen.
         return out
+
+    def _assign_approach_flags(points_in: list) -> None:
+        """Setzt pro Punkt die Segmentrichtung vom Vorgänger zu diesem Punkt.
+
+        Die Richtung wird aus dem entfalteten track_r abgeleitet und bleibt auch
+        nach Folding/Pruning erhalten. Dadurch kann eine gefaltete LUT später
+        eindeutig interpoliert werden, ohne auf den kuerzesten Kreisweg raten zu
+        muessen. Fuer Punkt 0 ist das Flag bedeutungslos.
+        """
+        if not points_in:
+            return
+        pts = sorted(points_in, key=lambda p: p.loop_pos)
+        pts[0].approach_up = True
+        for a, b in zip(pts, pts[1:]):
+            ta = float(getattr(a, "track_r", a.best_r))
+            tb = float(getattr(b, "track_r", b.best_r))
+            b.approach_up = (tb - ta) >= 0.0
 
     def _try_fold(points_in: list) -> tuple:
         """Bestimmt ob der [0, 2T)-Pfad auf [0, T) gefaltet werden kann."""
@@ -1332,23 +1492,42 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
             _append_adaptive_target(n, "sparse", 0)
 
     # ── Phase 3: Gap-Fill ─────────────────────────────────────────────────────
+    # v118: Gap-Fill gedrosselt. Die alte Schleife konnte bei verrauschten
+    # lokalen Peaks einen grossen Sparse-Abstand bis auf dn=1 herunterteilen.
+    # Das ist teuer und liefert meistens nur Quantisierungs-/Korrelationsrauschen.
+    # Deshalb:
+    #   - kein Gap-Fill mehr unter GAP_FILL_MIN_DN Perioden Abstand,
+    #   - globales Insert-Limit,
+    #   - raw_gap allein triggert nur am Anfang; sonst entscheidet die
+    #     Abweichung vom vorhergesagten Track (track_gap).
     gap_thresh = T_int // 4
+    gap_err_thresh = max(2.0, T_int / 10.0)
     idx = 0
-    while idx + 1 < len(points) and len(points) < MAX_TOTAL:
+    gap_inserts = 0
+    while idx + 1 < len(points) and len(points) < MAX_TOTAL and gap_inserts < GAP_FILL_MAX_INSERTS:
         # v82: Gap-Erkennung im echten [0, 2T)-Raum via track_r.
         # Kein % T_int mehr — track_r ist der branch-konsistente Pfadwert.
+        dn_pair = max(1, points[idx + 1].n - points[idx].n)
+        if dn_pair < GAP_FILL_MIN_DN:
+            idx += 1
+            continue
+
         track_r_a = getattr(points[idx],     "track_r", float(points[idx].best_r))
         track_r_b = getattr(points[idx + 1], "track_r", float(points[idx + 1].best_r))
         raw_gap = abs(track_r_b - track_r_a)
         track_gap = 0.0
+        have_prediction = False
         if idx >= 1:
             track_r_prev = getattr(points[idx - 1], "track_r", None)
             if track_r_prev is not None:
                 dn0 = max(1, points[idx].n - points[idx - 1].n)
                 slope0 = (track_r_a - float(track_r_prev)) / dn0
-                pred_next = track_r_a + slope0 * (points[idx + 1].n - points[idx].n)
+                pred_next = track_r_a + slope0 * dn_pair
                 track_gap = abs(track_r_b - pred_next)
-        if raw_gap > gap_thresh or track_gap > max(2.0, T_int / 10.0):
+                have_prediction = True
+
+        should_fill = (track_gap > gap_err_thresh) if have_prediction else (raw_gap > gap_thresh)
+        if should_fill:
             na = int(round(points[idx].loop_pos / T_float))
             nb = int(round(points[idx+1].loop_pos / T_float))
             nm = (na + nb) // 2
@@ -1357,7 +1536,8 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 pt = corr_at(nm, "gap", pred)
                 if pt.best_score > -1.5:
                     points.insert(idx + 1, pt)
-                continue
+                    gap_inserts += 1
+                    continue
         idx += 1
 
     # ── Phase 4: Branch-Lock-Reparatur ───────────────────────────────────────
@@ -1393,6 +1573,9 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     can_fold, fold_reason = _try_fold(points)
     if can_fold:
         for pt in points:
+            if not hasattr(pt, "debug_chosen_raw"):
+                pt.debug_chosen_raw = int(pt.best_r)
+            pt.debug_best_r_before_fold = int(pt.best_r)
             fold_sc_ratio = 1.0
             folded_r = pt.best_r % T_int
             cands = list(getattr(pt, "candidates", []) or [])
@@ -1411,6 +1594,31 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         meta["fold_reason"] = fold_reason
 
     points = [p for p in points if p.best_score > -1.5]
+
+    # v121: Qualitaets-Scores vor Pruning bestimmen. Minimum/p10 einzelner
+    # Transientenpunkte sind als Warnkriterium zu hart; Median und Anteil
+    # schwacher Punkte nach Stabilisierung sind robuster.
+    if stable_at_n is not None:
+        quality_pts = [p for p in points if p.n >= stable_at_n]
+    else:
+        # Fallback: dichte Startphase ignorieren, weil sie den Einschwingvorgang
+        # enthaelt und nicht zwingend gut korrelieren muss.
+        quality_pts = [p for p in points if p.phase in ("sparse", "gap")]
+        if not quality_pts:
+            quality_pts = list(points)
+    quality_scores = [float(p.best_score) for p in quality_pts if p.best_score > -1.5]
+    if quality_scores:
+        q_sorted = sorted(quality_scores)
+        p10_idx = max(0, int(len(q_sorted) * 0.10) - 1)
+        meta["score_p10"] = float(q_sorted[p10_idx])
+        meta["score_median"] = float(np.median(q_sorted))
+        meta["low_score_fraction"] = float(sum(1 for sc in q_sorted if sc < SCORE_BAD) / len(q_sorted))
+        meta["quality_score_count"] = int(len(q_sorted))
+    else:
+        meta["score_p10"] = 0.0
+        meta["score_median"] = 0.0
+        meta["low_score_fraction"] = 0.0
+        meta["quality_score_count"] = 0
 
     # v82: LUT-Pruning: redundante Punkte entfernen.
     def _prune_lut(pts: list) -> list:
@@ -1453,6 +1661,11 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         n_before_prune = len(points)
         points = _prune_lut(points)
         meta["pruned_count"] = n_before_prune - len(points)
+
+    # v125: Nach dem Pruning die Segmentrichtung neu aus dem erhaltenen
+    # entfalteten track_r ableiten. Das ist noetig, weil entfernte
+    # Zwischenpunkte sonst bei gefalteten LUTs die Wrap-Richtung verlieren.
+    _assign_approach_flags(points)
 
     if len(points) >= 4:
         a, b, resid = _fit_track(points)
@@ -1738,6 +1951,10 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.lut_points_raw_count = len(pa.lut_points) + pruned_count
         pa.lut_r_search_max  = int(lut_meta.get("r_search_max",  2 * pa.T_int))
         pa.lut_search_periods = int(lut_meta.get("search_periods", 2))
+        pa.lut_score_p10 = float(lut_meta.get("score_p10", 0.0) or 0.0)
+        pa.lut_score_median = float(lut_meta.get("score_median", 0.0) or 0.0)
+        pa.lut_low_score_fraction = float(lut_meta.get("low_score_fraction", 0.0) or 0.0)
+        pa.lut_quality_score_count = int(lut_meta.get("quality_score_count", 0) or 0)
 
         if not pa.lut_points:
             pa.error = "Keine LUT-Punkte"
@@ -1794,13 +2011,12 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             pa.legacy_reason = "instabil"
         else:
             bad_reasons = []
-            if pa.lut_points:
-                all_scores_sorted = sorted([p.best_score for p in pa.lut_points])
-                p10_idx = max(0, int(len(all_scores_sorted) * 0.10) - 1)
-                score_p10 = all_scores_sorted[p10_idx]
-                pa.lut_score_p10 = score_p10
-                if score_p10 < LEGACY_SCORE_MIN_THRESHOLD:
-                    bad_reasons.append(f"score_p10<{LEGACY_SCORE_MIN_THRESHOLD:.2f}")
+            # v121: Legacy wegen schlechter Score-Qualitaet nur, wenn der typische
+            # Score nach Stabilisierung schlecht ist. Einzelne Transientenpunkte
+            # duerfen keine Legacy-/Warnlawine ausloesen.
+            if (pa.lut_quality_score_count >= 4 and pa.lut_score_median > 0.0
+                    and pa.lut_score_median < LEGACY_SCORE_MIN_THRESHOLD):
+                bad_reasons.append(f"score_median<{LEGACY_SCORE_MIN_THRESHOLD:.2f}")
             # v72: R und Anzahl der Gap-Punkte sind fuer branch-getrackte,
             # linear driftende Pfade keine verlaesslichen Fehlerkriterien mehr.
             # Ein sauberer linearer Drift verteilt best_r % T ueber den Kreis
@@ -1824,54 +2040,81 @@ def circ_interp(r_a: int, r_b: int, t: float, T: int) -> int:
     return int(round(r_a + delta * t)) % T
 
 
+def _directed_delta_folded(r0: int, r1: int, approach_up: bool, T: int) -> float:
+    """Gerichtete Phasendifferenz r0 -> r1 im gefalteten Raum.
+
+    approach_up=True  : positive Richtung über 0/T falls nötig.
+    approach_up=False : negative Richtung über 0/T falls nötig.
+    """
+    if T <= 0:
+        return float(r1 - r0)
+    r0 = int(r0) % T
+    r1 = int(r1) % T
+    if approach_up:
+        return float((r1 - r0) % T)
+    return -float((r0 - r1) % T)
+
+
 def get_position_for_correlation(loop_pos: int, lut_points: list, T: int,
                                      folded: bool = True) -> int:
-    """Simuliert GOs GetPositionForCorrelation mit circ_interp und Step-Funktion.
-    v47: Step-Funktion fur |diff| > T/4 (kein Interpolieren ueber Branch-Grenze),
-         entspricht dem GO-Runtime-Verhalten seit Branch-Consensus-Entfernung.
-    v82: folded=False -> lineare Interpolation im [0,2T)-Raum ohne circ_interp."""
+    """Simuliert die LUT-Interpolation fuer Plot und Crossfade-Simulation.
+
+    v125:
+    - Vor dem ersten LUT-Punkt: horizontaler Vorlauf mit erstem r.
+    - Nach dem letzten LUT-Punkt: lineare Extrapolation des letzten Segments.
+    - folded=True nutzt nicht mehr blind den kuerzesten Kreisweg, sondern das
+      pro Punkt gespeicherte approach_up-Bit. Dadurch bleibt die vom DP gefundene
+      Wrap-Richtung auch nach Pruning eindeutig.
+    - folded=False interpoliert/extrapoliert direkt im ausgegebenen LUT-Raum.
+    """
     if not lut_points:
         return 0
-    if folded:
-        if loop_pos <= lut_points[0].loop_pos:
-            return lut_points[0].best_r % T
-        if loop_pos >= lut_points[-1].loop_pos:
-            return lut_points[-1].best_r % T
-    else:
-        if loop_pos <= lut_points[0].loop_pos:
-            return int(lut_points[0].best_r)
-        if loop_pos >= lut_points[-1].loop_pos:
-            return int(lut_points[-1].best_r)
-    lo, hi = 0, len(lut_points) - 1
+
+    pts = sorted(lut_points, key=lambda p: p.loop_pos)
+    if len(pts) == 1:
+        return int(pts[0].best_r) % T if folded else int(round(float(pts[0].best_r)))
+
+    def _folded_interp(pa_pt, pb_pt, pos: int) -> float:
+        span = max(1, pb_pt.loop_pos - pa_pt.loop_pos)
+        t = (pos - pa_pt.loop_pos) / span
+        r_a = int(pa_pt.best_r) % T
+        r_b = int(pb_pt.best_r) % T
+        up = bool(getattr(pb_pt, "approach_up", True))
+        return float(r_a) + t * _directed_delta_folded(r_a, r_b, up, T)
+
+    def _unfolded_interp(pa_pt, pb_pt, pos: int) -> float:
+        span = max(1, pb_pt.loop_pos - pa_pt.loop_pos)
+        t = (pos - pa_pt.loop_pos) / span
+        r_a = float(pa_pt.best_r)
+        r_b = float(pb_pt.best_r)
+        return r_a + t * (r_b - r_a)
+
+    # Vorlauf: vor dem ersten bekannten Stuetzpunkt konstant auf erstem Wert.
+    if loop_pos <= pts[0].loop_pos:
+        return int(pts[0].best_r) % T if folded else int(round(float(pts[0].best_r)))
+
+    # Nachlauf: letzten linearen Trend bis zum Ende der Datei fortsetzen.
+    if loop_pos >= pts[-1].loop_pos:
+        if folded:
+            y = _folded_interp(pts[-2], pts[-1], loop_pos)
+            return int(round(y)) % T
+        y = _unfolded_interp(pts[-2], pts[-1], loop_pos)
+        return int(round(y))
+
+    lo, hi = 0, len(pts) - 1
     while lo + 1 < hi:
         mid = (lo + hi) // 2
-        if lut_points[mid].loop_pos <= loop_pos:
+        if pts[mid].loop_pos <= loop_pos:
             lo = mid
         else:
             hi = mid
-    pa_pt = lut_points[lo]
-    pb_pt = lut_points[hi]
-    span  = pb_pt.loop_pos - pa_pt.loop_pos
-    t = (loop_pos - pa_pt.loop_pos) / span if span > 0 else 0.0
+
     if folded:
-        if span <= 0:
-            return pa_pt.best_r % T
-        r_a = pa_pt.best_r % T
-        r_b = pb_pt.best_r % T
-        # v47: Step-Funktion bei Branch-Abstand > T/4 (wie GO-Runtime).
-        diff = shortest_circular_delta(float(r_a), float(r_b), T)
-        if abs(diff) > T / 4.0:
-            return r_a if t < 0.5 else r_b
-        return circ_interp(r_a, r_b, t, T)
-    else:
-        if span <= 0:
-            return int(pa_pt.best_r)
-        r_a = float(pa_pt.best_r)
-        r_b = float(pb_pt.best_r)
-        if abs(r_b - r_a) > T / 2.0:
-            return int(r_a) if t < 0.5 else int(r_b)
-        result = r_a + t * (r_b - r_a)
-        return int(round(result))
+        y = _folded_interp(pts[lo], pts[hi], loop_pos)
+        return int(round(y)) % T
+
+    y = _unfolded_interp(pts[lo], pts[hi], loop_pos)
+    return int(round(y))
 
 
 # ─── Legacy Release Alignment (Nachbau GOSoundReleaseAlignTable) ─────────────
@@ -2639,11 +2882,12 @@ class CorrLandscapeWindow:
         self._zoom_mode = "lut"   # "lut" = Auto-Zoom auf LUT, "full" = Gesamtansicht
         self._lut_xlim  = None
         self._lut_ylim  = None
+        self._debug_var = tk.BooleanVar(value=True)
 
         self.win = tk.Toplevel(parent)
         self.win.title(f"Korrelationslandschaft — {pa.rank_name} {midi_to_name(pa.midi_note)} "
                        f"{pa.perspective} / {pa.release_type}")
-        self.win.geometry("1100x700")
+        self.win.geometry("1450x820")
         self.win.configure(bg=C_BG)
         self.win.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -2680,6 +2924,16 @@ class CorrLandscapeWindow:
         tk.Button(bar, text="Gesamtansicht",
                   command=self._zoom_to_full, **btn_kw).pack(side=tk.LEFT, padx=4)
 
+        tk.Checkbutton(bar, text="Debug-Kandidaten",
+                       variable=self._debug_var, command=self._plot,
+                       bg=C_BG3, fg=C_TEXT, selectcolor=C_BG2,
+                       activebackground=C_BG3, activeforeground=C_TEXT,
+                       font=("Consolas", 9)).pack(side=tk.LEFT, padx=6)
+
+        self._btn_dbg_csv = tk.Button(bar, text="Debug CSV",
+                                      command=self._export_debug_csv, **btn_kw)
+        self._btn_dbg_csv.pack(side=tk.LEFT, padx=4)
+
         self._btn_csv = tk.Button(bar, text="💾  CSV exportieren",
                                    command=self._export_csv,
                                    state=tk.DISABLED, **btn_kw)
@@ -2693,8 +2947,10 @@ class CorrLandscapeWindow:
 
         # Info
         pa = self.pa
+        r_info = getattr(pa, "lut_r_search_max", 0) or (2 * pa.T_int)
         info = (f"T={pa.T_int}  SR={pa.sample_rate}  "
-                f"r in [0, {2*pa.T_int})  "
+                f"NDP-Fenster={pa.crossfade_len_samples}  "
+                f"r in [0, {r_info})  "
                 f"n_total={len(pa.attack_path) and pa.n_total or '?'}")
         tk.Label(self.win, text=info, bg=C_BG, fg=C_TEXT2,
                  font=("Consolas", 9)).pack(anchor=tk.W, padx=8, pady=(4,0))
@@ -2748,11 +3004,10 @@ class CorrLandscapeWindow:
             T       = pa.T_int
             T_f     = pa.T_float
             ds      = min(4, T // 500) if T >= 500 else 1
-            # window_len: Crossfade-Laenge (wie in GO: min(crossfade_len, 2T))
-            # r_max:      Suchbereich aus pa.lut_r_search_max (adaptiv: 2T oder 4T)
-            window_len = min(pa.crossfade_len_samples, 2 * T)
-            if window_len < 4:
-                window_len = 2 * T
+            # v98: NDP-Fensterlaenge muss identisch zu compute_lut() sein.
+            # crossfade_len_samples ist die Laenge des Korrelationsfensters.
+            # 2*T bzw. pa.lut_r_search_max ist dagegen nur das r-Suchfenster.
+            window_len = int(pa.crossfade_len_samples) if pa.crossfade_len_samples >= 4 else 2 * T
             r_search_max = getattr(pa, "lut_r_search_max", 0) or (2 * T)
             r_max        = r_search_max
             # Kuerzen wenn Release zu kurz
@@ -2762,6 +3017,8 @@ class CorrLandscapeWindow:
                 r_max      = len(rel_mono) - window_len
             elif available < r_max:
                 r_max = available
+            self._window_len = int(window_len)
+            self._r_search_max = int(r_max)
             window_len_d = max(4, window_len // ds)
             r_max_d      = max(1, r_max // ds)
 
@@ -2842,7 +3099,12 @@ class CorrLandscapeWindow:
         self._status.config(text=f"{done}/{total} Positionen")
 
     def _on_done(self):
-        self._status.config(text="Fertig — zoom mit Mausrad/Toolbar")
+        win = getattr(self, "_window_len", None)
+        rmax = getattr(self, "_r_search_max", None)
+        if win is not None and rmax is not None:
+            self._status.config(text=f"Fertig — NDP-Fenster={win}, r_max={rmax}")
+        else:
+            self._status.config(text="Fertig — zoom mit Mausrad/Toolbar")
         self._btn_csv.config(state=tk.NORMAL)
         self._plot()
 
@@ -2891,10 +3153,37 @@ class CorrLandscapeWindow:
         # sichtbar abweicht.
         if self.pa.lut_points:
             pts_sorted = sorted(self.pa.lut_points, key=lambda p: p.n)
+
+            # Debug-Overlay: alle internen Kandidaten, die dem DP fuer genau
+            # diese LUT-n-Positionen zur Verfuegung standen. Grau = Kandidat,
+            # Magenta-Quadrat = gewaehlter raw_r vor eventuellem Folding. Damit
+            # sieht man sofort, ob ein sichtbares Maximum im Kandidatensatz fehlt
+            # oder ob es trotz vorhandenem Kandidaten durch die DP-Kosten verliert.
+            if getattr(self, "_debug_var", None) is not None and self._debug_var.get():
+                cand_x, cand_y, cand_s = [], [], []
+                chosen_x, chosen_y = [], []
+                for p in pts_sorted:
+                    for c in getattr(p, "debug_candidates", []):
+                        cand_x.append(p.n)
+                        cand_y.append(c.get("raw", 0))
+                        cand_s.append(10 + 30 * max(0.0, min(1.0, float(c.get("score", 0.0)))))
+                    if hasattr(p, "debug_chosen_raw"):
+                        chosen_x.append(p.n)
+                        chosen_y.append(int(getattr(p, "debug_chosen_raw")))
+                if cand_x:
+                    ax.scatter(cand_x, cand_y, c="#666666", marker=".",
+                               s=cand_s, alpha=0.45, zorder=5,
+                               label="DP-Kandidaten")
+                if chosen_x:
+                    ax.scatter(chosen_x, chosen_y, c="#ff00ff", marker="s",
+                               s=42, alpha=0.9, zorder=7,
+                               edgecolors="black", linewidths=0.4,
+                               label="DP gewählt raw")
+
             xs_eff = [p.n for p in pts_sorted]
             ys_eff = [p.best_r for p in pts_sorted]  # kein % T - best_r ist korrekt gefaltet/ungefaltet
             ax.scatter(xs_eff, ys_eff,
-                       c="white", marker="o", s=28, zorder=6,
+                       c="white", marker="o", s=28, zorder=8,
                        edgecolors="black", linewidths=0.6,
                        label="LUT best_r")
 
@@ -2950,6 +3239,14 @@ class CorrLandscapeWindow:
         self._fig.tight_layout(rect=[0, 0.08, 0.82, 1])
         self._canvas.draw()
 
+    def _export_debug_csv(self):
+        """v115: Exhaustive DP debug export is disabled for normal-speed scans."""
+        try:
+            self._status.config(text="Debug export disabled in v115-fast-plot-wrap")
+        except Exception:
+            pass
+        return
+
     def _export_csv(self):
         if self.matrix is None:
             return
@@ -2976,6 +3273,8 @@ class CorrLandscapeWindow:
             w.writerow(["# Release", self.pa.release_type])
             w.writerow(["# T_int", self.T])
             w.writerow(["# ds", ds])
+            w.writerow(["# NDP_Window_Samples", getattr(self, "_window_len", "")])
+            w.writerow(["# R_Search_Max", getattr(self, "_r_search_max", "")])
             w.writerow(["# Fensterfunktion", self._win_var.get()])
             w.writerow([])
             # Spaltenheader: n-Werte
@@ -3527,7 +3826,7 @@ class LUTAnalyzerApp(tk.Tk):
                 + f"  r_max={getattr(pa,'lut_r_search_max',2*pa.T_int)}"
                 + f"  Fold: {getattr(pa,'lut_fold_reason','')}",
                 f"Punkte: {getattr(pa, 'lut_points_raw_count', len(pa.lut_points))} vor Pruning -> {len(pa.lut_points)} nach Pruning  (entfernt: {getattr(pa, 'lut_points_raw_count', len(pa.lut_points)) - len(pa.lut_points)})",
-                f"score_p10={getattr(pa, 'lut_score_p10', 0.0):.3f}  score_min={pa.score_min:.3f}  score_mean={pa.score_mean:.3f}",
+                f"score_med={getattr(pa, 'lut_score_median', 0.0):.3f}  low<{SCORE_BAD:.2f}={getattr(pa, 'lut_low_score_fraction', 0.0)*100:.0f}%  q_n={getattr(pa, 'lut_quality_score_count', 0)}  score_min={pa.score_min:.3f}  score_mean={pa.score_mean:.3f}",
                 f"Legacy-Fallback: {'ja (' + pa.legacy_reason + ')' if pa.legacy_fallback else 'nein'}",
             ]
             info = "\n".join(info_parts)
@@ -3570,40 +3869,52 @@ class LUTAnalyzerApp(tk.Tk):
         lut_folded = getattr(pa, "lut_folded", True)
 
         # Interpolationslinie
+        # v123: Der Hauptplot verwendet jetzt exakt dieselbe Arbeitsgrundlage
+        # wie die Crossfade-Simulation: get_position_for_correlation().
+        # Damit kann der Plot nicht mehr durch eine eigene, abweichende
+        # Wrap-/Sheet-Logik andere Verbindungen zeigen als die Simulation.
         interp_x = []
         interp_y = []
-        for p0, p1 in zip(pts_sorted, pts_sorted[1:]):
-            n0, n1 = p0.n, p1.n
-            if n1 <= n0:
-                continue
-            if lut_folded:
-                r0 = float(p0.best_r)
-                r1 = float(p1.best_r)
-                d = shortest_circular_delta(r0, r1, T)
-                steps = max(2, min(200, n1 - n0 + 1))
-                last_y = None
-                for i in range(steps):
-                    t_frac = i / (steps - 1)
-                    x = n0 + t_frac * (n1 - n0)
-                    y = (r0 + t_frac * d) % T
-                    if last_y is not None and abs(y - last_y) > T / 2:
-                        interp_x.append(float("nan"))
-                        interp_y.append(float("nan"))
-                    interp_x.append(x)
-                    interp_y.append(y)
-                    last_y = y
-            else:
-                r0 = float(p0.best_r)
-                r1 = float(p1.best_r)
-                steps = max(2, min(200, n1 - n0 + 1))
-                for i in range(steps):
-                    t_frac = i / (steps - 1)
-                    x = n0 + t_frac * (n1 - n0)
-                    y = r0 + t_frac * (r1 - r0)
-                    interp_x.append(x)
-                    interp_y.append(y)
+        visual_phase_wrap = False
+
+        if len(pts_sorted) >= 2:
+            # v125: Die Plotlinie zeigt den ganzen Gueltigkeitsbereich: vor dem
+            # ersten Punkt horizontal ab n=0 (bzw. min_sample) und nach dem
+            # letzten Punkt den letzten linearen Trend bis zum Ende der Attack-
+            # Datei. So entspricht der Graph der Simulation/Runtime-Basis.
+            n_min_pts = min(p.n for p in pts_sorted)
+            n_max_pts = max(p.n for p in pts_sorted)
+            n_min = 0.0 if getattr(pa, "min_sample", 0) == 0 else max(0.0, float(pa.min_sample) / max(pa.T_float, 1e-9))
+            n_max = float(getattr(pa, "n_total", 0) or n_max_pts)
+            n_max = max(n_max, float(n_max_pts))
+            # Fein genug fuer glatte Ansicht, aber begrenzt fuer GUI-Performance.
+            sample_count = max(2, min(1600, int(max(1.0, n_max - n_min)) + 1))
+            xs = np.linspace(float(n_min), float(n_max), sample_count)
+            last_y = None
+            for x in xs:
+                loop_pos = int(round(x * pa.T_float))
+                y = float(get_position_for_correlation(
+                    loop_pos, pts_sorted, T, folded=lut_folded))
+
+                # Nur fuer die Darstellung trennen: Die Simulation bekommt den
+                # Wert direkt aus get_position_for_correlation(); im Plot soll
+                # ein Sprung nicht als vertikale Scheinlinie erscheinen.
+                if last_y is not None:
+                    # Nur bei gefalteter Ausgabe sind Spruenge ueber die
+                    # Periodengrenze optische Phase-Wraps. Ungefaltete LUTs
+                    # duerfen grosse lineare Bewegungen zeigen.
+                    if lut_folded:
+                        jump_limit = max(2.0, float(T) / 2.0)
+                        if abs(y - last_y) > jump_limit:
+                            interp_x.append(float("nan"))
+                            interp_y.append(float("nan"))
+                            visual_phase_wrap = True
+                interp_x.append(float(x))
+                interp_y.append(y)
+                last_y = y
+
         if interp_x:
-            label_interp = "GO-Kreisinterpolation" if lut_folded else "Lineare Interpolation"
+            label_interp = "GO/Simulation-Interpolation"
             ax.plot(interp_x, interp_y, color=C_TEXT, linewidth=1.2,
                     alpha=0.75, zorder=1, label=label_interp)
 
@@ -3641,13 +3952,17 @@ class LUTAnalyzerApp(tk.Tk):
                         linestyle=":", alpha=0.8, label=label)
 
         ax.set_xlabel("Periodenindex n", color=C_TEXT2)
-        if lut_folded:
-            ax.set_ylabel("best_r [0,T)", color=C_TEXT2)
-            ax.set_ylim(-5, T + 5)
-        else:
-            ax.set_ylabel(f"best_r [0,{r_search_max})", color=C_TEXT2)
-            ax.set_ylim(-5, r_search_max + 5)
-        title = "LUT-Stuetzpunkte + " + ("GO-Kreisinterpolation" if lut_folded else "Lineare Interpolation")
+        max_point_y = max([float(p.best_r) for p in pts_sorted] + [0.0])
+        max_track_y = max([float(getattr(p, "track_r", p.best_r))
+                           for p in pts_sorted] + [0.0])
+        max_interp_y = max([v for v in interp_y if not (isinstance(v, float) and math.isnan(v))] + [0.0])
+        # Die y-Skalierung soll alle sichtbaren Punkte und die tatsaechliche
+        # Simulations-/GO-Interpolationslinie zeigen. Falls obere T-Sheets
+        # benutzt werden, darf der Plot entsprechend bis r_search_max/2T gehen.
+        y_top = max(float(T), float(r_search_max), max_point_y, max_track_y, max_interp_y) + 5.0
+        ax.set_ylabel(f"best_r / GO r [0,{int(round(y_top-5))}]", color=C_TEXT2)
+        ax.set_ylim(-5, y_top)
+        title = "LUT-Stuetzpunkte + GO/Simulation-Interpolation"
         if pa.drift_mode:
             title += f"  (Drift {pa.drift_per_period:.3f} smp/Periode)"
         ax.set_title(title, color=C_TEXT, fontsize=10)
