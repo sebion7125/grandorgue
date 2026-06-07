@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v161-lab-recompute-phase3b"
+TOOL_VERSION = "v162-lab-phase3b-from-file"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -1197,6 +1197,90 @@ def _run_global_branch_dp(points_in: list, T_int: int, r_max: int, search_period
     return out
 
 
+def _fit_track(points_subset):
+    pts = [p for p in points_subset if getattr(p, "track_r", None) is not None
+           and p.best_score > -1.5]
+    if len(pts) < 2:
+        return 0.0, float(getattr(pts[-1], "track_r", 0.0)) if pts else 0.0, float("inf")
+    ns_fit = np.array([p.n for p in pts], dtype=float)
+    rs_fit = np.array([float(p.track_r) for p in pts], dtype=float)
+    a, b = np.polyfit(ns_fit, rs_fit, 1)
+    resid = float(np.max(np.abs(rs_fit - (a * ns_fit + b))))
+    return float(a), float(b), resid
+
+
+def _predict_track_r(points_subset, n: int):
+    pts = [p for p in points_subset if getattr(p, "track_r", None) is not None
+           and p.best_score > -1.5]
+    if not pts:
+        return None
+    if len(pts) == 1:
+        return float(pts[-1].track_r)
+    a, b, _ = _fit_track(pts[-BRANCH_FIT_WIN:])
+    return a * float(n) + b
+
+
+def _make_corr_at(d: dict):
+    """Rekonstruiert corr_at-Closure aus gespeicherten Analyse-Segmenten."""
+    loop_seg      = d["loop_seg"]
+    release_ds    = d["release_ds"]
+    window_len_d  = d["window_len_d"]
+    r_max_d       = d["r_max_d"]
+    ds            = d["ds"]
+    T_float       = d["T_float"]
+    T_int         = d["T_int"]
+    n_start       = d["n_start"]
+    n_end         = d["n_end"]
+    search_periods = d["search_periods"]
+
+    def corr_at(n: int, phase: str, predicted_r=None) -> LutPoint:
+        if n < n_start or n >= n_end:
+            return LutPoint(n=n, loop_pos=0, best_r=0, best_score=-2.0, phase=phase)
+        cs   = int(round(n * T_float))
+        cs_d = cs // ds
+        if cs_d + window_len_d > len(loop_seg):
+            return LutPoint(n=n, loop_pos=cs, best_r=0, best_score=-2.0, phase=phase)
+        lw = loop_seg[cs_d : cs_d + window_len_d]
+        raw_cands_d, _scores_d = _corr_scores_and_candidates(
+            lw, release_ds, r_max_d, window_len_d)
+        candidates = _ensure_per_window_candidates(
+            raw_cands_d, _scores_d, max(1, T_int // ds), search_periods)
+        candidates = [(int(r_d * ds), float(sc)) for r_d, sc in candidates]
+        candidates_all = list(candidates)
+        candidates = _phase_separated_candidates(candidates, T_int, BRANCH_TOP_K)
+        best_raw, best_score = max(candidates, key=lambda item: item[1])
+        if predicted_r is None:
+            chosen_raw, chosen_score = best_raw, best_score
+            chosen_track, pred_error = float(chosen_raw), 0.0
+        else:
+            allowed = max(2.0, T_int / 10.0)
+            enriched = [(abs(closest_branch_copy(r, predicted_r, T_int) - predicted_r),
+                         r, sc, closest_branch_copy(r, predicted_r, T_int))
+                        for r, sc in candidates]
+            near = [e for e in enriched if e[0] <= allowed * BRANCH_HARD_LOCK_FACTOR]
+            if near:
+                pred_error, chosen_raw, chosen_score, chosen_track = max(near, key=lambda e: e[2])
+            else:
+                best_eff, chosen_raw, chosen_score = -1e30, best_raw, best_score
+                chosen_track = closest_branch_copy(best_raw, predicted_r, T_int)
+                pred_error   = abs(chosen_track - predicted_r)
+                for dist, r, sc, tr in enriched:
+                    eff = sc - BRANCH_PREDICT_PENALTY * (dist / allowed) ** 2
+                    if eff > best_eff:
+                        best_eff, chosen_raw, chosen_score, chosen_track, pred_error = eff, r, sc, tr, dist
+        pt = LutPoint(n=n, loop_pos=cs, best_r=int(chosen_raw),
+                      best_score=float(chosen_score), phase=phase,
+                      raw_r=int(chosen_raw), raw_score=float(best_score),
+                      folded=False, fold_ratio=1.0)
+        pt.track_r     = float(chosen_track)
+        pt.predicted_r = None if predicted_r is None else float(predicted_r)
+        pt.pred_error  = float(pred_error)
+        pt.candidates  = candidates
+        pt.all_candidates = candidates_all
+        return pt
+    return corr_at
+
+
 def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                 T_float: float, T_int: int,
                 crossfade_len_samples: int,
@@ -1248,101 +1332,13 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     window_len_d = max(4, window_len // ds)
     r_max_d      = max(1, r_max // ds)
 
-    def _fit_track(points_subset):
-        pts = [p for p in points_subset if getattr(p, "track_r", None) is not None
-               and p.best_score > -1.5]
-        if len(pts) < 2:
-            return 0.0, float(getattr(pts[-1], "track_r", 0.0)) if pts else 0.0, float("inf")
-        ns_fit = np.array([p.n for p in pts], dtype=float)
-        rs_fit = np.array([float(p.track_r) for p in pts], dtype=float)
-        a, b = np.polyfit(ns_fit, rs_fit, 1)
-        resid = float(np.max(np.abs(rs_fit - (a * ns_fit + b))))
-        return float(a), float(b), resid
-
-    def _predict_track_r(points_subset, n: int):
-        pts = [p for p in points_subset if getattr(p, "track_r", None) is not None
-               and p.best_score > -1.5]
-        if not pts:
-            return None
-        if len(pts) == 1:
-            return float(pts[-1].track_r)
-        fit_pts = pts[-BRANCH_FIT_WIN:]
-        a, b, _ = _fit_track(fit_pts)
-        return a * float(n) + b
-
-    def corr_at(n: int, phase: str, predicted_r: Optional[float] = None) -> LutPoint:
-        if n < n_start or n >= n_end:
-            return LutPoint(n=n, loop_pos=0, best_r=0, best_score=-2.0, phase=phase)
-        cs   = int(round(n * T_float))
-        cs_d = cs // ds
-        if cs_d + window_len_d > len(loop_seg):
-            return LutPoint(n=n, loop_pos=cs, best_r=0, best_score=-2.0, phase=phase)
-        lw = loop_seg[cs_d:cs_d + window_len_d]
-
-        raw_cands_d, _scores_d = _corr_scores_and_candidates(
-            lw, release_ds, r_max_d, window_len_d)
-        candidates = _ensure_per_window_candidates(
-            raw_cands_d, _scores_d, max(1, T_int // ds), search_periods)
-
-        # Downsampling zurück auf echte Sample-Offsets.
-        candidates = [(int(r_d * ds), float(sc)) for r_d, sc in candidates]
-        candidates_all = list(candidates)   # vor Phase-Trennung für Tuning Lab
-        candidates = _phase_separated_candidates(candidates, T_int, BRANCH_TOP_K)
-        best_raw, best_score = max(candidates, key=lambda item: item[1])
-
-        if predicted_r is None:
-            chosen_raw = best_raw
-            chosen_score = best_score
-            chosen_track = float(chosen_raw)
-            pred_error = 0.0
-        else:
-            # Kandidaten nach Score UND Nähe zum vorhergesagten Ast bewerten.
-            # v69: Wenn ein Kandidat im engen Korridor um den vorhergesagten
-            # Ast liegt, hat dieser Korridor Vorrang. Das verhindert den
-            # typischen End-of-WAV-Astwechsel, bei dem ein Nachbarast lokal
-            # minimal besser ist, obwohl der bisherige Ast linear stabil war.
-            # Hinweis: closest_branch_copy ist hier nur Vorhersagehilfe im
-            # lokalen Vorwärts-Pass. Der globale Pfad (_global_branch_path)
-            # verwendet keine T-Kopien mehr (realer [0,2T)-Raum).
-            allowed = max(2.0, T_int / 10.0)
-            enriched = []
-            for raw_r, sc in candidates:
-                track_r = closest_branch_copy(raw_r, predicted_r, T_int)
-                dist = abs(track_r - predicted_r)
-                enriched.append((dist, raw_r, sc, track_r))
-
-            hard_limit = allowed * BRANCH_HARD_LOCK_FACTOR
-            near = [e for e in enriched if e[0] <= hard_limit]
-            if near:
-                # Innerhalb des richtigen Ast-Korridors entscheidet wieder der Score.
-                dist, chosen_raw, chosen_score, chosen_track = max(near, key=lambda e: e[2])
-                pred_error = dist
-            else:
-                best_eff = -1e30
-                chosen_raw = best_raw
-                chosen_score = best_score
-                chosen_track = closest_branch_copy(best_raw, predicted_r, T_int)
-                pred_error = abs(chosen_track - predicted_r)
-                for dist, raw_r, sc, track_r in enriched:
-                    eff = sc - BRANCH_PREDICT_PENALTY * (dist / allowed) ** 2
-                    if eff > best_eff:
-                        best_eff = eff
-                        chosen_raw = raw_r
-                        chosen_score = sc
-                        chosen_track = track_r
-                        pred_error = dist
-
-        pt = LutPoint(n=n, loop_pos=cs, best_r=int(chosen_raw),
-                      best_score=float(chosen_score), phase=phase,
-                      raw_r=int(chosen_raw), raw_score=float(best_score),
-                      folded=False, fold_ratio=1.0)
-        # Nicht Teil der Dataclass, nur interne Diagnose/Tracking-Information.
-        pt.track_r = float(chosen_track)
-        pt.predicted_r = None if predicted_r is None else float(predicted_r)
-        pt.pred_error = float(pred_error)
-        pt.candidates = candidates
-        pt.all_candidates = candidates_all
-        return pt
+    _corr_at_data = {
+        "loop_seg": loop_seg, "release_ds": release_ds,
+        "window_len_d": window_len_d, "r_max_d": r_max_d,
+        "ds": ds, "T_float": T_float, "T_int": T_int,
+        "n_start": n_start, "n_end": n_end, "search_periods": search_periods,
+    }
+    corr_at = _make_corr_at(_corr_at_data)
 
     def _global_branch_path(points_in: list) -> list:
         """Thin wrapper — delegates to module-level _run_global_branch_dp."""
@@ -1587,8 +1583,9 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     # Wenn der Track nichtlinear driftet, messen wir Zwischenpunkte in Segmenten
     # mit hoher Krümmung (großer Steigungsänderung). Trigger: |Δsteigung| > T/30.
     # Halbieren bis Dense-Auflösung (CURVATURE_FILL_MIN_DN = DENSE_STEP Perioden).
-    meta["pre3b_points"] = list(points)   # Zustand vor Phase 3b (Tuning Lab)
-    meta["corr_at"]      = corr_at        # Closure für Lab-Recompute
+    meta["pre3b_points"]  = list(points)     # Zustand vor Phase 3b (Tuning Lab)
+    meta["corr_at"]       = corr_at         # Closure für Lab-Recompute (laufende Analyse)
+    meta["corr_at_data"]  = _corr_at_data   # Rohdaten für spätere Rekonstruktion
     curve_thresh = float(T_int) / CURVATURE_FILL_DIVISOR
     curve_inserts = 0
     measured_ns = set(p.n for p in points)
@@ -1616,7 +1613,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
             if nm in measured_ns:
                 ci += 1; continue
             pred = _predict_track_r(points[:ins_pos], nm)
-            pt   = corr_at(nm, "gap", pred)
+            pt   = corr_at(nm, "curve", pred)
             if pt.best_score > -1.5:
                 points.insert(ins_pos, pt)
                 measured_ns.add(nm)
@@ -2024,6 +2021,7 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.lut_points_predp  = lut_meta.get("predp_points", [])
         pa.lut_points_pre3b  = lut_meta.get("pre3b_points", [])
         pa.corr_at           = lut_meta.get("corr_at", None)
+        pa.corr_at_data      = lut_meta.get("corr_at_data", None)
         pa.lut_r_search_max  = int(lut_meta.get("r_search_max",  2 * pa.T_int))
         pa.lut_search_periods = int(lut_meta.get("search_periods", 2))
         pa.lut_score_p10 = float(lut_meta.get("score_p10", 0.0) or 0.0)
@@ -3612,12 +3610,54 @@ class CorrLandscapeWindow:
             'score_weight':     score_w,
         }
 
-        # Kandidaten-Quelle: wenn corr_at + pre3b verfügbar, Phase 3b+4 neu laufen
-        # (erlaubt Curve-Fill-Threshold live zu ändern). Sonst predp als Fallback.
+        # Kandidaten-Quelle: wenn corr_at verfügbar, Phase 3b+4 neu laufen.
+        # corr_at: live-Analyse > corr_at_data > WAV-Datei nachladen.
         import copy as _copy
         T_int_r = pa.T_int
-        if pa.lut_points_pre3b and pa.corr_at is not None:
-            pts3b = [_copy.copy(p) for p in pa.lut_points_pre3b]
+        _corr_at = getattr(pa, 'corr_at', None)
+        if _corr_at is None:
+            _ca_data = getattr(pa, 'corr_at_data', None)
+            if _ca_data is not None:
+                _corr_at = _make_corr_at(_ca_data)
+                pa.corr_at = _corr_at
+        if _corr_at is None:
+            try:
+                _atk, _sr, _, _ = read_wav_mono_float(pa.attack_path)
+                _rel, _,   _, _ = read_wav_mono_float(pa.release_path)
+                _wl  = pa.crossfade_len_samples
+                _sp  = (SMALL_T_SEARCH_PERIODS if T_int_r < SMALL_T_THRESHOLD
+                        else DEFAULT_SEARCH_PERIODS)
+                _rm  = min(_sp * T_int_r, len(_rel) - _wl)
+                _ds  = (min(4, T_int_r // 500) if T_int_r >= 500 else 1)
+                _atfl = len(_atk)
+                _nto  = max(1, int((_atfl - _wl) / pa.T_float))
+                _ns   = max(1, int(math.ceil(max(0, pa.min_sample) / pa.T_float)))
+                _ne   = (_nto if pa.max_sample is None
+                         else min(_nto, int(math.ceil(pa.max_sample / pa.T_float)) + 2))
+                if _ns >= _ne:
+                    _ns, _ne = 1, _nto
+                _lneed = min(int(round((_ne - 1) * pa.T_float)) + _wl, _atfl)
+                _ca_data = {
+                    "loop_seg":     _atk[:_lneed:_ds].astype(np.float32),
+                    "release_ds":   _rel[:_rm + _wl + 1 : _ds].astype(np.float32),
+                    "window_len_d": max(4, _wl // _ds),
+                    "r_max_d":      max(1, _rm // _ds),
+                    "ds": _ds, "T_float": pa.T_float, "T_int": T_int_r,
+                    "n_start": _ns, "n_end": _ne, "search_periods": _sp,
+                }
+                _corr_at = _make_corr_at(_ca_data)
+                pa.corr_at = _corr_at
+                pa.corr_at_data = _ca_data
+            except Exception as _e:
+                self._lab_status.config(text=f"WAV-Reload fehlgeschlagen:\n{_e}")
+                return
+        # pre3b-Zustand: gespeichert > "curve"-Punkte aus predp filtern (Fallback)
+        _pre3b = getattr(pa, 'lut_points_pre3b', None) or []
+        if not _pre3b:
+            _pre3b = [p for p in (pa.lut_points_predp or pa.lut_points)
+                      if p.phase != "curve"]
+        if _pre3b:
+            pts3b = [_copy.copy(p) for p in _pre3b]
             # Phase 3b mit neuem Threshold
             measured_ns = set(p.n for p in pts3b)
             ci = 1
@@ -3644,7 +3684,7 @@ class CorrLandscapeWindow:
                     if nm in measured_ns:
                         ci += 1; continue
                     pred = _predict_track_r(pts3b[:ins_pos], nm)
-                    pt   = pa.corr_at(nm, "gap", pred)
+                    pt   = _corr_at(nm, "curve", pred)
                     if pt.best_score > -1.5:
                         pts3b.insert(ins_pos, pt)
                         measured_ns.add(nm)
@@ -3662,7 +3702,7 @@ class CorrLandscapeWindow:
                         allowed = max(2.0, T_int_r / 10.0)
                         old_err = abs(float(getattr(pt, "track_r", pt.best_r)) - float(pred))
                         if old_err > allowed * BRANCH_ADAPT_ERR_FACTOR:
-                            trial = pa.corr_at(pt.n, pt.phase, pred)
+                            trial = _corr_at(pt.n, pt.phase, pred)
                             new_err = abs(float(getattr(trial, "track_r", trial.best_r)) - float(pred))
                             if new_err < old_err and trial.best_score >= pt.best_score - BRANCH_SCORE_MARGIN:
                                 pt = trial
@@ -3671,7 +3711,7 @@ class CorrLandscapeWindow:
             phase3b_info = f"  3b-neu: {curve_inserts} Punkte (thresh={curve_thresh:.4g})\n"
         else:
             src_pts = pa.lut_points_predp if pa.lut_points_predp else pa.lut_points
-            phase3b_info = ""
+            phase3b_info = "  (keine pre3b-Punkte)\n"
 
         pts_copy = [copy.copy(p) for p in src_pts]
         for p in pts_copy:
