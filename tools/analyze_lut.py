@@ -7,7 +7,16 @@ Erfordert: Python 3.8+, tkinter, matplotlib, numpy
 Aufruf:    python3 analyze_lut.py [pfad/zur/orgel.organ]
 """
 
+# BLAS/OpenMP auf Single-Thread setzen BEVOR numpy importiert wird.
+# Verhindert nicht-deterministisches Gleitkommaverhalten durch parallele
+# Vektoroperationen in np.dot / np.linalg.norm (Autokorrelation).
 import os
+os.environ.setdefault("OMP_NUM_THREADS",     "1")
+os.environ.setdefault("MKL_NUM_THREADS",     "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS","1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS","1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import re
 import sys
 import struct
@@ -22,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v149b-landscape-window-min2T"
+TOOL_VERSION = "v150-blas-determinism"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
