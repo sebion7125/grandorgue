@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v148-pruning-reset"
+TOOL_VERSION = "v149-switch-norm-curvature-fill"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -216,6 +216,8 @@ MAX_PRUNE_GAP_N = 50                 # max. n-Abstand zwischen Nachbarn beim Pru
 # aber kosten viele zusaetzliche Korrelationen und koennen den DP durch Rauschpunkte belasten.
 GAP_FILL_MIN_DN = 8
 GAP_FILL_MAX_INSERTS = 12
+CURVATURE_FILL_DIVISOR = 30   # Phase-3b: trigger wenn |Δsteigung| > T / 30 Samples/Periode
+CURVATURE_FILL_MAX     = 8    # max. Einfügungen durch Curvature-Fill
 BRANCH_COPY_SWITCH_PENALTY = 0.20   # Kosten fuer T-Copy-Wechsel in der Copy-DP (Stufe 3)
 
 # v86: Small-T-only Kostenterme (nur aktiv wenn search_periods > 2)
@@ -1066,7 +1068,7 @@ def _run_global_branch_dp(points_in: list, T_int: int, r_max: int, search_period
             dn01 = max(1, pts[1].n - pts[0].n)
             slope = (tr1 - tr0) / dn01
             raw_jump_init = abs(int(raw1) - int(raw0))
-            init_pen = _switch_pen * max(0.0, raw_jump_init - T_int * 0.5) / T_int
+            init_pen = _switch_pen * max(0.0, raw_jump_init - T_int * 0.5) / (T_int * max(1, dn01))
             cost = -_score_w * (float(sc0) + float(sc1)) + init_pen
             states[(i0, i1)] = (cost, tr0, tr1, slope, None)
 
@@ -1113,7 +1115,7 @@ def _run_global_branch_dp(points_in: list, T_int: int, r_max: int, search_period
 
                 raw_prev_r = cand_lists[pi - 1][i_prev1][0]
                 raw_jump   = abs(int(raw_cur) - int(raw_prev_r))
-                branch_sw_pen = _switch_pen * max(0.0, raw_jump - T_int * 0.5) / T_int
+                branch_sw_pen = _switch_pen * max(0.0, raw_jump - T_int * 0.5) / (T_int * max(1, dn_cur))
                 anchor_pen = (BRANCH_ANCHOR_PENALTY * (abs(tr_cur - anchor_r) / max_abs_drift) ** 2
                               if search_periods > 2 and anchor_r is not None else 0.0)
 
@@ -1564,6 +1566,46 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
                     gap_inserts += 1
                     continue
         idx += 1
+
+    # ── Phase 3b: Curvature-aware gap fill ────────────────────────────────────
+    # Wenn der Track nichtlinear driftet, messen wir Zwischenpunkte in Segmenten
+    # mit hoher Krümmung (großer Steigungsänderung). Trigger: |Δsteigung| > T/30.
+    # Nur wenn das Segment mindestens GAP_FILL_MIN_DN Perioden lang ist.
+    curve_thresh = max(0.1, float(T_int) / CURVATURE_FILL_DIVISOR)
+    curve_inserts = 0
+    measured_ns = set(p.n for p in points)
+    ci = 1
+    while (ci + 1 < len(points)
+           and len(points) < MAX_TOTAL
+           and curve_inserts < CURVATURE_FILL_MAX):
+        p0, p1, p2 = points[ci - 1], points[ci], points[ci + 1]
+        dn1 = max(1, p1.n - p0.n)
+        dn2 = max(1, p2.n - p1.n)
+        tr0 = float(getattr(p0, 'track_r', p0.best_r))
+        tr1 = float(getattr(p1, 'track_r', p1.best_r))
+        tr2 = float(getattr(p2, 'track_r', p2.best_r))
+        slope_left  = (tr1 - tr0) / dn1
+        slope_right = (tr2 - tr1) / dn2
+        if abs(slope_right - slope_left) > curve_thresh:
+            # Das längere der beiden Segmente subdivisionieren
+            if dn2 >= dn1 and dn2 >= GAP_FILL_MIN_DN:
+                nm, ins_pos = (p1.n + p2.n) // 2, ci + 1
+            elif dn1 >= GAP_FILL_MIN_DN:
+                nm, ins_pos = (p0.n + p1.n) // 2, ci
+            else:
+                ci += 1; continue
+            if nm in measured_ns:
+                ci += 1; continue
+            pred = _predict_track_r(points[:ins_pos], nm)
+            pt   = corr_at(nm, "gap", pred)
+            if pt.best_score > -1.5:
+                points.insert(ins_pos, pt)
+                measured_ns.add(nm)
+                curve_inserts += 1
+                if ins_pos <= ci:
+                    ci += 1   # neuer Punkt liegt vor aktuellem Tripel → Index anpassen
+                continue      # Tripel neu prüfen (ohne ci zu erhöhen)
+        ci += 1
 
     # ── Phase 4: Branch-Lock-Reparatur ───────────────────────────────────────
     # Nach Sparse+Gap kann besonders am Ende ein falscher Ast die Vorhersage
