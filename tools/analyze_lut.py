@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v159-curve-thresh-direct-input"
+TOOL_VERSION = "v160-curve-thresh-no-rounding"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -3492,8 +3492,8 @@ class CorrLandscapeWindow:
         default_phase_sep_div = int(round(1.0 / BRANCH_PHASE_SEPARATION_FACTOR))
         self._lab_topk          = tk.StringVar(value=str(BRANCH_TOP_K))
         self._lab_phase_sep_div = tk.StringVar(value=str(default_phase_sep_div))
-        _default_curve_thresh = round(self.pa.T_int / CURVATURE_FILL_DIVISOR, 4)
-        self._lab_curve_thresh  = tk.StringVar(value=str(_default_curve_thresh))
+        _default_curve_thresh = self.pa.T_int / CURVATURE_FILL_DIVISOR
+        self._lab_curve_thresh  = tk.StringVar(value=f"{_default_curve_thresh:.6g}")
         self._lab_curve_thresh.trace_add("write", lambda *_: self._refresh_click_info())
         _row("Top-K",              self._lab_topk,
              tip="Max. Kandidaten pro Messpunkt (aus beiden T-Fenstern zusammen). "
@@ -3671,7 +3671,7 @@ class CorrLandscapeWindow:
         self._lab_score_w.set(str(BRANCH_DP_SCORE_WEIGHT))
         self._lab_kink_n.set(str(BRANCH_KINK_SCORE_N_LIMIT))
         self._lab_kink_cap.set(str(BRANCH_KINK_PENALTY_CAP))
-        self._lab_curve_thresh.set(str(round(self.pa.T_int / CURVATURE_FILL_DIVISOR, 4)))
+        self._lab_curve_thresh.set(f"{self.pa.T_int / CURVATURE_FILL_DIVISOR:.6g}")
         self._lab_status.config(text="Original")
         self._plot()
 
