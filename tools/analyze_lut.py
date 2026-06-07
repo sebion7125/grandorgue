@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v154-curvature-dense-fill"
+TOOL_VERSION = "v154b-curvature-score-gate"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -1602,7 +1602,8 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         tr2 = float(getattr(p2, 'track_r', p2.best_r))
         slope_left  = (tr1 - tr0) / dn1
         slope_right = (tr2 - tr1) / dn2
-        if abs(slope_right - slope_left) > curve_thresh:
+        min_sc = min(p0.best_score, p1.best_score, p2.best_score)
+        if abs(slope_right - slope_left) > curve_thresh and min_sc >= SCORE_WARN:
             # Längeres Segment halbieren, bis Dense-Auflösung erreicht
             if dn2 >= dn1 and dn2 >= CURVATURE_FILL_MIN_DN:
                 nm, ins_pos = (p1.n + p2.n) // 2, ci + 1
