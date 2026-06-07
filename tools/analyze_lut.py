@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v149-switch-norm-curvature-fill"
+TOOL_VERSION = "v149b-landscape-window-min2T"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -3124,10 +3124,12 @@ class CorrLandscapeWindow:
             T       = pa.T_int
             T_f     = pa.T_float
             ds      = min(4, T // 500) if T >= 500 else 1
-            # v98: NDP-Fensterlaenge muss identisch zu compute_lut() sein.
-            # crossfade_len_samples ist die Laenge des Korrelationsfensters.
-            # 2*T bzw. pa.lut_r_search_max ist dagegen nur das r-Suchfenster.
-            window_len = int(pa.crossfade_len_samples) if pa.crossfade_len_samples >= 4 else 2 * T
+            # NDP-Fensterlaenge: crossfade_len_samples wie in compute_lut(), aber
+            # mindestens 2*T damit die Heatmap immer zwei volle Perioden zeigt.
+            # Fuer hohe Aliquote (HN=48+) kann crossfade_len_samples sehr kurz sein
+            # (6 ms), was die Heatmap zu koernig werden laesst.
+            window_len = max(int(pa.crossfade_len_samples) if pa.crossfade_len_samples >= 4
+                             else 2 * T, 2 * T)
             r_search_max = getattr(pa, "lut_r_search_max", 0) or (2 * T)
             r_max        = r_search_max
             # Kuerzen wenn Release zu kurz
