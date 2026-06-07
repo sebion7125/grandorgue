@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v155-point-curvature-info"
+TOOL_VERSION = "v157-curve-div-live-update"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -3032,7 +3032,8 @@ class CorrLandscapeWindow:
         self._lut_xlim  = None
         self._lut_ylim  = None
         self._debug_var = tk.BooleanVar(value=True)
-        self._lab_pts   = None   # Tuning-Lab LUT-Punkte (None = Original pa.lut_points)
+        self._lab_pts        = None   # Tuning-Lab LUT-Punkte (None = Original pa.lut_points)
+        self._last_clicked_n = None   # n-Wert des zuletzt angeklickten Punkts
 
         self.win = tk.Toplevel(parent)
         self.win.title(f"Korrelationslandschaft — {pa.rank_name} {midi_to_name(pa.midi_note)} "
@@ -3492,6 +3493,7 @@ class CorrLandscapeWindow:
         self._lab_topk          = tk.StringVar(value=str(BRANCH_TOP_K))
         self._lab_phase_sep_div = tk.StringVar(value=str(default_phase_sep_div))
         self._lab_curve_div     = tk.StringVar(value=str(CURVATURE_FILL_DIVISOR))
+        self._lab_curve_div.trace_add("write", lambda *_: self._refresh_click_info())
         _row("Top-K",           self._lab_topk,
              tip="Max. Kandidaten pro Messpunkt (aus beiden T-Fenstern zusammen). "
                  "Mehr → bessere Abdeckung, langsamer. Standard: 24.")
@@ -3672,6 +3674,16 @@ class CorrLandscapeWindow:
         self._lab_status.config(text="Original")
         self._plot()
 
+    def _refresh_click_info(self):
+        """Info-Panel für den zuletzt angeklickten Punkt neu rendern (z.B. nach Param-Änderung)."""
+        if self._last_clicked_n is None:
+            return
+        pts = self._lab_pts if self._lab_pts is not None else self.pa.lut_points
+        if not pts:
+            return
+        closest = min(pts, key=lambda p: abs(p.n - self._last_clicked_n))
+        self._render_click_info(closest, pts)
+
     def _on_plot_click(self, event):
         """Klick in die Heatmap: zeige Kandidaten des naechsten LUT-Punkts."""
         if event.inaxes is None:
@@ -3683,6 +3695,11 @@ class CorrLandscapeWindow:
         if n_click is None:
             return
         closest = min(pts, key=lambda p: abs(p.n - n_click))
+        self._last_clicked_n = closest.n
+        self._render_click_info(closest, pts)
+
+    def _render_click_info(self, closest, pts):
+        """Info-Panel-Inhalt für einen LUT-Punkt aufbauen und anzeigen."""
         cands_raw = getattr(closest, 'debug_candidates', [])
         if not cands_raw:
             cands_raw = [(r, s) for r, s in (getattr(closest, 'candidates', []) or [])]
