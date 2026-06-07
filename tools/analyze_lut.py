@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v147-landscape-simulator-curve"
+TOOL_VERSION = "v147b-landscape-wrap-fix"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -3230,8 +3230,7 @@ class CorrLandscapeWindow:
         # Aktive LUT-Punkte anzeigen — exakt wie _plot_lut im Hauptfenster
         if active_pts:
             pts_sorted  = sorted(active_pts, key=lambda p: p.n)
-            lut_folded  = getattr(self.pa, "lut_folded", True) if self._lab_pts is None \
-                          else False   # Lab-Ergebnis ist immer ungefaltet
+            lut_folded  = getattr(self.pa, "lut_folded", True)
 
             show_cands = getattr(self, "_show_cand_overlay", None)
             show_cands = show_cands.get() if show_cands is not None else self._debug_var.get()
@@ -3521,6 +3520,18 @@ class CorrLandscapeWindow:
             return
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
+        # approach_up aus track_r ableiten (wie _assign_approach_flags in compute_lut)
+        new_sorted = sorted(new_pts, key=lambda p: p.n)
+        if new_sorted:
+            new_sorted[0].approach_up = True
+            for _a, _b in zip(new_sorted, new_sorted[1:]):
+                ta = float(getattr(_a, 'track_r', _a.best_r))
+                tb = float(getattr(_b, 'track_r', _b.best_r))
+                _b.approach_up = (tb >= ta)
+        # best_r falten wenn das Original gefaltet ist — damit stimmt die Darstellung
+        if pa.lut_folded:
+            for p in new_pts:
+                p.best_r = int(p.best_r) % pa.T_int
         self._lab_pts = new_pts
         total_cands = sum(len(getattr(p, 'candidates', [])) for p in new_pts)
         avg_cands   = total_cands // max(1, len(new_pts))
