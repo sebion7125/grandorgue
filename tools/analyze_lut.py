@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v160-curve-thresh-no-rounding"
+TOOL_VERSION = "v161-lab-recompute-phase3b"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -1587,6 +1587,8 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     # Wenn der Track nichtlinear driftet, messen wir Zwischenpunkte in Segmenten
     # mit hoher Krümmung (großer Steigungsänderung). Trigger: |Δsteigung| > T/30.
     # Halbieren bis Dense-Auflösung (CURVATURE_FILL_MIN_DN = DENSE_STEP Perioden).
+    meta["pre3b_points"] = list(points)   # Zustand vor Phase 3b (Tuning Lab)
+    meta["corr_at"]      = corr_at        # Closure für Lab-Recompute
     curve_thresh = float(T_int) / CURVATURE_FILL_DIVISOR
     curve_inserts = 0
     measured_ns = set(p.n for p in points)
@@ -2019,7 +2021,9 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.lut_fold_reason = str(lut_meta.get("fold_reason", ""))
         pruned_count = int(lut_meta.get("pruned_count", 0) or 0)
         pa.lut_points_raw_count = len(pa.lut_points) + pruned_count
-        pa.lut_points_predp = lut_meta.get("predp_points", [])
+        pa.lut_points_predp  = lut_meta.get("predp_points", [])
+        pa.lut_points_pre3b  = lut_meta.get("pre3b_points", [])
+        pa.corr_at           = lut_meta.get("corr_at", None)
         pa.lut_r_search_max  = int(lut_meta.get("r_search_max",  2 * pa.T_int))
         pa.lut_search_periods = int(lut_meta.get("search_periods", 2))
         pa.lut_score_p10 = float(lut_meta.get("score_p10", 0.0) or 0.0)
@@ -3577,7 +3581,7 @@ class CorrLandscapeWindow:
 
     def _on_lab_recompute(self):
         """Recompute DP with current Tuning Lab parameters."""
-        import copy, time
+        import copy, time  # copy auch als _copy weiter unten verwendet
         pa = self.pa
         if not pa.lut_points:
             self._lab_status.config(text="Keine LUT-Punkte vorhanden.")
@@ -3592,6 +3596,7 @@ class CorrLandscapeWindow:
             score_w        = float(self._lab_score_w.get())
             kink_n         = int(self._lab_kink_n.get())
             kink_cap       = float(self._lab_kink_cap.get())
+            curve_thresh   = float(self._lab_curve_thresh.get())
         except (ValueError, tk.TclError) as exc:
             self._lab_status.config(text=f"Ungültige Eingabe:\n{exc}")
             return
@@ -3607,10 +3612,67 @@ class CorrLandscapeWindow:
             'score_weight':     score_w,
         }
 
-        # Kandidaten-Quelle: pre-DP corr_at Punkte (vor _global_branch_path,
-        # vor Faltung).  Damit ist raw_r immer ungefaltet und all_candidates
-        # enthaelt den vollen Kandidatensatz aus corr_at.
-        src_pts = pa.lut_points_predp if pa.lut_points_predp else pa.lut_points
+        # Kandidaten-Quelle: wenn corr_at + pre3b verfügbar, Phase 3b+4 neu laufen
+        # (erlaubt Curve-Fill-Threshold live zu ändern). Sonst predp als Fallback.
+        import copy as _copy
+        T_int_r = pa.T_int
+        if pa.lut_points_pre3b and pa.corr_at is not None:
+            pts3b = [_copy.copy(p) for p in pa.lut_points_pre3b]
+            # Phase 3b mit neuem Threshold
+            measured_ns = set(p.n for p in pts3b)
+            ci = 1
+            curve_inserts = 0
+            while (ci + 1 < len(pts3b)
+                   and len(pts3b) < MAX_TOTAL
+                   and curve_inserts < CURVATURE_FILL_MAX):
+                p0, p1, p2 = pts3b[ci - 1], pts3b[ci], pts3b[ci + 1]
+                dn1 = max(1, p1.n - p0.n)
+                dn2 = max(1, p2.n - p1.n)
+                tr0 = float(getattr(p0, 'track_r', p0.best_r))
+                tr1 = float(getattr(p1, 'track_r', p1.best_r))
+                tr2 = float(getattr(p2, 'track_r', p2.best_r))
+                slope_left  = (tr1 - tr0) / dn1
+                slope_right = (tr2 - tr1) / dn2
+                min_sc = min(p0.best_score, p1.best_score, p2.best_score)
+                if abs(slope_right - slope_left) > curve_thresh and min_sc >= SCORE_WARN:
+                    if dn2 >= dn1 and dn2 >= CURVATURE_FILL_MIN_DN:
+                        nm, ins_pos = (p1.n + p2.n) // 2, ci + 1
+                    elif dn1 >= CURVATURE_FILL_MIN_DN:
+                        nm, ins_pos = (p0.n + p1.n) // 2, ci
+                    else:
+                        ci += 1; continue
+                    if nm in measured_ns:
+                        ci += 1; continue
+                    pred = _predict_track_r(pts3b[:ins_pos], nm)
+                    pt   = pa.corr_at(nm, "gap", pred)
+                    if pt.best_score > -1.5:
+                        pts3b.insert(ins_pos, pt)
+                        measured_ns.add(nm)
+                        curve_inserts += 1
+                        if ins_pos <= ci:
+                            ci += 1
+                        continue
+                ci += 1
+            # Phase 4: Branch-Lock-Reparatur
+            repaired = []
+            for pt in pts3b:
+                if len(repaired) >= max(3, min(BRANCH_FIT_WIN, len(pts3b))):
+                    pred = _predict_track_r(repaired, pt.n)
+                    if pred is not None:
+                        allowed = max(2.0, T_int_r / 10.0)
+                        old_err = abs(float(getattr(pt, "track_r", pt.best_r)) - float(pred))
+                        if old_err > allowed * BRANCH_ADAPT_ERR_FACTOR:
+                            trial = pa.corr_at(pt.n, pt.phase, pred)
+                            new_err = abs(float(getattr(trial, "track_r", trial.best_r)) - float(pred))
+                            if new_err < old_err and trial.best_score >= pt.best_score - BRANCH_SCORE_MARGIN:
+                                pt = trial
+                repaired.append(pt)
+            src_pts = repaired
+            phase3b_info = f"  3b-neu: {curve_inserts} Punkte (thresh={curve_thresh:.4g})\n"
+        else:
+            src_pts = pa.lut_points_predp if pa.lut_points_predp else pa.lut_points
+            phase3b_info = ""
+
         pts_copy = [copy.copy(p) for p in src_pts]
         for p in pts_copy:
             if not hasattr(p, 'candidates') or not p.candidates:
@@ -3657,7 +3719,8 @@ class CorrLandscapeWindow:
             text=(f"DP: {elapsed_ms} ms\n"
                   f"Punkte: {len(new_pts)}\n"
                   f"Ø Kandidaten: {avg_cands}\n"
-                  f"Top-K={top_k}  T/{int(phase_sep_div)}"))
+                  f"Top-K={top_k}  T/{int(phase_sep_div)}\n"
+                  + phase3b_info))
         self._plot()
 
     def _on_lab_reset(self):
