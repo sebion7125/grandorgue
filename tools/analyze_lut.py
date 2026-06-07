@@ -2978,6 +2978,31 @@ class CrossfadeSimWindow:
         self._canvas.draw()
 
 
+class _Tooltip:
+    """Einfacher Hover-Tooltip für tk-Widgets."""
+    def __init__(self, widget, text):
+        self._widget = widget
+        self._text   = text
+        self._tip    = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, _event=None):
+        x = self._widget.winfo_rootx() + self._widget.winfo_width() + 4
+        y = self._widget.winfo_rooty() + 2
+        self._tip = tw = tk.Toplevel(self._widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(tw, text=self._text, justify=tk.LEFT, wraplength=260,
+                 bg="#ffffe0", fg="#000000", relief=tk.SOLID, bd=1,
+                 font=("Consolas", 8), padx=4, pady=2).pack()
+
+    def _hide(self, _event=None):
+        if self._tip:
+            self._tip.destroy()
+            self._tip = None
+
+
 class CorrLandscapeWindow:
     """
     Separates Fenster: NormalizedDotProduct(attack@n, release@r) als 2D-Heatmap.
@@ -3451,35 +3476,61 @@ class CorrLandscapeWindow:
         tk.Label(frame, text="── Kandidaten ──", **sec_kw).pack(
             fill=tk.X, padx=6, pady=(4, 2))
 
-        def _row(label, var, parent=frame):
+        def _row(label, var, tip=None, parent=frame):
             f = tk.Frame(parent, bg=C_BG3)
             f.pack(fill=tk.X, padx=6, pady=1)
-            tk.Label(f, text=label, width=20, **lbl_kw).pack(side=tk.LEFT)
-            tk.Entry(f, textvariable=var, **ent_kw).pack(side=tk.LEFT)
+            lbl = tk.Label(f, text=label, width=20, **lbl_kw)
+            lbl.pack(side=tk.LEFT)
+            ent = tk.Entry(f, textvariable=var, **ent_kw)
+            ent.pack(side=tk.LEFT)
+            if tip:
+                _Tooltip(lbl, tip)
+                _Tooltip(ent, tip)
             return f
 
         default_phase_sep_div = int(round(1.0 / BRANCH_PHASE_SEPARATION_FACTOR))
         self._lab_topk          = tk.StringVar(value=str(BRANCH_TOP_K))
         self._lab_phase_sep_div = tk.StringVar(value=str(default_phase_sep_div))
-        _row("Top-K",          self._lab_topk)
-        _row("Phase-Sep (T/)", self._lab_phase_sep_div)
+        self._lab_curve_div     = tk.StringVar(value=str(CURVATURE_FILL_DIVISOR))
+        _row("Top-K",           self._lab_topk,
+             tip="Max. Kandidaten pro Messpunkt (aus beiden T-Fenstern zusammen). "
+                 "Mehr → bessere Abdeckung, langsamer. Standard: 24.")
+        _row("Phase-Sep (T/)",  self._lab_phase_sep_div,
+             tip="Mindestabstand zwischen Kandidaten = T ÷ Wert. "
+                 "Kleiner → engere Peaks werden einzeln erfasst. Standard: 16 → T/16.")
+        _row("Curve-Fill (T/)", self._lab_curve_div,
+             tip="Curvature-Fill-Schwelle = T ÷ Wert (Steigungsänderung in Samples/Periode). "
+                 "Nur Diagnose im Punkt-Info-Panel — Änderung wirkt erst bei nächster Vollanalyse. "
+                 "Standard: 30 → T/30.")
 
         # ── DP-Parameter ─────────────────────────────────────────────────────
         tk.Label(frame, text="── DP-Parameter ──", **sec_kw).pack(
             fill=tk.X, padx=6, pady=(8, 2))
 
         dp_defs = [
-            ("Kink-Penalty",   "_lab_kink_pen",  str(BRANCH_KINK_PENALTY)),
-            ("Switch-Penalty", "_lab_switch_pen", str(BRANCH_SWITCH_PENALTY)),
-            ("Smooth-Penalty", "_lab_smooth_pen", str(BRANCH_GLOBAL_SMOOTH_PENALTY)),
-            ("Score-Weight",   "_lab_score_w",    str(BRANCH_DP_SCORE_WEIGHT)),
-            ("Kink N-Limit",   "_lab_kink_n",     str(BRANCH_KINK_SCORE_N_LIMIT)),
-            ("Kink Cap",       "_lab_kink_cap",   str(BRANCH_KINK_PENALTY_CAP)),
+            ("Kink-Penalty",   "_lab_kink_pen",   str(BRANCH_KINK_PENALTY),
+             "Kosten pro Sample Steigungsänderung im DP-Pfad. "
+             "Höher → glattere Kurve bevorzugt, sprünge werden stärker bestraft. Standard: 4.0."),
+            ("Switch-Penalty", "_lab_switch_pen",  str(BRANCH_SWITCH_PENALTY),
+             "Fixe Kosten beim Wechsel auf einen Kandidaten aus einem anderen T-Fenster. "
+             "Verhindert unnötiges Springen zwischen Fenstern. Standard: 8.0."),
+            ("Smooth-Penalty", "_lab_smooth_pen",  str(BRANCH_GLOBAL_SMOOTH_PENALTY),
+             "Globale Glattheitspräferenz: Kosten proportional zu |Δr| über den ganzen Pfad. "
+             "Höher → DP bleibt lieber auf gleichem r-Niveau. Standard: 0.1."),
+            ("Score-Weight",   "_lab_score_w",     str(BRANCH_DP_SCORE_WEIGHT),
+             "Gewicht des Korrelations-Scores im DP-Kostenterm. "
+             "Höher → Score wird wichtiger gegenüber Glattheitsstrafe. Standard: 6.0."),
+            ("Kink N-Limit",   "_lab_kink_n",      str(BRANCH_KINK_SCORE_N_LIMIT),
+             "Kink-Penalty gilt nur für Punkte mit n ≥ diesem Wert. "
+             "Schützt die Einschwingphase vor zu starrer Pfadführung. Standard: 8."),
+            ("Kink Cap",       "_lab_kink_cap",    str(BRANCH_KINK_PENALTY_CAP),
+             "Maximale Kink-Penalty pro Schritt (Deckelung). "
+             "Verhindert, dass einzelne starke Kurven den ganzen Pfad dominieren. Standard: 20.0."),
         ]
-        for label, attr, default in dp_defs:
+        for label, attr, default, tip in dp_defs:
             var = tk.StringVar(value=default)
             setattr(self, attr, var)
-            _row(label, var)
+            _row(label, var, tip=tip)
 
         # ── Buttons ──────────────────────────────────────────────────────────
         tk.Button(frame, text="▶  Recompute", width=22,
@@ -3617,6 +3668,7 @@ class CorrLandscapeWindow:
         self._lab_score_w.set(str(BRANCH_DP_SCORE_WEIGHT))
         self._lab_kink_n.set(str(BRANCH_KINK_SCORE_N_LIMIT))
         self._lab_kink_cap.set(str(BRANCH_KINK_PENALTY_CAP))
+        self._lab_curve_div.set(str(CURVATURE_FILL_DIVISOR))
         self._lab_status.config(text="Original")
         self._plot()
 
@@ -3642,7 +3694,11 @@ class CorrLandscapeWindow:
         curve_lines = []
         if idx is not None:
             T_int = self.pa.T_int
-            thresh = max(0.1, float(T_int) / CURVATURE_FILL_DIVISOR)
+            try:
+                _curve_div = max(1.0, float(self._lab_curve_div.get()))
+            except (ValueError, AttributeError):
+                _curve_div = CURVATURE_FILL_DIVISOR
+            thresh = max(0.1, float(T_int) / _curve_div)
             sl_left = sl_right = None
             dn_left = dn_right = None
             if idx > 0:
@@ -3666,7 +3722,7 @@ class CorrLandscapeWindow:
                 dslope = abs(sl_right - sl_left)
                 fires = dslope > thresh and closest.best_score >= SCORE_WARN
                 curve_lines.append(f"  |Δslope|={dslope:.3f}")
-                curve_lines.append(f"  thresh=T/{CURVATURE_FILL_DIVISOR}={thresh:.2f}")
+                curve_lines.append(f"  thresh=T/{int(_curve_div)}={thresh:.2f}")
                 min_dn = min(dn_left, dn_right)
                 curve_lines.append(
                     f"  → {'TRIGGER' if fires else 'kein Trigger'}"
