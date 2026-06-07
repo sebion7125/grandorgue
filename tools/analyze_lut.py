@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v157-curve-div-live-update"
+TOOL_VERSION = "v158-no-curve-thresh-floor"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -1587,7 +1587,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     # Wenn der Track nichtlinear driftet, messen wir Zwischenpunkte in Segmenten
     # mit hoher Krümmung (großer Steigungsänderung). Trigger: |Δsteigung| > T/30.
     # Halbieren bis Dense-Auflösung (CURVATURE_FILL_MIN_DN = DENSE_STEP Perioden).
-    curve_thresh = max(0.1, float(T_int) / CURVATURE_FILL_DIVISOR)
+    curve_thresh = float(T_int) / CURVATURE_FILL_DIVISOR
     curve_inserts = 0
     measured_ns = set(p.n for p in points)
     ci = 1
@@ -3715,7 +3715,7 @@ class CorrLandscapeWindow:
                 _curve_div = max(1.0, float(self._lab_curve_div.get()))
             except (ValueError, AttributeError):
                 _curve_div = CURVATURE_FILL_DIVISOR
-            thresh = max(0.1, float(T_int) / _curve_div)
+            thresh = float(T_int) / _curve_div
             sl_left = sl_right = None
             dn_left = dn_right = None
             if idx > 0:
