@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v162-lab-phase3b-from-file"
+TOOL_VERSION = "v163-protect-curve-from-pruning"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -975,6 +975,8 @@ def _prune_lut_points(pts: list, T_int: int) -> list:
             continue
         if pts[i].best_score < mean_score - 0.15:
             continue
+        if pts[i].phase == "curve":
+            continue   # Curvature-Fill-Punkte nie prunen
         if pts[i].phase == "gap":
             if abs(track_rs[i + 1] - track_rs[i - 1]) > T_int / 4.0:
                 continue
@@ -3737,8 +3739,10 @@ class CorrLandscapeWindow:
 
         # Gleiche Post-DP-Pipeline wie compute_lut: filtern + prunen
         new_pts = [p for p in new_pts if p.best_score > -1.5]
+        pts_before_prune = len(new_pts)
         if len(new_pts) > 2:
             new_pts = _prune_lut_points(new_pts, T_int)
+        pruned_count = pts_before_prune - len(new_pts)
 
         # approach_up aus track_r ableiten (wie _assign_approach_flags in compute_lut)
         new_sorted = sorted(new_pts, key=lambda p: p.n)
@@ -3757,7 +3761,7 @@ class CorrLandscapeWindow:
         avg_cands   = total_cands // max(1, len(new_pts))
         self._lab_status.config(
             text=(f"DP: {elapsed_ms} ms\n"
-                  f"Punkte: {len(new_pts)}\n"
+                  f"Punkte: {len(new_pts)} (gepruned: {pruned_count})\n"
                   f"Ø Kandidaten: {avg_cands}\n"
                   f"Top-K={top_k}  T/{int(phase_sep_div)}\n"
                   + phase3b_info))
