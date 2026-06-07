@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v153-all-candidates-source"
+TOOL_VERSION = "v154-curvature-dense-fill"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -226,7 +226,8 @@ MAX_PRUNE_GAP_N = 50                 # max. n-Abstand zwischen Nachbarn beim Pru
 GAP_FILL_MIN_DN = 8
 GAP_FILL_MAX_INSERTS = 12
 CURVATURE_FILL_DIVISOR = 30   # Phase-3b: trigger wenn |Δsteigung| > T / 30 Samples/Periode
-CURVATURE_FILL_MAX     = 8    # max. Einfügungen durch Curvature-Fill
+CURVATURE_FILL_MAX     = 32   # max. Einfügungen (genug fuer volle Densifikation)
+CURVATURE_FILL_MIN_DN  = DENSE_STEP  # halbieren bis Dense-Auflösung (= 6 Perioden)
 BRANCH_COPY_SWITCH_PENALTY = 0.20   # Kosten fuer T-Copy-Wechsel in der Copy-DP (Stufe 3)
 
 # v86: Small-T-only Kostenterme (nur aktiv wenn search_periods > 2)
@@ -1585,7 +1586,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     # ── Phase 3b: Curvature-aware gap fill ────────────────────────────────────
     # Wenn der Track nichtlinear driftet, messen wir Zwischenpunkte in Segmenten
     # mit hoher Krümmung (großer Steigungsänderung). Trigger: |Δsteigung| > T/30.
-    # Nur wenn das Segment mindestens GAP_FILL_MIN_DN Perioden lang ist.
+    # Halbieren bis Dense-Auflösung (CURVATURE_FILL_MIN_DN = DENSE_STEP Perioden).
     curve_thresh = max(0.1, float(T_int) / CURVATURE_FILL_DIVISOR)
     curve_inserts = 0
     measured_ns = set(p.n for p in points)
@@ -1602,10 +1603,10 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         slope_left  = (tr1 - tr0) / dn1
         slope_right = (tr2 - tr1) / dn2
         if abs(slope_right - slope_left) > curve_thresh:
-            # Das längere der beiden Segmente subdivisionieren
-            if dn2 >= dn1 and dn2 >= GAP_FILL_MIN_DN:
+            # Längeres Segment halbieren, bis Dense-Auflösung erreicht
+            if dn2 >= dn1 and dn2 >= CURVATURE_FILL_MIN_DN:
                 nm, ins_pos = (p1.n + p2.n) // 2, ci + 1
-            elif dn1 >= GAP_FILL_MIN_DN:
+            elif dn1 >= CURVATURE_FILL_MIN_DN:
                 nm, ins_pos = (p0.n + p1.n) // 2, ci
             else:
                 ci += 1; continue
