@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v146-go-default-crossfade"
+TOOL_VERSION = "v147-landscape-simulator-curve"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -324,7 +324,8 @@ class PipeAnalysis:
     max_interp_gap_n: int = 0
     dense_step_used: int = DENSE_STEP
 
-    lut_points:    list = field(default_factory=list)   # List[LutPoint]
+    lut_points:     list = field(default_factory=list)   # List[LutPoint]
+    lut_points_predp: list = field(default_factory=list) # pre-DP corr_at Punkte (Tuning Lab)
     lut_folded:    bool = True    # True = Pfad auf [0,T) gefaltet
     lut_points_raw_count: int = 0  # Anzahl Punkte vor Pruning
     lut_score_p10: float = 0.0   # 10. Perzentil der LUT-Scores (nur Diagnose)
@@ -1561,6 +1562,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     # v72: globale Branch-Pfad-Nachbearbeitung. Diese Stufe korrigiert
     # Astspruenge, die lokal plausibel aussehen, global aber einen Knick im
     # ansonsten glatten Pfad erzeugen.
+    meta["predp_points"] = list(points)   # vor DP cachen (fuer Tuning Lab)
     points = _global_branch_path(points)
 
     # v137: Folding erst nach Pruning entscheiden.
@@ -1960,6 +1962,7 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.lut_fold_reason = str(lut_meta.get("fold_reason", ""))
         pruned_count = int(lut_meta.get("pruned_count", 0) or 0)
         pa.lut_points_raw_count = len(pa.lut_points) + pruned_count
+        pa.lut_points_predp = lut_meta.get("predp_points", [])
         pa.lut_r_search_max  = int(lut_meta.get("r_search_max",  2 * pa.T_int))
         pa.lut_search_periods = int(lut_meta.get("search_periods", 2))
         pa.lut_score_p10 = float(lut_meta.get("score_p10", 0.0) or 0.0)
@@ -3224,13 +3227,16 @@ class CorrLandscapeWindow:
         # Aktive LUT-Punkte: Tuning-Lab-Ergebnis oder Original
         active_pts = self._lab_pts if self._lab_pts is not None else self.pa.lut_points
 
-        # LUT-Punkte & Overlays
+        # Aktive LUT-Punkte anzeigen — exakt wie _plot_lut im Hauptfenster
         if active_pts:
-            pts_sorted = sorted(active_pts, key=lambda p: p.n)
+            pts_sorted  = sorted(active_pts, key=lambda p: p.n)
+            lut_folded  = getattr(self.pa, "lut_folded", True) if self._lab_pts is None \
+                          else False   # Lab-Ergebnis ist immer ungefaltet
 
             show_cands = getattr(self, "_show_cand_overlay", None)
             show_cands = show_cands.get() if show_cands is not None else self._debug_var.get()
 
+            # Kandidaten-Overlay: grelle Farben (cyan = Kandidat, magenta = gewählt)
             if show_cands:
                 cand_x, cand_y, cand_s = [], [], []
                 chosen_x, chosen_y = [], []
@@ -3240,48 +3246,76 @@ class CorrLandscapeWindow:
                         sc_c  = c.get("score", 0.0) if isinstance(c, dict) else c[1]
                         cand_x.append(p.n)
                         cand_y.append(raw_c)
-                        cand_s.append(10 + 30 * max(0.0, min(1.0, float(sc_c))))
-                    if hasattr(p, "debug_chosen_raw"):
+                        cand_s.append(15 + 55 * max(0.0, min(1.0, float(sc_c))))
+                    chosen_raw = getattr(p, "debug_chosen_raw", None)
+                    if chosen_raw is not None:
                         chosen_x.append(p.n)
-                        chosen_y.append(int(getattr(p, "debug_chosen_raw")))
+                        chosen_y.append(int(chosen_raw))
                 if cand_x:
-                    ax.scatter(cand_x, cand_y, c="#666666", marker=".",
-                               s=cand_s, alpha=0.45, zorder=5,
-                               label="DP-Kandidaten")
+                    ax.scatter(cand_x, cand_y, c="#00ffff", marker="+",
+                               s=cand_s, alpha=0.75, linewidths=1.0, zorder=5,
+                               label="Kandidaten")
                 if chosen_x:
-                    ax.scatter(chosen_x, chosen_y, c="#ff00ff", marker="s",
-                               s=42, alpha=0.9, zorder=7,
-                               edgecolors="black", linewidths=0.4,
-                               label="DP gewählt raw")
+                    ax.scatter(chosen_x, chosen_y, c="#ff00ff", marker="D",
+                               s=50, alpha=0.95, zorder=7,
+                               edgecolors="white", linewidths=0.5,
+                               label="DP gewählt (raw)")
 
-            # LUT-Punkte + DP-Pfad — beide nutzen debug_chosen_raw (= echte Heatmap-Y-Position,
-            # ungefaltet, in [0, r_max)).  best_r koennte gefaltet sein und wuerde die Punkte
-            # in die untere Haelfte der Landscape schieben.
-            show_lut  = getattr(self, "_show_lut_pts",  None)
-            show_path = getattr(self, "_show_dp_path",  None)
-            show_lut_v  = show_lut  is None or show_lut.get()
-            show_path_v = show_path is None or show_path.get()
+            # DP-Pfad + LUT-Punkte: analytische Segmente identisch zu _plot_lut
+            _slut  = getattr(self, "_show_lut_pts",  None)
+            _spath = getattr(self, "_show_dp_path",  None)
+            show_lut_v  = _slut  is None or _slut.get()
+            show_path_v = _spath is None or _spath.get()
+
             if show_lut_v or show_path_v:
-                lut_x, lut_y = [], []
-                for p in pts_sorted:
-                    lut_x.append(p.n)
-                    lut_y.append(getattr(p, "debug_chosen_raw", p.best_r))
+                # best_r direkt aus den Punkten (entspricht Simulator-Wert)
+                segs = []
 
-                if show_path_v:
-                    # Linie mit NaN-Brüchen an T-Wrap-Stellen (verhindert chaotische Diagonalen)
-                    px, py = [], []
-                    prev_y = None
-                    for nx, ny in zip(lut_x, lut_y):
-                        if prev_y is not None and abs(ny - prev_y) > T * 0.6:
-                            px.append(nx); py.append(float("nan"))
-                        px.append(nx); py.append(ny)
-                        prev_y = ny
-                    ax.plot(px, py, color="#ffff00", linewidth=1.5, alpha=0.85,
-                            zorder=6, label="DP-Pfad")
+                def _seg(x0, x1, y0, y1):
+                    if x1 > x0:
+                        segs.append(([x0, x1], [y0, y1]))
+
+                def _directed(x0, x1, r0, r1, up):
+                    if lut_folded:
+                        r0i = int(round(r0)) % T
+                        r1i = int(round(r1)) % T
+                        needs_wrap = (up and r1i < r0i) or (not up and r1i > r0i)
+                        if not needs_wrap:
+                            _seg(x0, x1, float(r0i), float(r1i))
+                        elif up:
+                            span = (T - r0i) + r1i
+                            if span <= 0:
+                                _seg(x0, x1, float(r0i), float(r1i)); return
+                            x_w = x0 + (T - r0i) / float(span) * (x1 - x0)
+                            _seg(x0, x_w, float(r0i), float(T))
+                            _seg(x_w, x1, 0.0, float(r1i))
+                        else:
+                            span = r0i + (T - r1i)
+                            if span <= 0:
+                                _seg(x0, x1, float(r0i), float(r1i)); return
+                            x_w = x0 + float(r0i) / float(span) * (x1 - x0)
+                            _seg(x0, x_w, float(r0i), 0.0)
+                            _seg(x_w, x1, float(T), float(r1i))
+                    else:
+                        _seg(x0, x1, float(r0), float(r1))
+
+                for pa_pt, pb_pt in zip(pts_sorted, pts_sorted[1:]):
+                    _directed(float(pa_pt.n), float(pb_pt.n),
+                              float(pa_pt.best_r), float(pb_pt.best_r),
+                              getattr(pb_pt, "approach_up", True))
+
+                if show_path_v and segs:
+                    lbl = "GO-Kurve"
+                    for i, (xs, ys) in enumerate(segs):
+                        ax.plot(xs, ys, color="#ffff00", linewidth=1.8, alpha=0.9,
+                                zorder=6, label=lbl if i == 0 else None)
 
                 if show_lut_v:
-                    ax.scatter(lut_x, lut_y, c="white", marker="o", s=28, zorder=8,
-                               edgecolors="black", linewidths=0.6, label="LUT raw_r")
+                    ax.scatter([p.n for p in pts_sorted],
+                               [p.best_r for p in pts_sorted],
+                               c="white", marker="o", s=30, zorder=8,
+                               edgecolors="black", linewidths=0.6,
+                               label="LUT best_r")
 
         # Perioden-Linien T, 2T, 3T, 4T je nach Suchfenster
         sp = getattr(self.pa, "lut_search_periods", 2)
@@ -3296,13 +3330,13 @@ class CorrLandscapeWindow:
                         alpha=0.7 if k == 1 else 0.45,
                         label=f"{k}T={r_line}")
 
-        # LUT-Zoom-Grenzen berechnen (immer auf Originalpunkte, nicht Lab-Ergebnis)
+        # LUT-Zoom-Grenzen: immer auf Originalpunkte (best_r = Simulator-Koordinate)
         zoom_pts = sorted(self.pa.lut_points, key=lambda p: p.n) if self.pa.lut_points else []
         full_xlim = (float(ns[0]),  float(ns[-1]))  if len(ns)      else None
         full_ylim = (0.0, float(r_ticks[-1])) if len(r_ticks) else None
         if zoom_pts:
             ns_lut = [p.n for p in zoom_pts]
-            rs_lut = [p.best_r for p in zoom_pts]
+            rs_lut = [p.best_r for p in zoom_pts]  # gefaltete/ungefaltete Simulator-Werte
             x_margin = max(2, 0.05 * (max(ns_lut) - min(ns_lut)))
             y_margin = max(10, T / 4)
             self._lut_xlim = (min(ns_lut) - x_margin, max(ns_lut) + x_margin)
@@ -3461,16 +3495,14 @@ class CorrLandscapeWindow:
             'score_weight':     score_w,
         }
 
-        # Kandidaten-Quelle: all_candidates (vor Phase-Trennung) falls vorhanden.
-        # Wichtig: pa.lut_points kommen NACH dem Folding, daher ist raw_r ggf.
-        # gefaltet (= debug_chosen_raw % T).  Das "ensure current" im DP wuerde
-        # dann den falschen (gefalteten) Kandidaten einschleusen.  Deshalb immer
-        # debug_chosen_raw (ungefaltet) als raw_r/best_r setzen.
-        pts_copy = [copy.copy(p) for p in pa.lut_points]
+        # Kandidaten-Quelle: pre-DP corr_at Punkte (vor _global_branch_path,
+        # vor Faltung).  Damit ist raw_r immer ungefaltet und all_candidates
+        # enthaelt den vollen Kandidatensatz aus corr_at.
+        src_pts = pa.lut_points_predp if pa.lut_points_predp else pa.lut_points
+        pts_copy = [copy.copy(p) for p in src_pts]
         for p in pts_copy:
-            if hasattr(p, 'debug_chosen_raw'):
-                p.raw_r  = int(p.debug_chosen_raw)
-                p.best_r = int(p.debug_chosen_raw)
+            if not hasattr(p, 'candidates') or not p.candidates:
+                p.candidates = list(getattr(p, 'all_candidates', []) or [])
             src = list(getattr(p, 'all_candidates', None)
                        or getattr(p, 'candidates', None)
                        or [])
