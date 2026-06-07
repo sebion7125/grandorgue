@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v154b-curvature-score-gate"
+TOOL_VERSION = "v155-point-curvature-info"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -3636,13 +3636,51 @@ class CorrLandscapeWindow:
             cands_raw = [(r, s) for r, s in (getattr(closest, 'candidates', []) or [])]
         chosen_raw = getattr(closest, 'debug_chosen_raw', closest.best_r)
 
+        # Krümmung: Steigungen zum Vor- und Nachbarpunkt berechnen
+        pts_sorted = sorted(pts, key=lambda p: p.n)
+        idx = next((i for i, p in enumerate(pts_sorted) if p.n == closest.n), None)
+        curve_lines = []
+        if idx is not None:
+            T_int = self.pa.T_int
+            thresh = max(0.1, float(T_int) / CURVATURE_FILL_DIVISOR)
+            sl_left = sl_right = None
+            dn_left = dn_right = None
+            if idx > 0:
+                pa_pt = pts_sorted[idx - 1]
+                dn_left = max(1, closest.n - pa_pt.n)
+                tr_a = float(getattr(pa_pt,  'track_r', pa_pt.best_r))
+                tr_b = float(getattr(closest, 'track_r', closest.best_r))
+                sl_left = (tr_b - tr_a) / dn_left
+            if idx < len(pts_sorted) - 1:
+                pb_pt = pts_sorted[idx + 1]
+                dn_right = max(1, pb_pt.n - closest.n)
+                tr_b = float(getattr(closest, 'track_r', closest.best_r))
+                tr_c = float(getattr(pb_pt,  'track_r', pb_pt.best_r))
+                sl_right = (tr_c - tr_b) / dn_right
+            curve_lines.append("── Krümmung ──")
+            if sl_left  is not None:
+                curve_lines.append(f"  slope← {sl_left:+.3f}  dn={dn_left}")
+            if sl_right is not None:
+                curve_lines.append(f"  slope→ {sl_right:+.3f}  dn={dn_right}")
+            if sl_left is not None and sl_right is not None:
+                dslope = abs(sl_right - sl_left)
+                fires = dslope > thresh and closest.best_score >= SCORE_WARN
+                curve_lines.append(f"  |Δslope|={dslope:.3f}")
+                curve_lines.append(f"  thresh=T/{CURVATURE_FILL_DIVISOR}={thresh:.2f}")
+                min_dn = min(dn_left, dn_right)
+                curve_lines.append(
+                    f"  → {'TRIGGER' if fires else 'kein Trigger'}"
+                    + (f" (dn={min_dn}<{CURVATURE_FILL_MIN_DN})" if fires and min_dn < CURVATURE_FILL_MIN_DN else
+                       f" (score={closest.best_score:.3f}<{SCORE_WARN})" if dslope > thresh and closest.best_score < SCORE_WARN else ""))
+
         lines = [
             f"n={closest.n}  phase={closest.phase}",
             f"chosen r={chosen_raw}  sc={closest.best_score:.4f}",
             f"track_r={getattr(closest, 'track_r', '?'):.1f}" if isinstance(
                 getattr(closest, 'track_r', None), float) else "",
+        ] + curve_lines + [
             "",
-            "Kandidaten:",
+            "── Kandidaten ──",
         ]
         for c in cands_raw:
             if isinstance(c, dict):
