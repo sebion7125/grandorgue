@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v147b-landscape-wrap-fix"
+TOOL_VERSION = "v148-pruning-reset"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -946,6 +946,36 @@ def estimate_period_by_autocorr(samples: np.ndarray,
     return result, diag
 
 
+def _prune_lut_points(pts: list, T_int: int) -> list:
+    """Entfernt interpolierbare LUT-Punkte (extrahiert aus compute_lut._prune_lut)."""
+    if len(pts) <= 2:
+        return pts
+    all_scores = [p.best_score for p in pts]
+    mean_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
+    keep = [True] * len(pts)
+    track_rs = [float(getattr(p, "track_r", p.best_r)) for p in pts]
+    ns = [p.n for p in pts]
+    for i in range(1, len(pts) - 1):
+        dn = max(1, ns[i + 1] - ns[i - 1])
+        t_frac = (ns[i] - ns[i - 1]) / dn
+        r_interp = track_rs[i - 1] + t_frac * (track_rs[i + 1] - track_rs[i - 1])
+        if abs(track_rs[i] - r_interp) > max(1.5, T_int / 200.0):
+            continue
+        if pts[i].best_score < mean_score - 0.15:
+            continue
+        if pts[i].phase == "gap":
+            if abs(track_rs[i + 1] - track_rs[i - 1]) > T_int / 4.0:
+                continue
+        if (ns[i] - ns[i - 1]) > MAX_PRUNE_GAP_N or (ns[i + 1] - ns[i]) > MAX_PRUNE_GAP_N:
+            continue
+        if abs(track_rs[i] - track_rs[i - 1]) > T_int / 4.0:
+            continue
+        if abs(track_rs[i + 1] - track_rs[i]) > T_int / 4.0:
+            continue
+        keep[i] = False
+    return [pts[i] for i in range(len(pts)) if keep[i]]
+
+
 def _go_default_crossfade_ms(midi_note: int) -> int:
     """GO-Default-Crossfade-Laenge wenn ReleaseCrossfadeLength nicht im ODF steht.
 
@@ -1599,39 +1629,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
     # v82: LUT-Pruning: redundante Punkte entfernen.
     def _prune_lut(pts: list) -> list:
-        if len(pts) <= 2:
-            return pts
-        all_scores = [p.best_score for p in pts]
-        mean_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
-        keep = [True] * len(pts)
-        track_rs_prune = [float(getattr(p, "track_r", p.best_r)) for p in pts]
-        ns_prune = [p.n for p in pts]
-        for i in range(1, len(pts) - 1):
-            n_prev = ns_prune[i - 1]
-            n_next = ns_prune[i + 1]
-            n_cur  = ns_prune[i]
-            dn = max(1, n_next - n_prev)
-            t_frac = (n_cur - n_prev) / dn
-            r_interp = track_rs_prune[i - 1] + t_frac * (track_rs_prune[i + 1] - track_rs_prune[i - 1])
-            tol = max(1.5, T_int / 200.0)
-            if abs(track_rs_prune[i] - r_interp) > tol:
-                continue
-            pt = pts[i]
-            if pt.best_score < mean_score - 0.15:
-                continue
-            # Gap-Punkte nur behalten wenn sie einen echten Sprung abdecken.
-            if pt.phase == "gap":
-                span = abs(track_rs_prune[i + 1] - track_rs_prune[i - 1])
-                if span > T_int / 4.0:
-                    continue
-            if (n_cur - ns_prune[i - 1]) > MAX_PRUNE_GAP_N or (ns_prune[i + 1] - n_cur) > MAX_PRUNE_GAP_N:
-                continue
-            if abs(track_rs_prune[i] - track_rs_prune[i - 1]) > T_int / 4.0:
-                continue
-            if abs(track_rs_prune[i + 1] - track_rs_prune[i]) > T_int / 4.0:
-                continue
-            keep[i] = False
-        return [pts[i] for i in range(len(pts)) if keep[i]]
+        return _prune_lut_points(pts, T_int)
 
     meta["pruned_count"] = 0
     if len(points) > 2:
@@ -3520,6 +3518,11 @@ class CorrLandscapeWindow:
             return
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
+        # Gleiche Post-DP-Pipeline wie compute_lut: filtern + prunen
+        new_pts = [p for p in new_pts if p.best_score > -1.5]
+        if len(new_pts) > 2:
+            new_pts = _prune_lut_points(new_pts, T_int)
+
         # approach_up aus track_r ableiten (wie _assign_approach_flags in compute_lut)
         new_sorted = sorted(new_pts, key=lambda p: p.n)
         if new_sorted:
@@ -3543,8 +3546,16 @@ class CorrLandscapeWindow:
         self._plot()
 
     def _on_lab_reset(self):
-        """Verwerfe Tuning-Lab-Ergebnis, zeige Original."""
+        """Verwerfe Tuning-Lab-Ergebnis und setze alle Parameter auf Defaults."""
         self._lab_pts = None
+        self._lab_topk.set(str(BRANCH_TOP_K))
+        self._lab_phase_sep_div.set(str(int(round(1.0 / BRANCH_PHASE_SEPARATION_FACTOR))))
+        self._lab_kink_pen.set(str(BRANCH_KINK_PENALTY))
+        self._lab_switch_pen.set(str(BRANCH_SWITCH_PENALTY))
+        self._lab_smooth_pen.set(str(BRANCH_GLOBAL_SMOOTH_PENALTY))
+        self._lab_score_w.set(str(BRANCH_DP_SCORE_WEIGHT))
+        self._lab_kink_n.set(str(BRANCH_KINK_SCORE_N_LIMIT))
+        self._lab_kink_cap.set(str(BRANCH_KINK_PENALTY_CAP))
         self._lab_status.config(text="Original")
         self._plot()
 
