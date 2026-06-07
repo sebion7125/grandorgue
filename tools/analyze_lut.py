@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v150-blas-determinism"
+TOOL_VERSION = "v151-per-window-guarantee"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -1045,7 +1045,13 @@ def _run_global_branch_dp(points_in: list, T_int: int, r_max: int, search_period
         cands = _phase_separated_candidates(
             sorted(by_raw.items(), key=lambda it: it[1], reverse=True),
             T_int, _top_k, _phase_sep)
-        if search_periods > 2:
+        # Per-Fenster-Garantie: jedes T-Fenster [k*T, (k+1)*T) bekommt mindestens
+        # einen Kandidaten, auch wenn Phase-Separation ihn verdrängt hat.
+        # Galt bisher nur für search_periods > 2 (small-T); jetzt auch für
+        # search_periods = 2 (Normalfall), denn Phase-Sep arbeitet modulo T und
+        # kann den einzigen Kandidaten aus [T, 2T) eliminieren wenn [0, T) eine
+        # stärkere Phase an gleicher Position hat.
+        if search_periods >= 2:
             top_k_set = dict(cands)
             for k in range(search_periods):
                 lo, hi = k * T_int, (k + 1) * T_int
