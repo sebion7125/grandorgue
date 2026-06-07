@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v145-tuning-lab"
+TOOL_VERSION = "v146-go-default-crossfade"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -305,6 +305,7 @@ class PipeAnalysis:
     autocorr_max_p: int = 0
     n_total:       int   = 0
     crossfade_len_samples: int = 0
+    crossfade_auto: bool = False   # True = GO-Default (get_fader_length), nicht explizit im ODF
 
     min_key_press_ms: Optional[int] = None
     max_key_press_ms: Optional[int] = None
@@ -942,6 +943,20 @@ def estimate_period_by_autocorr(samples: np.ndarray,
         'cmndf_2T':   _cmndf_at(result_i * 2),
     }
     return result, diag
+
+
+def _go_default_crossfade_ms(midi_note: int) -> int:
+    """GO-Default-Crossfade-Laenge wenn ReleaseCrossfadeLength nicht im ODF steht.
+
+    Entspricht GOSoundProviderWave::get_fader_length() — notenbabhaengig aus
+    dem smpl-Chunk der WAV-Datei (m_MidiKeyNumber).
+    Bereich: 184 ms (Bass) .. 6 ms (Diskant).
+    """
+    if midi_note < 42:
+        return 184
+    if midi_note > 86:
+        return 6
+    return max(6, 184 - int(((midi_note - 42.0) / 44.0) * 178.0))
 
 
 # ─── LUT-Algorithmus (Python-Nachbau) ────────────────────────────────────────
@@ -1892,10 +1907,17 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
 
         pa.n_total  = int(pa.loop_len / pa.T_float)
 
-        # Crossfade-Länge
+        # Crossfade-Länge — entspricht GOSoundProviderWave::LoadFromOneFile:
+        # releaseCrossfadeLength ? releaseCrossfadeLength : get_fader_length(midiKeyNumber)
         xfade_ms = desc.get("crossfade_len_ms", 0)
-        pa.crossfade_len_samples = int(xfade_ms * sr / 1000) if xfade_ms > 0 else 2 * pa.T_int
-        if pa.crossfade_len_samples == 0:
+        if xfade_ms > 0:
+            pa.crossfade_len_samples = int(xfade_ms * sr / 1000)
+            pa.crossfade_auto = False
+        else:
+            auto_ms = _go_default_crossfade_ms(midi_note)
+            pa.crossfade_len_samples = int(auto_ms * sr / 1000)
+            pa.crossfade_auto = True
+        if pa.crossfade_len_samples < 4:
             pa.crossfade_len_samples = 2 * pa.T_int
 
         # Amplitudenverhältnis (Steady-State)
@@ -2991,8 +3013,9 @@ class CorrLandscapeWindow:
         # Info
         pa = self.pa
         r_info = getattr(pa, "lut_r_search_max", 0) or (2 * pa.T_int)
+        xfade_tag = " (auto)" if getattr(pa, "crossfade_auto", False) else ""
         info = (f"T={pa.T_int}  SR={pa.sample_rate}  "
-                f"NDP-Fenster={pa.crossfade_len_samples}  "
+                f"NDP-Fenster={pa.crossfade_len_samples}{xfade_tag}  "
                 f"r in [0, {r_info})  "
                 f"n_total={len(pa.attack_path) and pa.n_total or '?'}")
         tk.Label(self.win, text=info, bg=C_BG, fg=C_TEXT2,
@@ -3231,22 +3254,34 @@ class CorrLandscapeWindow:
                                edgecolors="black", linewidths=0.4,
                                label="DP gewählt raw")
 
-            # DP-Pfad (gelb) — verbindet die gewaehlten raw-r-Werte
-            show_path = getattr(self, "_show_dp_path", None)
-            if show_path is None or show_path.get():
-                path_x = [p.n for p in pts_sorted]
-                path_y = [getattr(p, "debug_chosen_raw", p.best_r) for p in pts_sorted]
-                ax.plot(path_x, path_y, color="#ffff00", linewidth=1.5, alpha=0.85,
-                        zorder=6, label="DP-Pfad")
+            # LUT-Punkte + DP-Pfad — beide nutzen debug_chosen_raw (= echte Heatmap-Y-Position,
+            # ungefaltet, in [0, r_max)).  best_r koennte gefaltet sein und wuerde die Punkte
+            # in die untere Haelfte der Landscape schieben.
+            show_lut  = getattr(self, "_show_lut_pts",  None)
+            show_path = getattr(self, "_show_dp_path",  None)
+            show_lut_v  = show_lut  is None or show_lut.get()
+            show_path_v = show_path is None or show_path.get()
+            if show_lut_v or show_path_v:
+                lut_x, lut_y = [], []
+                for p in pts_sorted:
+                    lut_x.append(p.n)
+                    lut_y.append(getattr(p, "debug_chosen_raw", p.best_r))
 
-            show_lut = getattr(self, "_show_lut_pts", None)
-            if show_lut is None or show_lut.get():
-                xs_eff = [p.n for p in pts_sorted]
-                ys_eff = [p.best_r for p in pts_sorted]
-                ax.scatter(xs_eff, ys_eff,
-                           c="white", marker="o", s=28, zorder=8,
-                           edgecolors="black", linewidths=0.6,
-                           label="LUT best_r")
+                if show_path_v:
+                    # Linie mit NaN-Brüchen an T-Wrap-Stellen (verhindert chaotische Diagonalen)
+                    px, py = [], []
+                    prev_y = None
+                    for nx, ny in zip(lut_x, lut_y):
+                        if prev_y is not None and abs(ny - prev_y) > T * 0.6:
+                            px.append(nx); py.append(float("nan"))
+                        px.append(nx); py.append(ny)
+                        prev_y = ny
+                    ax.plot(px, py, color="#ffff00", linewidth=1.5, alpha=0.85,
+                            zorder=6, label="DP-Pfad")
+
+                if show_lut_v:
+                    ax.scatter(lut_x, lut_y, c="white", marker="o", s=28, zorder=8,
+                               edgecolors="black", linewidths=0.6, label="LUT raw_r")
 
         # Perioden-Linien T, 2T, 3T, 4T je nach Suchfenster
         sp = getattr(self.pa, "lut_search_periods", 2)
@@ -3426,10 +3461,16 @@ class CorrLandscapeWindow:
             'score_weight':     score_w,
         }
 
-        # Kandidaten-Quelle: all_candidates (vor Phase-Trennung) falls vorhanden,
-        # sonst candidates (bereits gefiltert aber immer noch nutzbar).
+        # Kandidaten-Quelle: all_candidates (vor Phase-Trennung) falls vorhanden.
+        # Wichtig: pa.lut_points kommen NACH dem Folding, daher ist raw_r ggf.
+        # gefaltet (= debug_chosen_raw % T).  Das "ensure current" im DP wuerde
+        # dann den falschen (gefalteten) Kandidaten einschleusen.  Deshalb immer
+        # debug_chosen_raw (ungefaltet) als raw_r/best_r setzen.
         pts_copy = [copy.copy(p) for p in pa.lut_points]
         for p in pts_copy:
+            if hasattr(p, 'debug_chosen_raw'):
+                p.raw_r  = int(p.debug_chosen_raw)
+                p.best_r = int(p.debug_chosen_raw)
             src = list(getattr(p, 'all_candidates', None)
                        or getattr(p, 'candidates', None)
                        or [])
