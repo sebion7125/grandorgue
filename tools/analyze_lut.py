@@ -1042,26 +1042,21 @@ def _run_global_branch_dp(points_in: list, T_int: int, r_max: int, search_period
             raw = int(raw); sc = float(sc)
             if raw not in by_raw or sc > by_raw[raw]:
                 by_raw[raw] = sc
-        cands = _phase_separated_candidates(
-            sorted(by_raw.items(), key=lambda it: it[1], reverse=True),
-            T_int, _top_k, _phase_sep)
-        # Per-Fenster-Garantie: jedes T-Fenster [k*T, (k+1)*T) bekommt mindestens
-        # einen Kandidaten, auch wenn Phase-Separation ihn verdrängt hat.
-        # Galt bisher nur für search_periods > 2 (small-T); jetzt auch für
-        # search_periods = 2 (Normalfall), denn Phase-Sep arbeitet modulo T und
-        # kann den einzigen Kandidaten aus [T, 2T) eliminieren wenn [0, T) eine
-        # stärkere Phase an gleicher Position hat.
-        if search_periods >= 2:
-            top_k_set = dict(cands)
-            for k in range(search_periods):
-                lo, hi = k * T_int, (k + 1) * T_int
-                if not any(lo <= r < hi for r in top_k_set):
-                    window_best = max(
-                        ((r, sc) for r, sc in by_raw.items() if lo <= r < hi),
-                        key=lambda x: x[1], default=None)
-                    if window_best:
-                        top_k_set[window_best[0]] = window_best[1]
-            cands = sorted(top_k_set.items(), key=lambda x: x[1], reverse=True)
+        # Phase-Separation pro T-Fenster unabhaengig, Top-K begrenzt erst das
+        # Endergebnis.  Kandidaten aus [0,T) und [T,2T) konkurrieren nicht
+        # gegeneinander auf Phase (raw%T gleich = verschiedene Aeste, nicht
+        # redundant).  Jedes Fenster wird separat phasengefiltert (bis zu
+        # _top_k Eintraege pro Fenster, praktisch meist viel weniger), dann
+        # werden alle Fenster zusammengefuehrt und auf _top_k gekuerzt.
+        merged: dict = {}
+        for k in range(max(1, search_periods)):
+            lo = k * T_int
+            hi = (k + 1) * T_int
+            wc = sorted([(r, sc) for r, sc in by_raw.items() if lo <= r < hi],
+                        key=lambda x: x[1], reverse=True)
+            for r, sc in _phase_separated_candidates(wc, T_int, _top_k, _phase_sep):
+                merged[r] = sc
+        cands = sorted(merged.items(), key=lambda x: x[1], reverse=True)[:_top_k]
         cand_lists.append(cands)
 
     allowed = max(2.0, T_int * BRANCH_GLOBAL_ALLOWED_FACTOR)
