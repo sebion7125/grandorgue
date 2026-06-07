@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v151-per-window-guarantee"
+TOOL_VERSION = "v153-all-candidates-source"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -1031,7 +1031,12 @@ def _run_global_branch_dp(points_in: list, T_int: int, r_max: int, search_period
 
     cand_lists = []
     for p in pts:
-        cands = list(getattr(p, "candidates", []) or [])
+        # all_candidates = vor Phase-Sep aus corr_at (vollstaendig, alle Fenster).
+        # candidates     = schon phasengefiltert (evtl. Fenster [T,2T) leer).
+        # Immer all_candidates bevorzugen, damit die per-Fenster-Phase-Sep
+        # weiter unten alle Rohdaten aus [0,r_max) sieht.
+        cands = list(getattr(p, "all_candidates", None) or
+                     getattr(p, "candidates",     None) or [])
         if not cands:
             cands = [(int(getattr(p, "raw_r", p.best_r)), float(p.best_score))]
         cur = (int(getattr(p, "raw_r", p.best_r)), float(p.best_score))
@@ -3303,8 +3308,8 @@ class CorrLandscapeWindow:
                         chosen_x.append(p.n)
                         chosen_y.append(int(chosen_raw))
                 if cand_x:
-                    ax.scatter(cand_x, cand_y, c="#00ffff", marker="+",
-                               s=cand_s, alpha=0.75, linewidths=1.0, zorder=5,
+                    ax.scatter(cand_x, cand_y, c="#ffffff", marker="+",
+                               s=cand_s, alpha=0.90, linewidths=1.2, zorder=5,
                                label="Kandidaten")
                 if chosen_x:
                     ax.scatter(chosen_x, chosen_y, c="#ff00ff", marker="D",
