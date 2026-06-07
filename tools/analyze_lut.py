@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v158-no-curve-thresh-floor"
+TOOL_VERSION = "v159-curve-thresh-direct-input"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -3492,18 +3492,19 @@ class CorrLandscapeWindow:
         default_phase_sep_div = int(round(1.0 / BRANCH_PHASE_SEPARATION_FACTOR))
         self._lab_topk          = tk.StringVar(value=str(BRANCH_TOP_K))
         self._lab_phase_sep_div = tk.StringVar(value=str(default_phase_sep_div))
-        self._lab_curve_div     = tk.StringVar(value=str(CURVATURE_FILL_DIVISOR))
-        self._lab_curve_div.trace_add("write", lambda *_: self._refresh_click_info())
-        _row("Top-K",           self._lab_topk,
+        _default_curve_thresh = round(self.pa.T_int / CURVATURE_FILL_DIVISOR, 4)
+        self._lab_curve_thresh  = tk.StringVar(value=str(_default_curve_thresh))
+        self._lab_curve_thresh.trace_add("write", lambda *_: self._refresh_click_info())
+        _row("Top-K",              self._lab_topk,
              tip="Max. Kandidaten pro Messpunkt (aus beiden T-Fenstern zusammen). "
                  "Mehr → bessere Abdeckung, langsamer. Standard: 24.")
-        _row("Phase-Sep (T/)",  self._lab_phase_sep_div,
+        _row("Phase-Sep (T/)",     self._lab_phase_sep_div,
              tip="Mindestabstand zwischen Kandidaten = T ÷ Wert. "
                  "Kleiner → engere Peaks werden einzeln erfasst. Standard: 16 → T/16.")
-        _row("Curve-Fill (T/)", self._lab_curve_div,
-             tip="Curvature-Fill-Schwelle = T ÷ Wert (Steigungsänderung in Samples/Periode). "
-                 "Nur Diagnose im Punkt-Info-Panel — Änderung wirkt erst bei nächster Vollanalyse. "
-                 "Standard: 30 → T/30.")
+        _row("Curve-Fill thresh",  self._lab_curve_thresh,
+             tip="Curvature-Fill-Schwelle direkt in Samples/Periode Steigungsänderung. "
+                 f"Default für T={self.pa.T_int}: T/{CURVATURE_FILL_DIVISOR} = {_default_curve_thresh}. "
+                 "Nur Diagnose — Änderung wirkt erst bei nächster Vollanalyse.")
 
         # ── DP-Parameter ─────────────────────────────────────────────────────
         tk.Label(frame, text="── DP-Parameter ──", **sec_kw).pack(
@@ -3670,7 +3671,7 @@ class CorrLandscapeWindow:
         self._lab_score_w.set(str(BRANCH_DP_SCORE_WEIGHT))
         self._lab_kink_n.set(str(BRANCH_KINK_SCORE_N_LIMIT))
         self._lab_kink_cap.set(str(BRANCH_KINK_PENALTY_CAP))
-        self._lab_curve_div.set(str(CURVATURE_FILL_DIVISOR))
+        self._lab_curve_thresh.set(str(round(self.pa.T_int / CURVATURE_FILL_DIVISOR, 4)))
         self._lab_status.config(text="Original")
         self._plot()
 
@@ -3712,10 +3713,9 @@ class CorrLandscapeWindow:
         if idx is not None:
             T_int = self.pa.T_int
             try:
-                _curve_div = max(1.0, float(self._lab_curve_div.get()))
+                thresh = float(self._lab_curve_thresh.get())
             except (ValueError, AttributeError):
-                _curve_div = CURVATURE_FILL_DIVISOR
-            thresh = float(T_int) / _curve_div
+                thresh = float(T_int) / CURVATURE_FILL_DIVISOR
             sl_left = sl_right = None
             dn_left = dn_right = None
             if idx > 0:
@@ -3739,7 +3739,7 @@ class CorrLandscapeWindow:
                 dslope = abs(sl_right - sl_left)
                 fires = dslope > thresh and closest.best_score >= SCORE_WARN
                 curve_lines.append(f"  |Δslope|={dslope:.3f}")
-                curve_lines.append(f"  thresh=T/{int(_curve_div)}={thresh:.2f}")
+                curve_lines.append(f"  thresh={thresh:.4f}")
                 min_dn = min(dn_left, dn_right)
                 curve_lines.append(
                     f"  → {'TRIGGER' if fires else 'kein Trigger'}"
