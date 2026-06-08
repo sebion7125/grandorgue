@@ -4742,7 +4742,10 @@ class LUTAnalyzerApp(tk.Tk):
         """Algorithmus-Wechsel: alle gecachten Analysen löschen."""
         algo = "v2 (Tracking)" if self._use_v2_var.get() else "v1 (Legacy-DP)"
         self._analyses.clear()
-        self._clear_detail()
+        if hasattr(self, '_detail_title'):
+            self._detail_title.config(text="Keine Pfeife ausgewählt")
+        if hasattr(self, '_detail_info'):
+            self._detail_info.config(text="")
         if hasattr(self, '_progress_label'):
             self._progress_label.config(
                 text=f"Algorithmus: {algo} — bitte neu analysieren")
