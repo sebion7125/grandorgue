@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v170-v2-single-beam"
+TOOL_VERSION = "v171-v2-toggle-fix"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -4738,16 +4738,23 @@ class LUTAnalyzerApp(tk.Tk):
     # ── Selektion ──────────────────────────────────────────────────────────────
 
     def _on_algorithm_toggle(self):
-        """Algorithmus-Wechsel: alle gecachten Analysen löschen."""
+        """Algorithmus-Wechsel: gecachte PipeAnalysis-Objekte durch Descriptor-Dicts ersetzen.
+        Beim nächsten Klick auf eine Pfeife wird on-demand neu analysiert."""
         algo = "v2 (Tracking)" if self._use_v2_var.get() else "v1 (Legacy-DP)"
-        self._analyses.clear()
+        # Alle bereits analysierten Einträge zurück auf das Descriptor-Dict setzen
+        # damit die On-Demand-Analyse in _on_select greift.
+        if hasattr(self, '_pipe_descs'):
+            for d in self._pipe_descs:
+                key = (f"{d['rank_name']}|{d['midi_note']}|"
+                       f"{d['perspective']}|{d['release_type']}")
+                self._analyses[key] = d
         if hasattr(self, '_detail_title'):
             self._detail_title.config(text="Keine Pfeife ausgewählt")
         if hasattr(self, '_detail_info'):
             self._detail_info.config(text="")
         if hasattr(self, '_progress_label'):
             self._progress_label.config(
-                text=f"Algorithmus: {algo} — bitte neu analysieren")
+                text=f"Algorithmus: {algo} — Pfeife anklicken zum Neu-Analysieren")
 
     def _on_select(self, event):
         sel = self._tree.selection()
