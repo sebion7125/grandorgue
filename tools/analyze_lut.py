@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v165-no-maxtotal-in-lab-phase3b"
+TOOL_VERSION = "v166-predp-overlay"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -3405,6 +3405,30 @@ class CorrLandscapeWindow:
                                edgecolors="black", linewidths=0.6,
                                label="LUT best_r")
 
+        # predp-Punkte (vor Pruning): zeigt alle Messpunkte die der DP als Input hatte
+        _show_predp = getattr(self, "_show_predp_pts", None)
+        if _show_predp is not None and _show_predp.get():
+            predp = self.pa.lut_points_predp
+            if predp:
+                predp_sorted = sorted(predp, key=lambda p: p.n)
+                # track_r bevorzugen (ungefaltet), Fallback auf best_r
+                px = [p.n for p in predp_sorted]
+                py = [float(getattr(p, 'track_r', p.best_r)) for p in predp_sorted]
+                # Phasen-Label als Farbe: dense=orange, gap=gelborange, curve=rot
+                colors = []
+                for p in predp_sorted:
+                    ph = getattr(p, 'phase', 'dense')
+                    if ph == 'dense':
+                        colors.append('#ff9900')
+                    elif ph == 'curve':
+                        colors.append('#ff4444')
+                    elif ph == 'sparse':
+                        colors.append('#ffcc44')
+                    else:
+                        colors.append('#ffbb55')
+                ax.scatter(px, py, c=colors, marker="|", s=60, linewidths=1.5,
+                           zorder=7, alpha=0.85, label="predp (vor Pruning)")
+
         # Perioden-Linien T, 2T, 3T, 4T je nach Suchfenster
         sp = getattr(self.pa, "lut_search_periods", 2)
         r_sm = getattr(self.pa, "lut_r_search_max", 2 * T)
@@ -3561,11 +3585,13 @@ class CorrLandscapeWindow:
         self._show_dp_path       = tk.BooleanVar(value=True)
         self._show_cand_overlay  = tk.BooleanVar(value=True)
         self._show_lut_pts       = tk.BooleanVar(value=True)
+        self._show_predp_pts     = tk.BooleanVar(value=False)
         chk_kw = dict(bg=C_BG3, fg=C_TEXT, selectcolor=C_BG2, font=("Consolas", 9),
                       activebackground=C_BG3, activeforeground=C_TEXT)
-        for text, var in [("DP-Pfad (gelb)",     self._show_dp_path),
-                          ("Kandidaten (grau)",   self._show_cand_overlay),
-                          ("LUT-Punkte (weiß)",   self._show_lut_pts)]:
+        for text, var in [("DP-Pfad (gelb)",       self._show_dp_path),
+                          ("Kandidaten (weiß)",     self._show_cand_overlay),
+                          ("LUT-Punkte (weiß)",     self._show_lut_pts),
+                          ("predp-Punkte (orange)", self._show_predp_pts)]:
             tk.Checkbutton(frame, text=text, variable=var,
                            command=self._plot, **chk_kw).pack(anchor=tk.W, padx=8)
 
