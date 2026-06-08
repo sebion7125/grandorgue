@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v166-predp-overlay"
+TOOL_VERSION = "v167-track-r-prior"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -265,6 +265,10 @@ BRANCH_HARD_KINK_FACTOR  = 2.0   # err > Faktor*allowed → harter Knick
 BRANCH_HARD_KINK_PENALTY = 20.0  # additive Strafe bei hartem Knick (gross genug gg. Score)
 BRANCH_MIDPT_COHERENCE_PENALTY = 5.0  # v109-v111: Strafe wenn Midpoint-Frame kein Peak bei erwartetem r hat
 BRANCH_MIDPT_SCORE_PENALTY      = 1.5  # v111: Zusatzstrafe wenn der naechste Midpoint-Peak deutlich schwach ist
+# v167: Track-R-Prior: DP-Kanditat wird bestraft wenn er weit vom lokal
+# gewaehlten track_r (corr_at Vorwaertspass) abweicht. Verhindert dass der
+# DP einen glatteren, aber falschen Ast waehlt. Einheit: normiert auf T_int.
+BRANCH_TRACK_R_WEIGHT = 2.0
 
 # v84: Adaptives Suchfenster für kleine Perioden
 SMALL_T_THRESHOLD      = 16   # T_int < Schwelle → erweitertes Suchfenster
@@ -1027,10 +1031,19 @@ def _run_global_branch_dp(points_in: list, T_int: int, r_max: int, search_period
     _kink_cap     = float(_pr.get('kink_penalty_cap', BRANCH_KINK_PENALTY_CAP))
     _kink_sc_min  = float(_pr.get('kink_score_min',   BRANCH_KINK_SCORE_SCALE_MIN))
     _score_w      = float(_pr.get('score_weight',     BRANCH_DP_SCORE_WEIGHT))
+    _track_r_w    = float(_pr.get('track_r_weight',   BRANCH_TRACK_R_WEIGHT))
 
     pts = [p for p in points_in if p.best_score > -1.5]
     if len(pts) < 3:
         return points_in
+
+    # track_r-Prior aus dem corr_at-Vorwaertspass (vor DP). Nur verwenden wenn
+    # Score gut genug (verrauschte Punkte sollen den DP nicht falsch ankern).
+    _track_r_priors = [
+        float(getattr(p, 'track_r', p.best_r))
+        if (p.best_score >= SCORE_WARN and _track_r_w > 0.0) else None
+        for p in pts
+    ]
 
     cand_lists = []
     for p in pts:
@@ -1137,9 +1150,14 @@ def _run_global_branch_dp(points_in: list, T_int: int, r_max: int, search_period
                 anchor_pen = (BRANCH_ANCHOR_PENALTY * (abs(tr_cur - anchor_r) / max_abs_drift) ** 2
                               if search_periods > 2 and anchor_r is not None else 0.0)
 
+                tr_prior = _track_r_priors[pi]
+                track_r_pen = (_track_r_w * (abs(int(raw_cur) - tr_prior) / T_int) ** 2
+                               if tr_prior is not None else 0.0)
+
                 cost = (cost_prev - _score_w * float(sc_cur)
                         + smooth_pen + kink_pen + hard_kink_pen
-                        + branch_sw_pen + anchor_pen + phase_pred_pen)
+                        + branch_sw_pen + anchor_pen + phase_pred_pen
+                        + track_r_pen)
                 key = (i_prev1, i_cur)
                 if key not in new_states or cost < new_states[key][0]:
                     new_states[key] = (cost, tr_prev1, tr_cur, slope_cur_tent, (i_prev2, i_prev1))
@@ -3561,6 +3579,10 @@ class CorrLandscapeWindow:
             ("Kink N-Limit",   "_lab_kink_n",      str(BRANCH_KINK_SCORE_N_LIMIT),
              "Kink-Penalty gilt nur für Punkte mit n ≥ diesem Wert. "
              "Schützt die Einschwingphase vor zu starrer Pfadführung. Standard: 8."),
+            ("Track-R Weight",  "_lab_track_r_w",   str(BRANCH_TRACK_R_WEIGHT),
+             "Strafe wenn DP-Kandidat weit vom lokal gewaehlten track_r abweicht. "
+             "Verhindert dass der DP einen glatteren aber falschen Ast waehlt. "
+             "0 = deaktiviert. Standard: 2.0."),
             ("Kink Cap",       "_lab_kink_cap",    str(BRANCH_KINK_PENALTY_CAP),
              "Maximale Kink-Penalty pro Schritt (Deckelung). "
              "Verhindert, dass einzelne starke Kurven den ganzen Pfad dominieren. Standard: 20.0."),
@@ -3629,6 +3651,7 @@ class CorrLandscapeWindow:
             score_w        = float(self._lab_score_w.get())
             kink_n         = int(self._lab_kink_n.get())
             kink_cap       = float(self._lab_kink_cap.get())
+            track_r_w      = float(self._lab_track_r_w.get())
             curve_thresh   = float(self._lab_curve_thresh.get())
             curve_budget   = max(1, int(self._lab_curve_budget.get()))
             curve_minn     = int(self._lab_curve_minn.get())
@@ -3645,6 +3668,7 @@ class CorrLandscapeWindow:
             'kink_n_limit':     kink_n,
             'kink_penalty_cap': kink_cap,
             'score_weight':     score_w,
+            'track_r_weight':   track_r_w,
         }
 
         # Kandidaten-Quelle: wenn corr_at verfügbar, Phase 3b+4 neu laufen.
@@ -3814,6 +3838,7 @@ class CorrLandscapeWindow:
         self._lab_score_w.set(str(BRANCH_DP_SCORE_WEIGHT))
         self._lab_kink_n.set(str(BRANCH_KINK_SCORE_N_LIMIT))
         self._lab_kink_cap.set(str(BRANCH_KINK_PENALTY_CAP))
+        self._lab_track_r_w.set(str(BRANCH_TRACK_R_WEIGHT))
         self._lab_curve_thresh.set(f"{self.pa.T_int / CURVATURE_FILL_DIVISOR:.6g}")
         self._lab_curve_budget.set(str(CURVATURE_FILL_MAX))
         self._lab_curve_minn.set("0")
