@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v172-v2-all-cands-no-prune"
+TOOL_VERSION = "v173-v2-adaptive-prune"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -970,10 +970,16 @@ def estimate_period_by_autocorr(samples: np.ndarray,
     return result, diag
 
 
-def _prune_lut_points(pts: list, T_int: int) -> list:
-    """Entfernt interpolierbare LUT-Punkte (extrahiert aus compute_lut._prune_lut)."""
+def _prune_lut_points(pts: list, T_int: int, min_interp_err: float = None) -> list:
+    """Entfernt interpolierbare LUT-Punkte (extrahiert aus compute_lut._prune_lut).
+
+    min_interp_err: Schwellwert für Abweichung von Gerade. Default: max(1.5, T/200).
+    Für dichte v2-Tracks kleinere Werte sinnvoll (z.B. 0.3).
+    """
     if len(pts) <= 2:
         return pts
+    if min_interp_err is None:
+        min_interp_err = max(1.5, T_int / 200.0)
     all_scores = [p.best_score for p in pts]
     mean_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
     keep = [True] * len(pts)
@@ -983,7 +989,7 @@ def _prune_lut_points(pts: list, T_int: int) -> list:
         dn = max(1, ns[i + 1] - ns[i - 1])
         t_frac = (ns[i] - ns[i - 1]) / dn
         r_interp = track_rs[i - 1] + t_frac * (track_rs[i + 1] - track_rs[i - 1])
-        if abs(track_rs[i] - r_interp) > max(1.5, T_int / 200.0):
+        if abs(track_rs[i] - r_interp) > min_interp_err:
             continue
         if pts[i].best_score < mean_score - 0.15:
             continue
@@ -2014,8 +2020,11 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
 
     points = [p for p in points if p.best_score > -1.5]
     pruned_before = len(points)
-    # v2: kein Pruning — der Track ist bereits auf den richtigen Stellen gemessen.
-    # Pruning würde bei dichtem Track fast alle Zwischenpunkte entfernen.
+    # v2: Pruning mit kleinerem Schwellwert — dichter Track, kleinere erlaubte Abweichung.
+    # max(0.3, T/2000) statt max(1.5, T/200) → behält Kurvenform, entfernt Rauschpunkte.
+    if len(points) > 2:
+        points = _prune_lut_points(points, T_int,
+                                    min_interp_err=max(0.3, T_int / 2000.0))
 
     # approach_up aus track_r-Richtung ableiten (wie _assign_approach_flags)
     pts_s = sorted(points, key=lambda p: p.n)
