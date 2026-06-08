@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v168-tracking-v2"
+TOOL_VERSION = "v169-v2-continuity-pass"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -1954,17 +1954,49 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     if not dense_track:
         return [], meta
 
-    # ── Phase 2: LUT-Punkte bauen + Pruning ──────────────────────────────────
+    # ── Phase 2: Kontinuitäts-Pass + LUT-Punkte + Pruning ────────────────────
+    # Greedy rückwärts von n_last: erstes Punkt nach Score, danach nach
+    # Nähe zur linearen Extrapolation (verhindert Ast-Wechsel in der Ausgabe).
     all_cands_by_n  = {}
     chosen_r_by_n   = {}
     points = []
+
+    all_ns_rev = sorted(dense_track.keys(), reverse=True)
+    prev_r = prev_prev_r = None
+    prev_n = prev_prev_n = None
+    selected_by_n: dict = {}
+
+    for n in all_ns_rev:
+        cands_at_n = [(r, sc) for r, sc in dense_track[n]]
+        if not cands_at_n:
+            continue
+        if prev_r is None:
+            best_r, best_sc = max(cands_at_n, key=lambda x: x[1])
+        else:
+            dn_back = max(1, prev_n - n)
+            if prev_prev_r is not None:
+                slope = (prev_r - prev_prev_r) / max(1, prev_n - prev_prev_n)
+            else:
+                slope = 0.0
+            exp_r = prev_r + slope * dn_back
+            # Primär: Nähe zur Extrapolation; Sekundär: Score
+            def _key(x, _exp=exp_r, _T=T_int):
+                dist = abs(x[0] - _exp)
+                dist = min(dist, _T * search_periods - dist)
+                return dist - 0.2 * x[1] * _T
+            best_r, best_sc = min(cands_at_n, key=_key)
+        selected_by_n[n] = (best_r, best_sc)
+        prev_prev_r, prev_r = prev_r, best_r
+        prev_prev_n, prev_n = prev_n, n
 
     for n in sorted(dense_track):
         cands_at_n = dense_track[n]
         if not cands_at_n:
             continue
         cands_full = [(r, sc) for r, sc in cands_at_n]
-        best_r, best_sc = max(cands_full, key=lambda x: x[1])
+        if n not in selected_by_n:
+            continue
+        best_r, best_sc = selected_by_n[n]
         all_cands_by_n[n]  = cands_full
         chosen_r_by_n[n]   = best_r
 
@@ -1983,12 +2015,23 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     if len(points) > 2:
         points = _prune_lut_points(points, T_int)
 
-    meta["predp_points"]       = list(points)
-    meta["pre3b_points"]       = list(points)
+    # approach_up aus track_r-Richtung ableiten (wie _assign_approach_flags)
+    pts_s = sorted(points, key=lambda p: p.n)
+    if pts_s:
+        pts_s[0].approach_up = True
+        for _a, _b in zip(pts_s, pts_s[1:]):
+            ta = float(getattr(_a, 'track_r', _a.best_r))
+            tb = float(getattr(_b, 'track_r', _b.best_r))
+            _b.approach_up = (tb >= ta)
+
+    meta["predp_points"]        = list(points)
+    meta["pre3b_points"]        = list(points)
     meta["all_candidates_by_n"] = all_cands_by_n
-    meta["chosen_r_by_n"]      = chosen_r_by_n
-    meta["pruned_count"]       = pruned_before - len(points)
-    meta["corr_at_data"]       = None   # v2 braucht kein corr_at
+    meta["chosen_r_by_n"]       = chosen_r_by_n
+    meta["pruned_count"]        = pruned_before - len(points)
+    meta["corr_at_data"]        = None
+    meta["folded"]              = False   # v2 liefert ungefaltete r-Werte
+    meta["fold_reason"]         = "v2-unfolded"
 
     return points, meta
 
@@ -4367,6 +4410,7 @@ class LUTAnalyzerApp(tk.Tk):
 
         # v168: Tracking-Algorithmus wählen
         self._use_v2_var = tk.BooleanVar(value=False)
+        self._use_v2_var.trace_add("write", lambda *_: self._on_algorithm_toggle())
         tk.Checkbutton(toolbar, text="Tracking v2",
                        variable=self._use_v2_var,
                        bg=C_BG3, fg="#ffaa44",
@@ -4693,6 +4737,15 @@ class LUTAnalyzerApp(tk.Tk):
         self._tree.tag_configure(key, foreground=colors[pa.severity])
 
     # ── Selektion ──────────────────────────────────────────────────────────────
+
+    def _on_algorithm_toggle(self):
+        """Algorithmus-Wechsel: alle gecachten Analysen löschen."""
+        algo = "v2 (Tracking)" if self._use_v2_var.get() else "v1 (Legacy-DP)"
+        self._analyses.clear()
+        self._clear_detail()
+        if hasattr(self, '_progress_label'):
+            self._progress_label.config(
+                text=f"Algorithmus: {algo} — bitte neu analysieren")
 
     def _on_select(self, event):
         sel = self._tree.selection()
