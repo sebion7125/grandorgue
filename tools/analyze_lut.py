@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v173-v2-adaptive-prune"
+TOOL_VERSION = "v174-prune-span-T16"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -995,9 +995,10 @@ def _prune_lut_points(pts: list, T_int: int, min_interp_err: float = None) -> li
             continue
         if pts[i].phase == "curve" and pts[i].best_score >= mean_score - 0.15:
             continue   # Curvature-Fill-Punkte mit gutem Score nie prunen
-        if pts[i].phase == "gap":
-            if abs(track_rs[i + 1] - track_rs[i - 1]) > T_int / 4.0:
-                continue
+        # Span-Check: Punkt nicht löschen wenn r-Änderung über ihn hinweg > T/16
+        # (T/16 = eine Phase-Trenneinheit, Interpolationsfehler wäre hörbar)
+        if abs(track_rs[i + 1] - track_rs[i - 1]) > T_int / 16.0:
+            continue
         if (ns[i] - ns[i - 1]) > MAX_PRUNE_GAP_N or (ns[i + 1] - ns[i]) > MAX_PRUNE_GAP_N:
             continue
         if abs(track_rs[i] - track_rs[i - 1]) > T_int / 4.0:
@@ -2020,11 +2021,8 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
 
     points = [p for p in points if p.best_score > -1.5]
     pruned_before = len(points)
-    # v2: Pruning mit kleinerem Schwellwert — dichter Track, kleinere erlaubte Abweichung.
-    # max(0.3, T/2000) statt max(1.5, T/200) → behält Kurvenform, entfernt Rauschpunkte.
     if len(points) > 2:
-        points = _prune_lut_points(points, T_int,
-                                    min_interp_err=max(0.3, T_int / 2000.0))
+        points = _prune_lut_points(points, T_int)
 
     # approach_up aus track_r-Richtung ableiten (wie _assign_approach_flags)
     pts_s = sorted(points, key=lambda p: p.n)
