@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v169-v2-continuity-pass"
+TOOL_VERSION = "v170-v2-single-beam"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -1908,97 +1908,96 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         # State: (r_d, score, r_d_prev=r_d, dn_prev=1)
         return [(r_d, float(sc), r_d, 1) for r_d, sc in cands]
 
-    # ── Phase 0: Voller Scan bei n_end ───────────────────────────────────────
-    n_last   = n_end - 1
-    cs_last  = int(round(n_last * T_float))
-    cs_last_d = cs_last // ds
-    candidates = _full_scan(cs_last_d)
-    if not candidates:
+    # ── Phase 0: Voller Scan bei n_end → Primärstrahl initialisieren ─────────
+    n_last    = n_end - 1
+    cs_last_d = int(round(n_last * T_float)) // ds
+    init_cands = _full_scan(cs_last_d)
+    if not init_cands:
         return [], meta
 
-    # ── Phase 1: Rückwärts-Tracking ──────────────────────────────────────────
-    dense_track   = {}   # n → [(r_samples, score), ...]
+    # Primärstrahl: bester Kandidat bei n_last (sicherstes Signal).
+    # (r_d, score, r_d_prev, dn_prev)  – alles in downsampled units
+    p_r_d, p_sc, p_prev_d, p_dn = init_cands[0][0], init_cands[0][1], init_cands[0][0], 1
+
+    # ── Phase 1: Single-Beam-Rückwärts-Tracking ──────────────────────────────
+    # Primärstrahl wird per ±TRACKING_WINDOW_HALF um die lineare Extrapolation
+    # gemessen. Bei Rescan-Trigger: voller NDP, dann den räumlich nächsten
+    # Kandidaten nehmen — kein Score-Vergleich zwischen Ästen.
+    half = TRACKING_WINDOW_HALF
+    primary_by_n = {}   # n → (r_samples, score)  – Primärstrahl-Ergebnis
+    all_cands_by_n  = {}
     n_cur = n_last
 
     while n_cur >= n_start:
-        # Aktuellen Schritt aufzeichnen (r zurück in Vollauflösung)
         cs_cur_d = int(round(n_cur * T_float)) // ds
         if cs_cur_d + window_len_d <= len(loop_seg):
-            dense_track[n_cur] = [(int(r_d * ds), float(sc))
-                                   for r_d, sc, _, _ in candidates]
+            primary_by_n[n_cur] = (int(p_r_d * ds), float(p_sc))
+            # Alle Kandidaten für Landscape-Visualisierung
+            vis_cands = _full_scan(cs_cur_d) if n_cur == n_last else None
+            if vis_cands is not None:
+                all_cands_by_n[n_cur] = [(int(r*ds), float(s)) for r, s, _, _ in vis_cands]
+            else:
+                all_cands_by_n[n_cur] = [(int(p_r_d * ds), float(p_sc))]
 
-        # Schrittweite bestimmen
         dn = TRACKING_DN_DENSE if n_cur <= TRACKING_DENSE_N_LIMIT else TRACKING_DN_SPARSE
         n_next = max(n_start, n_cur - dn)
         if n_next == n_cur:
             break
         dn_actual = n_cur - n_next
-
-        # Nächste Angriffsposition
         cs_next_d = int(round(n_next * T_float)) // ds
 
-        # Tracking-Schritt
-        new_cands, needs_rescan = _track_step_v2(
-            loop_seg, release_ds_a, window_len_d, ds,
-            T_int_d, sp_T_d, cs_next_d, candidates, dn_actual
-        )
+        # Lineare Rückwärts-Extrapolation
+        slope_d = (p_r_d - p_prev_d) / max(1, p_dn)
+        exp_r_d = int(round(p_r_d + slope_d * dn_actual)) % sp_T_d
 
-        if needs_rescan or not new_cands:
-            fresh = _full_scan(cs_next_d)
-            if fresh:
-                new_cands = fresh
+        # Messen ±half um Erwartungsposition
+        if cs_next_d + window_len_d <= len(loop_seg):
+            lw = loop_seg[cs_next_d : cs_next_d + window_len_d]
+            na = np.linalg.norm(lw)
+            if na > 1e-12:
+                lw_n = (lw / na).astype(np.float32)
+                best_r_d, best_sc = exp_r_d, -2.0
+                for off in range(-half, half + 1):
+                    r_try = (exp_r_d + off) % sp_T_d
+                    if r_try + window_len_d > len(release_ds_a):
+                        continue
+                    rel_w = release_ds_a[r_try : r_try + window_len_d]
+                    nr = np.linalg.norm(rel_w)
+                    if nr < 1e-12:
+                        continue
+                    sc_try = float(np.dot(lw_n, rel_w) / nr)
+                    if sc_try > best_sc:
+                        best_sc = sc_try; best_r_d = r_try
 
-        candidates = new_cands if new_cands else candidates
+                drift_d = abs(best_r_d - exp_r_d)
+                drift_d = min(drift_d, sp_T_d - drift_d)
+                needs_rescan = (best_sc < TRACKING_RESCAN_SCORE_RATIO * max(0.05, p_sc)
+                                or drift_d * ds > TRACKING_RESCAN_DRIFT)
+
+                if needs_rescan:
+                    fresh = _full_scan(cs_next_d)
+                    if fresh:
+                        # Nächsten Kandidaten zur extrapolierten Position nehmen
+                        def _near(x, _e=exp_r_d, _sp=sp_T_d):
+                            d = abs(x[0] - _e); return min(d, _sp - d)
+                        nearest = min(fresh, key=_near)
+                        best_r_d, best_sc = nearest[0], nearest[1]
+
+                p_prev_d, p_r_d, p_sc, p_dn = p_r_d, best_r_d, best_sc, dn_actual
+
         n_cur = n_next
 
-    if not dense_track:
+    if not primary_by_n:
         return [], meta
 
-    # ── Phase 2: Kontinuitäts-Pass + LUT-Punkte + Pruning ────────────────────
-    # Greedy rückwärts von n_last: erstes Punkt nach Score, danach nach
-    # Nähe zur linearen Extrapolation (verhindert Ast-Wechsel in der Ausgabe).
-    all_cands_by_n  = {}
+    # ── Phase 2: LUT-Punkte + Pruning ─────────────────────────────────────────
     chosen_r_by_n   = {}
     points = []
 
-    all_ns_rev = sorted(dense_track.keys(), reverse=True)
-    prev_r = prev_prev_r = None
-    prev_n = prev_prev_n = None
-    selected_by_n: dict = {}
-
-    for n in all_ns_rev:
-        cands_at_n = [(r, sc) for r, sc in dense_track[n]]
-        if not cands_at_n:
-            continue
-        if prev_r is None:
-            best_r, best_sc = max(cands_at_n, key=lambda x: x[1])
-        else:
-            dn_back = max(1, prev_n - n)
-            if prev_prev_r is not None:
-                slope = (prev_r - prev_prev_r) / max(1, prev_n - prev_prev_n)
-            else:
-                slope = 0.0
-            exp_r = prev_r + slope * dn_back
-            # Primär: Nähe zur Extrapolation; Sekundär: Score
-            def _key(x, _exp=exp_r, _T=T_int):
-                dist = abs(x[0] - _exp)
-                dist = min(dist, _T * search_periods - dist)
-                return dist - 0.2 * x[1] * _T
-            best_r, best_sc = min(cands_at_n, key=_key)
-        selected_by_n[n] = (best_r, best_sc)
-        prev_prev_r, prev_r = prev_r, best_r
-        prev_prev_n, prev_n = prev_n, n
-
-    for n in sorted(dense_track):
-        cands_at_n = dense_track[n]
-        if not cands_at_n:
-            continue
-        cands_full = [(r, sc) for r, sc in cands_at_n]
-        if n not in selected_by_n:
-            continue
-        best_r, best_sc = selected_by_n[n]
-        all_cands_by_n[n]  = cands_full
-        chosen_r_by_n[n]   = best_r
+    for n in sorted(primary_by_n):
+        best_r, best_sc = primary_by_n[n]
+        chosen_r_by_n[n] = best_r
+        cands_full = all_cands_by_n.get(n, [(best_r, best_sc)])
 
         cs = int(round(n * T_float))
         pt = LutPoint(n=n, loop_pos=cs, best_r=int(best_r),
