@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v167-track-r-prior"
+TOOL_VERSION = "v168-tracking-v2"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -210,6 +210,14 @@ BRANCH_TOP_K             = 24     # v142: high aliquots need more simultaneous b
 BRANCH_SCORE_MARGIN      = 0.40   # Kandidaten bis best_score - margin behalten
 BRANCH_PREDICT_PENALTY   = 0.35   # Score-Abzug bei Abstand zum vorhergesagten Ast
 BRANCH_MIN_PEAK_DISTANCE = 3      # Mindestabstand lokaler Maxima in r-Samples
+
+# v168: compute_lut_v2 – Rückwärts-Tracking mit engem Suchfenster
+TRACKING_DN_DENSE          = 2    # Schrittweite n < TRACKING_DENSE_N_LIMIT
+TRACKING_DENSE_N_LIMIT     = 35   # bis hierhin dichte Messung
+TRACKING_DN_SPARSE         = 6    # Schrittweite sonst (= DENSE_STEP)
+TRACKING_WINDOW_HALF       = 2    # ±2 Samples um Erwartungsposition
+TRACKING_RESCAN_SCORE_RATIO = 0.90 # Rescan wenn Score < 90% des Vorgängers
+TRACKING_RESCAN_DRIFT      = 8.0  # Rescan wenn Drift > 8 Samples
 BRANCH_PHASE_SEPARATION_FACTOR = 1.0 / 16.0  # v142: 1'/high aliquots can expose ~16 branches per 2T
 BRANCH_FIT_WIN           = 8      # letzte Punkte fuer lokale lineare Vorhersage
 BRANCH_STABLE_RESID_FACTOR = 1.0
@@ -1760,6 +1768,231 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 
 # ─── ODF-Parser ──────────────────────────────────────────────────────────────
 
+def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
+                   window_len_d: int, ds: int,
+                   T_int_d: int, sp_T_d: int,
+                   cs_d: int, candidates: list, dn: int) -> tuple:
+    """Einen Rückwärts-Tracking-Schritt durchführen.
+
+    candidates: list of (r_d, score, r_d_prev, dn_prev)  – in downsampled units
+    Rückgabe:   (new_candidates, needs_rescan)
+    """
+    half = TRACKING_WINDOW_HALF
+    if cs_d + window_len_d > len(loop_seg) or cs_d < 0:
+        return candidates, False
+    lw = loop_seg[cs_d : cs_d + window_len_d]
+    na = np.linalg.norm(lw)
+    if na < 1e-12:
+        return candidates, False
+    lw_n = (lw / na).astype(np.float32)
+
+    new_cands = []
+    needs_rescan = False
+
+    for r_d, sc_prev, r_d_prev, dn_prev in candidates:
+        # Lineare Rückwärts-Extrapolation: r_expected = r_d + (r_d - r_d_prev)/dn_prev * dn
+        slope_d = (r_d - r_d_prev) / max(1, dn_prev)
+        exp_r_d = int(round(r_d + slope_d * dn)) % sp_T_d
+
+        # Messen an ±half Offsets um die Erwartungsposition
+        best_r_d = exp_r_d
+        best_sc  = -2.0
+        for off in range(-half, half + 1):
+            r_try = (exp_r_d + off) % sp_T_d
+            if r_try < 0 or r_try + window_len_d > len(release_ds):
+                continue
+            rel_w = release_ds[r_try : r_try + window_len_d]
+            nr = np.linalg.norm(rel_w)
+            if nr < 1e-12:
+                continue
+            sc = float(np.dot(lw_n, rel_w) / nr)
+            if sc > best_sc:
+                best_sc  = sc
+                best_r_d = r_try
+
+        # Rescan-Trigger
+        drift_d = abs(best_r_d - exp_r_d)
+        drift_d = min(drift_d, sp_T_d - drift_d)
+        sc_ref  = max(0.05, sc_prev)
+        if best_sc < TRACKING_RESCAN_SCORE_RATIO * sc_ref or drift_d * ds > TRACKING_RESCAN_DRIFT:
+            needs_rescan = True
+
+        new_cands.append((best_r_d, best_sc, r_d, dn))
+
+    # Kandidaten nach Score sortieren, dann räumlich zu nahe liegende entfernen
+    new_cands.sort(key=lambda x: x[1], reverse=True)
+    filtered = []
+    min_dist_d = max(1, BRANCH_MIN_PEAK_DISTANCE // ds)
+    for cand in new_cands:
+        r_c = cand[0]
+        too_close = any(
+            min(abs(r_c - fc[0]), sp_T_d - abs(r_c - fc[0])) < min_dist_d
+            for fc in filtered
+        )
+        if not too_close:
+            filtered.append(cand)
+
+    return filtered[:BRANCH_TOP_K], needs_rescan
+
+
+def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
+                   T_float: float, T_int: int,
+                   crossfade_len_samples: int,
+                   harmonic_number: int,
+                   loop_start: int, loop_end: int,
+                   min_sample: int = 0,
+                   max_sample: Optional[int] = None,
+                   downsampling: bool = True) -> tuple:
+    """Rückwärts-Tracking-Ersatz für compute_lut().
+
+    Algorithmus:
+      Phase 0: voller NDP-Scan bei n_end → Top-K Kandidaten
+      Phase 1: Rückwärts n_end → n_start, Schrittweite dn (dense/sparse)
+               Pro Schritt: _track_step_v2() mit ±TRACKING_WINDOW_HALF Fenster
+               Bei Rescan-Trigger: kompletter NDP-Scan neu
+      Phase 2: Pruning auf dem dichten Track
+    """
+    loop_len    = loop_end - loop_start + 1
+    release_len = len(release_mono)
+    window_len  = crossfade_len_samples
+
+    meta = {
+        "stabilized": False, "stable_at_n": None,
+        "drift_mode": False, "drift_per_period": 0.0,
+        "drift_residual": 0.0, "max_interp_gap_n": 0,
+        "dense_step_used": TRACKING_DN_SPARSE,
+        "lut_method": "v2",
+    }
+
+    if window_len < 4 or loop_len < window_len or release_len < window_len:
+        return [], meta
+
+    search_periods = SMALL_T_SEARCH_PERIODS if T_int < SMALL_T_THRESHOLD else DEFAULT_SEARCH_PERIODS
+    r_max = min(search_periods * T_int, release_len - window_len)
+    meta["r_search_max"]   = r_max
+    meta["search_periods"] = search_periods
+    if r_max == 0 or int(loop_len / T_float) < 4:
+        return [], meta
+
+    ds           = (min(4, T_int // 500) if T_int >= 500 else 1) if downsampling else 1
+    atk_full_len = len(attack_mono)
+    n_total      = max(1, int((atk_full_len - window_len) / T_float))
+
+    min_sample = max(0, min_sample)
+    if max_sample is not None:
+        max_sample = max(min_sample + 1, max_sample)
+    n_start = max(1, int(math.ceil(min_sample / T_float)))
+    n_end   = n_total if max_sample is None else min(n_total, int(math.ceil(max_sample / T_float)) + 2)
+    if n_start >= n_end:
+        n_start, n_end = 1, n_total
+
+    loop_needed  = min(int(round((n_end - 1) * T_float)) + window_len, atk_full_len)
+    loop_seg     = attack_mono[:loop_needed:ds].astype(np.float32)
+    release_ds_a = release_mono[:r_max + window_len + 1 : ds].astype(np.float32)
+    window_len_d = max(4, window_len // ds)
+    r_max_d      = max(1, r_max // ds)
+    T_int_d      = max(1, T_int // ds)
+    sp_T_d       = search_periods * T_int_d
+
+    def _full_scan(cs_d_scan):
+        """Voller NDP an Position cs_d → Top-K Kandidaten (downsampled)."""
+        if cs_d_scan + window_len_d > len(loop_seg):
+            return []
+        lw = loop_seg[cs_d_scan : cs_d_scan + window_len_d]
+        na = np.linalg.norm(lw)
+        if na < 1e-12:
+            return []
+        raw_cands_d, scores_d = _corr_scores_and_candidates(lw, release_ds_a, r_max_d, window_len_d)
+        cands = _ensure_per_window_candidates(raw_cands_d, scores_d, T_int_d, search_periods)
+        cands = sorted(cands, key=lambda x: x[1], reverse=True)[:BRANCH_TOP_K]
+        # State: (r_d, score, r_d_prev=r_d, dn_prev=1)
+        return [(r_d, float(sc), r_d, 1) for r_d, sc in cands]
+
+    # ── Phase 0: Voller Scan bei n_end ───────────────────────────────────────
+    n_last   = n_end - 1
+    cs_last  = int(round(n_last * T_float))
+    cs_last_d = cs_last // ds
+    candidates = _full_scan(cs_last_d)
+    if not candidates:
+        return [], meta
+
+    # ── Phase 1: Rückwärts-Tracking ──────────────────────────────────────────
+    dense_track   = {}   # n → [(r_samples, score), ...]
+    n_cur = n_last
+
+    while n_cur >= n_start:
+        # Aktuellen Schritt aufzeichnen (r zurück in Vollauflösung)
+        cs_cur_d = int(round(n_cur * T_float)) // ds
+        if cs_cur_d + window_len_d <= len(loop_seg):
+            dense_track[n_cur] = [(int(r_d * ds), float(sc))
+                                   for r_d, sc, _, _ in candidates]
+
+        # Schrittweite bestimmen
+        dn = TRACKING_DN_DENSE if n_cur <= TRACKING_DENSE_N_LIMIT else TRACKING_DN_SPARSE
+        n_next = max(n_start, n_cur - dn)
+        if n_next == n_cur:
+            break
+        dn_actual = n_cur - n_next
+
+        # Nächste Angriffsposition
+        cs_next_d = int(round(n_next * T_float)) // ds
+
+        # Tracking-Schritt
+        new_cands, needs_rescan = _track_step_v2(
+            loop_seg, release_ds_a, window_len_d, ds,
+            T_int_d, sp_T_d, cs_next_d, candidates, dn_actual
+        )
+
+        if needs_rescan or not new_cands:
+            fresh = _full_scan(cs_next_d)
+            if fresh:
+                new_cands = fresh
+
+        candidates = new_cands if new_cands else candidates
+        n_cur = n_next
+
+    if not dense_track:
+        return [], meta
+
+    # ── Phase 2: LUT-Punkte bauen + Pruning ──────────────────────────────────
+    all_cands_by_n  = {}
+    chosen_r_by_n   = {}
+    points = []
+
+    for n in sorted(dense_track):
+        cands_at_n = dense_track[n]
+        if not cands_at_n:
+            continue
+        cands_full = [(r, sc) for r, sc in cands_at_n]
+        best_r, best_sc = max(cands_full, key=lambda x: x[1])
+        all_cands_by_n[n]  = cands_full
+        chosen_r_by_n[n]   = best_r
+
+        cs = int(round(n * T_float))
+        pt = LutPoint(n=n, loop_pos=cs, best_r=int(best_r),
+                      best_score=float(best_sc), phase="dense",
+                      raw_r=int(best_r), raw_score=float(best_sc),
+                      folded=False, fold_ratio=1.0)
+        pt.track_r      = float(best_r)
+        pt.candidates   = cands_full
+        pt.all_candidates = cands_full
+        points.append(pt)
+
+    points = [p for p in points if p.best_score > -1.5]
+    pruned_before = len(points)
+    if len(points) > 2:
+        points = _prune_lut_points(points, T_int)
+
+    meta["predp_points"]       = list(points)
+    meta["pre3b_points"]       = list(points)
+    meta["all_candidates_by_n"] = all_cands_by_n
+    meta["chosen_r_by_n"]      = chosen_r_by_n
+    meta["pruned_count"]       = pruned_before - len(points)
+    meta["corr_at_data"]       = None   # v2 braucht kein corr_at
+
+    return points, meta
+
+
 def parse_organ_file(organ_path: str) -> list:
     """
     Parst .organ-Datei und gibt Liste von Pipe-Deskriptoren zurück.
@@ -2014,7 +2247,8 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.max_sample = (int(pa.max_key_press_ms * sr / 1000)
                          if pa.max_key_press_ms is not None else None)
 
-        pa.lut_points, lut_meta = compute_lut(
+        _lut_fn = compute_lut_v2 if desc.get("use_v2", False) else compute_lut
+        pa.lut_points, lut_meta = _lut_fn(
             attack_mono=atk_mono,
             release_mono=rel_mono,
             T_float=pa.T_float,
@@ -2027,6 +2261,9 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             max_sample=pa.max_sample,
             downsampling=desc.get("downsampling", True),
         )
+        pa.lut_method              = lut_meta.get("lut_method", "v1")
+        pa.lut_all_candidates_by_n = lut_meta.get("all_candidates_by_n", {})
+        pa.lut_chosen_r_by_n       = lut_meta.get("chosen_r_by_n", {})
         pa.stabilized = bool(lut_meta.get("stabilized", False))
         pa.stable_at_n = lut_meta.get("stable_at_n")
         pa.drift_mode = bool(lut_meta.get("drift_mode", False))
@@ -3447,6 +3684,25 @@ class CorrLandscapeWindow:
                 ax.scatter(px, py, c=colors, marker="|", s=60, linewidths=1.5,
                            zorder=7, alpha=0.85, label="predp (vor Pruning)")
 
+        # v2-Kandidaten-Overlay: alle getrackte Kandidaten als Score-gefärbte Punkte
+        all_cands_by_n = getattr(self.pa, 'lut_all_candidates_by_n', None)
+        chosen_r_by_n  = getattr(self.pa, 'lut_chosen_r_by_n', None)
+        if (getattr(self.pa, 'lut_method', 'v1') == 'v2'
+                and all_cands_by_n and self._debug_var.get()):
+            cx, cy, cs_v = [], [], []
+            for n_v, cands_v in all_cands_by_n.items():
+                for r_v, sc_v in cands_v:
+                    cx.append(n_v); cy.append(r_v); cs_v.append(max(0.0, min(1.0, float(sc_v))))
+            if cx:
+                colors_v = [(0.0, sc_v, 0.0, 0.5) for sc_v in cs_v]
+                ax.scatter(cx, cy, c=colors_v, marker=".", s=6, zorder=4,
+                           label="v2 Kandidaten")
+            if chosen_r_by_n:
+                chr_x = sorted(chosen_r_by_n.keys())
+                chr_y = [chosen_r_by_n[n_v] for n_v in chr_x]
+                ax.plot(chr_x, chr_y, color="#ff8800", linewidth=1.2,
+                        alpha=0.9, zorder=6, label="v2 gewählt")
+
         # Perioden-Linien T, 2T, 3T, 4T je nach Suchfenster
         sp = getattr(self.pa, "lut_search_periods", 2)
         r_sm = getattr(self.pa, "lut_r_search_max", 2 * T)
@@ -4109,6 +4365,16 @@ class LUTAnalyzerApp(tk.Tk):
                        font=("Consolas", 10)
                        ).pack(side=tk.LEFT, padx=(12, 4))
 
+        # v168: Tracking-Algorithmus wählen
+        self._use_v2_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(toolbar, text="Tracking v2",
+                       variable=self._use_v2_var,
+                       bg=C_BG3, fg="#ffaa44",
+                       selectcolor=C_BG2, activebackground=C_BG3,
+                       activeforeground="#ffaa44",
+                       font=("Consolas", 10)
+                       ).pack(side=tk.LEFT, padx=(4, 4))
+
         # Fortschrittsbalken
         self._progress_var = tk.DoubleVar()
         self._progress = ttk.Progressbar(toolbar, variable=self._progress_var,
@@ -4358,7 +4624,9 @@ class LUTAnalyzerApp(tk.Tk):
             n_workers = min(20, max(2, (_os.cpu_count() or 4)))
             self._progress_label.config(text=f"0/{self._total_work}  ({n_workers} Prozesse)")
             use_ds = self._ds_var.get()
-            descs = [{**d, "downsampling": use_ds} for d in self._pipe_descs]
+            use_v2 = getattr(self, '_use_v2_var', None)
+            use_v2 = use_v2.get() if use_v2 is not None else False
+            descs = [{**d, "downsampling": use_ds, "use_v2": use_v2} for d in self._pipe_descs]
             with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as pool:
                 futures = {pool.submit(analyze_pipe, d): d
                            for d in descs}
@@ -4441,7 +4709,8 @@ class LUTAnalyzerApp(tk.Tk):
 
         if isinstance(pa, dict):
             # Noch nicht analysiert — on-demand
-            pa = analyze_pipe({**pa, "downsampling": self._ds_var.get()})
+            pa = analyze_pipe({**pa, "downsampling": self._ds_var.get(),
+                               "use_v2": getattr(self._use_v2_var, 'get', lambda: False)()})
             self._analyses[key] = pa
             self._update_tree_item(key, pa)
 
