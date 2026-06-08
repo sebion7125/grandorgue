@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v163-protect-curve-from-pruning"
+TOOL_VERSION = "v164-curve-budget-minn-tunable"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -975,8 +975,8 @@ def _prune_lut_points(pts: list, T_int: int) -> list:
             continue
         if pts[i].best_score < mean_score - 0.15:
             continue
-        if pts[i].phase == "curve":
-            continue   # Curvature-Fill-Punkte nie prunen
+        if pts[i].phase == "curve" and pts[i].best_score >= mean_score - 0.15:
+            continue   # Curvature-Fill-Punkte mit gutem Score nie prunen
         if pts[i].phase == "gap":
             if abs(track_rs[i + 1] - track_rs[i - 1]) > T_int / 4.0:
                 continue
@@ -3505,10 +3505,17 @@ class CorrLandscapeWindow:
         _row("Phase-Sep (T/)",     self._lab_phase_sep_div,
              tip="Mindestabstand zwischen Kandidaten = T ÷ Wert. "
                  "Kleiner → engere Peaks werden einzeln erfasst. Standard: 16 → T/16.")
+        self._lab_curve_budget   = tk.StringVar(value=str(CURVATURE_FILL_MAX))
+        self._lab_curve_minn     = tk.StringVar(value="0")
         _row("Curve-Fill thresh",  self._lab_curve_thresh,
              tip="Curvature-Fill-Schwelle direkt in Samples/Periode Steigungsänderung. "
-                 f"Default für T={self.pa.T_int}: T/{CURVATURE_FILL_DIVISOR} = {_default_curve_thresh}. "
-                 "Nur Diagnose — Änderung wirkt erst bei nächster Vollanalyse.")
+                 f"Default für T={self.pa.T_int}: T/{CURVATURE_FILL_DIVISOR} = {_default_curve_thresh:.6g}.")
+        _row("Curve-Fill Budget",  self._lab_curve_budget,
+             tip=f"Max. Einfügungen durch Phase 3b im Lab-Recompute. Standard: {CURVATURE_FILL_MAX}. "
+                 "Erhöhen wenn das Budget vor der interessanten Stelle ausgeschöpft ist.")
+        _row("Curve-Fill min-n",   self._lab_curve_minn,
+             tip="Phase 3b startet erst ab dieser Periode n. "
+                 "0 = ab Beginn. Höher setzen um Rausch-Einfügungen am Anfang zu überspringen.")
 
         # ── DP-Parameter ─────────────────────────────────────────────────────
         tk.Label(frame, text="── DP-Parameter ──", **sec_kw).pack(
@@ -3597,6 +3604,8 @@ class CorrLandscapeWindow:
             kink_n         = int(self._lab_kink_n.get())
             kink_cap       = float(self._lab_kink_cap.get())
             curve_thresh   = float(self._lab_curve_thresh.get())
+            curve_budget   = max(1, int(self._lab_curve_budget.get()))
+            curve_minn     = int(self._lab_curve_minn.get())
         except (ValueError, tk.TclError) as exc:
             self._lab_status.config(text=f"Ungültige Eingabe:\n{exc}")
             return
@@ -3666,8 +3675,10 @@ class CorrLandscapeWindow:
             curve_inserts = 0
             while (ci + 1 < len(pts3b)
                    and len(pts3b) < MAX_TOTAL
-                   and curve_inserts < CURVATURE_FILL_MAX):
+                   and curve_inserts < curve_budget):
                 p0, p1, p2 = pts3b[ci - 1], pts3b[ci], pts3b[ci + 1]
+                if p1.n < curve_minn:
+                    ci += 1; continue
                 dn1 = max(1, p1.n - p0.n)
                 dn2 = max(1, p2.n - p1.n)
                 tr0 = float(getattr(p0, 'track_r', p0.best_r))
@@ -3779,6 +3790,8 @@ class CorrLandscapeWindow:
         self._lab_kink_n.set(str(BRANCH_KINK_SCORE_N_LIMIT))
         self._lab_kink_cap.set(str(BRANCH_KINK_PENALTY_CAP))
         self._lab_curve_thresh.set(f"{self.pa.T_int / CURVATURE_FILL_DIVISOR:.6g}")
+        self._lab_curve_budget.set(str(CURVATURE_FILL_MAX))
+        self._lab_curve_minn.set("0")
         self._lab_status.config(text="Original")
         self._plot()
 
