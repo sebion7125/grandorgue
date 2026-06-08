@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v171-v2-toggle-fix"
+TOOL_VERSION = "v172-v2-all-cands-no-prune"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -1918,13 +1918,14 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     # Primärstrahl: bester Kandidat bei n_last (sicherstes Signal).
     # (r_d, score, r_d_prev, dn_prev)  – alles in downsampled units
     p_r_d, p_sc, p_prev_d, p_dn = init_cands[0][0], init_cands[0][1], init_cands[0][0], 1
+    # Multi-Beam für Landscape-Visualisierung (alle Äste sichtbar)
+    vis_candidates = list(init_cands)
 
-    # ── Phase 1: Single-Beam-Rückwärts-Tracking ──────────────────────────────
-    # Primärstrahl wird per ±TRACKING_WINDOW_HALF um die lineare Extrapolation
-    # gemessen. Bei Rescan-Trigger: voller NDP, dann den räumlich nächsten
-    # Kandidaten nehmen — kein Score-Vergleich zwischen Ästen.
+    # ── Phase 1: Single-Beam + Multi-Beam-Visualisierung ─────────────────────
+    # Primärstrahl: ±TRACKING_WINDOW_HALF, kein Ast-Wechsel durch Score-Vergleich.
+    # Multi-Beam: _track_step_v2 parallel für Landscape-Kandidaten-Overlay.
     half = TRACKING_WINDOW_HALF
-    primary_by_n = {}   # n → (r_samples, score)  – Primärstrahl-Ergebnis
+    primary_by_n = {}   # n → (r_samples, score)
     all_cands_by_n  = {}
     n_cur = n_last
 
@@ -1932,12 +1933,8 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         cs_cur_d = int(round(n_cur * T_float)) // ds
         if cs_cur_d + window_len_d <= len(loop_seg):
             primary_by_n[n_cur] = (int(p_r_d * ds), float(p_sc))
-            # Alle Kandidaten für Landscape-Visualisierung
-            vis_cands = _full_scan(cs_cur_d) if n_cur == n_last else None
-            if vis_cands is not None:
-                all_cands_by_n[n_cur] = [(int(r*ds), float(s)) for r, s, _, _ in vis_cands]
-            else:
-                all_cands_by_n[n_cur] = [(int(p_r_d * ds), float(p_sc))]
+            all_cands_by_n[n_cur] = [(int(r_d * ds), float(sc))
+                                      for r_d, sc, _, _ in vis_candidates]
 
         dn = TRACKING_DN_DENSE if n_cur <= TRACKING_DENSE_N_LIMIT else TRACKING_DN_SPARSE
         n_next = max(n_start, n_cur - dn)
@@ -1946,7 +1943,13 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         dn_actual = n_cur - n_next
         cs_next_d = int(round(n_next * T_float)) // ds
 
-        # Lineare Rückwärts-Extrapolation
+        # Multi-Beam-Schritt (nur für Visualisierung)
+        vis_new, _ = _track_step_v2(
+            loop_seg, release_ds_a, window_len_d, ds,
+            T_int_d, sp_T_d, cs_next_d, vis_candidates, dn_actual)
+        vis_candidates = vis_new if vis_new else vis_candidates
+
+        # Lineare Rückwärts-Extrapolation des Primärstrahls
         slope_d = (p_r_d - p_prev_d) / max(1, p_dn)
         exp_r_d = int(round(p_r_d + slope_d * dn_actual)) % sp_T_d
 
@@ -2011,8 +2014,8 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
 
     points = [p for p in points if p.best_score > -1.5]
     pruned_before = len(points)
-    if len(points) > 2:
-        points = _prune_lut_points(points, T_int)
+    # v2: kein Pruning — der Track ist bereits auf den richtigen Stellen gemessen.
+    # Pruning würde bei dichtem Track fast alle Zwischenpunkte entfernen.
 
     # approach_up aus track_r-Richtung ableiten (wie _assign_approach_flags)
     pts_s = sorted(points, key=lambda p: p.n)
@@ -4748,13 +4751,22 @@ class LUTAnalyzerApp(tk.Tk):
                 key = (f"{d['rank_name']}|{d['midi_note']}|"
                        f"{d['perspective']}|{d['release_type']}")
                 self._analyses[key] = d
-        if hasattr(self, '_detail_title'):
-            self._detail_title.config(text="Keine Pfeife ausgewählt")
-        if hasattr(self, '_detail_info'):
-            self._detail_info.config(text="")
         if hasattr(self, '_progress_label'):
             self._progress_label.config(
-                text=f"Algorithmus: {algo} — Pfeife anklicken zum Neu-Analysieren")
+                text=f"Algorithmus: {algo} — neu analysieren …")
+        # Aktuell angezeigte Pfeife sofort neu berechnen
+        sel = self._tree.selection() if hasattr(self, '_tree') else []
+        if sel:
+            tags = self._tree.item(sel[0], "tags")
+            key  = next((t for t in tags if "|" in t), None)
+            if key and key in self._analyses and isinstance(self._analyses[key], dict):
+                d   = self._analyses[key]
+                pa  = analyze_pipe({**d, "downsampling": self._ds_var.get(),
+                                    "use_v2": self._use_v2_var.get()})
+                self._analyses[key] = pa
+                self._update_tree_item(key, pa)
+                self._show_detail(pa)
+                self._progress_label.config(text=f"Algorithmus: {algo}")
 
     def _on_select(self, event):
         sel = self._tree.selection()
