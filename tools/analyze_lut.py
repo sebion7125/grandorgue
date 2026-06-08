@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v164-curve-budget-minn-tunable"
+TOOL_VERSION = "v165-no-maxtotal-in-lab-phase3b"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -3674,7 +3674,6 @@ class CorrLandscapeWindow:
             ci = 1
             curve_inserts = 0
             while (ci + 1 < len(pts3b)
-                   and len(pts3b) < MAX_TOTAL
                    and curve_inserts < curve_budget):
                 p0, p1, p2 = pts3b[ci - 1], pts3b[ci], pts3b[ci + 1]
                 if p1.n < curve_minn:
