@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v175-prune-span-T32"
+TOOL_VERSION = "v199-jump-dense-resample"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -301,6 +301,9 @@ class LutPoint:
     # Wird aus track_r berechnet. Relevant fuer gefaltete LUTs nach Pruning:
     # dann ist nicht mehr zwingend der kuerzeste Kreisweg der richtige Weg.
     approach_up: bool = True
+    # Ast-Wechsel: zirkulärer Abstand zum Vorgänger > T/4 → GO interpoliert nicht,
+    # sondern springt direkt auf diesen Wert.
+    is_jump: bool = False
 
 
 @dataclass
@@ -973,39 +976,65 @@ def estimate_period_by_autocorr(samples: np.ndarray,
 def _prune_lut_points(pts: list, T_int: int, min_interp_err: float = None) -> list:
     """Entfernt interpolierbare LUT-Punkte (extrahiert aus compute_lut._prune_lut).
 
-    min_interp_err: Schwellwert für Abweichung von Gerade. Default: max(1.5, T/200).
-    Für dichte v2-Tracks kleinere Werte sinnvoll (z.B. 0.3).
+    min_interp_err: Schwellwert für Abweichung von Gerade. Default: max(2, T/32).
     """
     if len(pts) <= 2:
         return pts
     if min_interp_err is None:
-        min_interp_err = max(1.5, T_int / 200.0)
+        min_interp_err = max(2.0, T_int / 32.0)
     all_scores = [p.best_score for p in pts]
     mean_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
-    keep = [True] * len(pts)
     track_rs = [float(getattr(p, "track_r", p.best_r)) for p in pts]
     ns = [p.n for p in pts]
-    for i in range(1, len(pts) - 1):
-        dn = max(1, ns[i + 1] - ns[i - 1])
-        t_frac = (ns[i] - ns[i - 1]) / dn
-        r_interp = track_rs[i - 1] + t_frac * (track_rs[i + 1] - track_rs[i - 1])
-        if abs(track_rs[i] - r_interp) > min_interp_err:
-            continue
-        if pts[i].best_score < mean_score - 0.15:
-            continue
-        if pts[i].phase == "curve" and pts[i].best_score >= mean_score - 0.15:
-            continue   # Curvature-Fill-Punkte mit gutem Score nie prunen
-        # Span-Check: Punkt nicht löschen wenn r-Änderung über ihn hinweg > T/32
-        if abs(track_rs[i + 1] - track_rs[i - 1]) > T_int / 32.0:
-            continue
-        if (ns[i] - ns[i - 1]) > MAX_PRUNE_GAP_N or (ns[i + 1] - ns[i]) > MAX_PRUNE_GAP_N:
-            continue
-        if abs(track_rs[i] - track_rs[i - 1]) > T_int / 4.0:
-            continue
-        if abs(track_rs[i + 1] - track_rs[i]) > T_int / 4.0:
-            continue
-        keep[i] = False
-    return [pts[i] for i in range(len(pts)) if keep[i]]
+
+    # Douglas-Peucker-artiges iteratives Pruning:
+    # Vor jeder Löschung werden ALLE Originalpunkte zwischen den neuen Nachbarn
+    # gegen die entstehende Gerade geprüft — keine kaskadierenden Fehler.
+    active = list(range(len(pts)))
+    changed = True
+    while changed:
+        changed = False
+        i = 1
+        while i < len(active) - 1:
+            idx    = active[i]
+            prev_i = active[i - 1]
+            next_i = active[i + 1]
+
+            # Nicht-Interpolations-Guards
+            if pts[idx].best_score < mean_score - 0.15:
+                i += 1; continue
+            if pts[idx].phase == "curve" and pts[idx].best_score >= mean_score - 0.15:
+                i += 1; continue   # Curvature-Fill-Punkte mit gutem Score nie prunen
+            if getattr(pts[idx], 'is_jump', False):
+                i += 1; continue   # Sprungpunkt selbst nie löschen
+            if getattr(pts[next_i], 'is_jump', False):
+                i += 1; continue   # Vorgänger eines Sprungpunkts nie löschen
+            if (ns[idx] - ns[prev_i]) > MAX_PRUNE_GAP_N or (ns[next_i] - ns[idx]) > MAX_PRUNE_GAP_N:
+                i += 1; continue
+            if abs(track_rs[idx] - track_rs[prev_i]) > T_int / 4.0:
+                i += 1; continue
+            if abs(track_rs[next_i] - track_rs[idx]) > T_int / 4.0:
+                i += 1; continue
+
+            # Douglas-Peucker: alle Originalpunkte zwischen prev_i und next_i
+            # müssen innerhalb min_interp_err der neuen Gerade liegen
+            n0, r0 = ns[prev_i], track_rs[prev_i]
+            n1, r1 = ns[next_i], track_rs[next_i]
+            dn = max(1, n1 - n0)
+            can_delete = True
+            for j in range(prev_i + 1, next_i):
+                t = (ns[j] - n0) / dn
+                if abs(track_rs[j] - (r0 + t * (r1 - r0))) > min_interp_err:
+                    can_delete = False
+                    break
+
+            if can_delete:
+                active.pop(i)
+                changed = True
+            else:
+                i += 1
+
+    return [pts[i] for i in active]
 
 
 def _go_default_crossfade_ms(midi_note: int) -> int:
@@ -1777,13 +1806,15 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
 def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
                    window_len_d: int, ds: int,
                    T_int_d: int, sp_T_d: int,
-                   cs_d: int, candidates: list, dn: int) -> tuple:
+                   cs_d: int, candidates: list, dn: int,
+                   _top_k: int = None, _window_half: int = None,
+                   _min_peak_dist_d: int = None, _rescan_ratio: float = None) -> tuple:
     """Einen Rückwärts-Tracking-Schritt durchführen.
 
-    candidates: list of (r_d, score, r_d_prev, dn_prev)  – in downsampled units
+    candidates: list of (r_d, score, r_d_prev, dn_prev, cumulative_score, beam_id)  – in downsampled units
     Rückgabe:   (new_candidates, needs_rescan)
     """
-    half = TRACKING_WINDOW_HALF
+    half = _window_half if _window_half is not None else TRACKING_WINDOW_HALF
     if cs_d + window_len_d > len(loop_seg) or cs_d < 0:
         return candidates, False
     lw = loop_seg[cs_d : cs_d + window_len_d]
@@ -1795,7 +1826,7 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
     new_cands = []
     needs_rescan = False
 
-    for r_d, sc_prev, r_d_prev, dn_prev in candidates:
+    for r_d, sc_prev, r_d_prev, dn_prev, cum_sc, beam_id in candidates:
         # Lineare Rückwärts-Extrapolation: r_expected = r_d + (r_d - r_d_prev)/dn_prev * dn
         slope_d = (r_d - r_d_prev) / max(1, dn_prev)
         exp_r_d = int(round(r_d + slope_d * dn)) % sp_T_d
@@ -1820,15 +1851,17 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
         drift_d = abs(best_r_d - exp_r_d)
         drift_d = min(drift_d, sp_T_d - drift_d)
         sc_ref  = max(0.05, sc_prev)
-        if best_sc < TRACKING_RESCAN_SCORE_RATIO * sc_ref or drift_d * ds > TRACKING_RESCAN_DRIFT:
+        _ratio  = _rescan_ratio if _rescan_ratio is not None else TRACKING_RESCAN_SCORE_RATIO
+        if best_sc < _ratio * sc_ref or drift_d * ds > TRACKING_RESCAN_DRIFT:
             needs_rescan = True
 
-        new_cands.append((best_r_d, best_sc, r_d, dn))
+        new_cands.append((best_r_d, best_sc, r_d, dn, cum_sc + best_sc, beam_id))
 
     # Kandidaten nach Score sortieren, dann räumlich zu nahe liegende entfernen
-    new_cands.sort(key=lambda x: x[1], reverse=True)
+    new_cands.sort(key=lambda x: x[4], reverse=True)
     filtered = []
-    min_dist_d = max(1, BRANCH_MIN_PEAK_DISTANCE // ds)
+    min_dist_d = (_min_peak_dist_d if _min_peak_dist_d is not None
+                  else max(1, T_int_d // 32))
     for cand in new_cands:
         r_c = cand[0]
         too_close = any(
@@ -1838,7 +1871,8 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
         if not too_close:
             filtered.append(cand)
 
-    return filtered[:BRANCH_TOP_K], needs_rescan
+    top_k_eff = _top_k if _top_k is not None else BRANCH_TOP_K
+    return filtered[:top_k_eff], needs_rescan
 
 
 def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
@@ -1848,7 +1882,9 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
                    loop_start: int, loop_end: int,
                    min_sample: int = 0,
                    max_sample: Optional[int] = None,
-                   downsampling: bool = True) -> tuple:
+                   downsampling: bool = True,
+                   _top_k: int = None, _window_half: int = None,
+                   _min_peak_dist: int = None, _rescan_ratio: float = None) -> tuple:
     """Rückwärts-Tracking-Ersatz für compute_lut().
 
     Algorithmus:
@@ -1910,9 +1946,9 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
             return []
         raw_cands_d, scores_d = _corr_scores_and_candidates(lw, release_ds_a, r_max_d, window_len_d)
         cands = _ensure_per_window_candidates(raw_cands_d, scores_d, T_int_d, search_periods)
-        cands = sorted(cands, key=lambda x: x[1], reverse=True)[:BRANCH_TOP_K]
-        # State: (r_d, score, r_d_prev=r_d, dn_prev=1)
-        return [(r_d, float(sc), r_d, 1) for r_d, sc in cands]
+        cands = sorted(cands, key=lambda x: x[1], reverse=True)[:(_top_k if _top_k else BRANCH_TOP_K)]
+        # State: (r_d, score, r_d_prev=r_d, dn_prev=1, cumulative_score, beam_id)
+        return [(r_d, float(sc), r_d, 1, float(sc), i) for i, (r_d, sc) in enumerate(cands)]
 
     # ── Phase 0: Voller Scan bei n_end → Primärstrahl initialisieren ─────────
     n_last    = n_end - 1
@@ -1921,26 +1957,25 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     if not init_cands:
         return [], meta
 
-    # Primärstrahl: bester Kandidat bei n_last (sicherstes Signal).
-    # (r_d, score, r_d_prev, dn_prev)  – alles in downsampled units
-    p_r_d, p_sc, p_prev_d, p_dn = init_cands[0][0], init_cands[0][1], init_cands[0][0], 1
-    # Multi-Beam für Landscape-Visualisierung (alle Äste sichtbar)
+    # Multi-Beam: alle Kandidaten parallel mit stabiler Beam-ID
     vis_candidates = list(init_cands)
 
-    # ── Phase 1: Single-Beam + Multi-Beam-Visualisierung ─────────────────────
-    # Primärstrahl: ±TRACKING_WINDOW_HALF, kein Ast-Wechsel durch Score-Vergleich.
-    # Multi-Beam: _track_step_v2 parallel für Landscape-Kandidaten-Overlay.
-    half = TRACKING_WINDOW_HALF
-    primary_by_n = {}   # n → (r_samples, score)
-    all_cands_by_n  = {}
+    # ── Phase 1: Multi-Beam-Tracking ─────────────────────────────────────────
+    # Pfad jedes Beams via beam_id gespeichert; Gewinner erst nach dem Loop wählen.
+    beam_paths    = {}   # beam_id → {n: (r_samples, score)}
+    all_cands_by_n = {}
     n_cur = n_last
 
     while n_cur >= n_start:
         cs_cur_d = int(round(n_cur * T_float)) // ds
         if cs_cur_d + window_len_d <= len(loop_seg):
-            primary_by_n[n_cur] = (int(p_r_d * ds), float(p_sc))
             all_cands_by_n[n_cur] = [(int(r_d * ds), float(sc))
-                                      for r_d, sc, _, _ in vis_candidates]
+                                      for r_d, sc, _, _, _, _ in vis_candidates]
+            for beam in vis_candidates:
+                bid = beam[5]
+                if bid not in beam_paths:
+                    beam_paths[bid] = {}
+                beam_paths[bid][n_cur] = (int(beam[0] * ds), float(beam[1]))
 
         dn = TRACKING_DN_DENSE if n_cur <= TRACKING_DENSE_N_LIMIT else TRACKING_DN_SPARSE
         n_next = max(n_start, n_cur - dn)
@@ -1949,55 +1984,68 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         dn_actual = n_cur - n_next
         cs_next_d = int(round(n_next * T_float)) // ds
 
-        # Multi-Beam-Schritt (nur für Visualisierung)
-        vis_new, _ = _track_step_v2(
+        vis_new, needs_rescan = _track_step_v2(
             loop_seg, release_ds_a, window_len_d, ds,
-            T_int_d, sp_T_d, cs_next_d, vis_candidates, dn_actual)
-        vis_candidates = vis_new if vis_new else vis_candidates
-
-        # Lineare Rückwärts-Extrapolation des Primärstrahls
-        slope_d = (p_r_d - p_prev_d) / max(1, p_dn)
-        exp_r_d = int(round(p_r_d + slope_d * dn_actual)) % sp_T_d
-
-        # Messen ±half um Erwartungsposition
-        if cs_next_d + window_len_d <= len(loop_seg):
-            lw = loop_seg[cs_next_d : cs_next_d + window_len_d]
-            na = np.linalg.norm(lw)
-            if na > 1e-12:
-                lw_n = (lw / na).astype(np.float32)
-                best_r_d, best_sc = exp_r_d, -2.0
-                for off in range(-half, half + 1):
-                    r_try = (exp_r_d + off) % sp_T_d
-                    if r_try + window_len_d > len(release_ds_a):
-                        continue
-                    rel_w = release_ds_a[r_try : r_try + window_len_d]
-                    nr = np.linalg.norm(rel_w)
-                    if nr < 1e-12:
-                        continue
-                    sc_try = float(np.dot(lw_n, rel_w) / nr)
-                    if sc_try > best_sc:
-                        best_sc = sc_try; best_r_d = r_try
-
-                drift_d = abs(best_r_d - exp_r_d)
-                drift_d = min(drift_d, sp_T_d - drift_d)
-                needs_rescan = (best_sc < TRACKING_RESCAN_SCORE_RATIO * max(0.05, p_sc)
-                                or drift_d * ds > TRACKING_RESCAN_DRIFT)
-
-                if needs_rescan:
-                    fresh = _full_scan(cs_next_d)
-                    if fresh:
-                        # Nächsten Kandidaten zur extrapolierten Position nehmen
-                        def _near(x, _e=exp_r_d, _sp=sp_T_d):
-                            d = abs(x[0] - _e); return min(d, _sp - d)
-                        nearest = min(fresh, key=_near)
-                        best_r_d, best_sc = nearest[0], nearest[1]
-
-                p_prev_d, p_r_d, p_sc, p_dn = p_r_d, best_r_d, best_sc, dn_actual
+            T_int_d, sp_T_d, cs_next_d, vis_candidates, dn_actual,
+            _top_k=_top_k, _window_half=_window_half,
+            _min_peak_dist_d=(max(1, _min_peak_dist // ds) if _min_peak_dist else None),
+            _rescan_ratio=_rescan_ratio)
+        if vis_new:
+            vis_candidates = vis_new
+            if needs_rescan:
+                fresh = _full_scan(cs_next_d)
+                if fresh:
+                    used_ids: set = set()
+                    refreshed = []
+                    for fr_r_d, fr_sc, _, _, _, _ in fresh:
+                        nearest = min(vis_new,
+                            key=lambda b, _r=fr_r_d: min(abs(b[0] - _r), sp_T_d - abs(b[0] - _r)))
+                        bid = nearest[5]
+                        if bid in used_ids:
+                            continue
+                        used_ids.add(bid)
+                        refreshed.append((fr_r_d, fr_sc, fr_r_d, 1, nearest[4] + fr_sc, bid))
+                    if refreshed:
+                        vis_candidates = refreshed
 
         n_cur = n_next
 
+    # Gewinner-Beam nach kumuliertem Score (vis_candidates[0] am Ende des Loops)
+    best_id = vis_candidates[0][5]
+    primary_by_n = beam_paths.get(best_id, {})
     if not primary_by_n:
         return [], meta
+
+    # ── Phase 1.5: Dichtes Resampling an verdächtigen Sprungstellen ──────────
+    # Intervalle mit abs. Abstand > 20 Samples und dn > 2 werden mit dn=1 nachgemessen.
+    JUMP_DENSE_ABS = 20
+    _pn_sorted = sorted(primary_by_n.keys())
+    for _na, _nb in zip(_pn_sorted, _pn_sorted[1:]):
+        _dn_interval = _nb - _na
+        if _dn_interval <= 2:
+            continue
+        _ra, _sca = primary_by_n[_na]
+        _rb, _scb = primary_by_n[_nb]
+        _dist = abs(_rb - _ra)
+        _dist = min(_dist, sp_T_d * ds - _dist)
+        if _dist < JUMP_DENSE_ABS:
+            continue
+        # Dichtes Tracking: dn=1 von _nb rückwärts bis _na
+        _dense_beam = [(_rb // ds, _scb, _rb // ds, 1, _scb, best_id)]
+        for _n_dense in range(_nb - 1, _na, -1):
+            _cs_d = int(round(_n_dense * T_float)) // ds
+            if _cs_d + window_len_d > len(loop_seg):
+                continue
+            _step, _ = _track_step_v2(
+                loop_seg, release_ds_a, window_len_d, ds,
+                T_int_d, sp_T_d, _cs_d, _dense_beam, 1,
+                _top_k=1, _window_half=(_window_half if _window_half else TRACKING_WINDOW_HALF),
+                _rescan_ratio=(_rescan_ratio if _rescan_ratio else TRACKING_RESCAN_SCORE_RATIO))
+            if _step:
+                _dense_beam = _step
+                _best = _dense_beam[0]
+                primary_by_n[_n_dense]  = (int(_best[0] * ds), float(_best[1]))
+                all_cands_by_n[_n_dense] = [(int(_best[0] * ds), float(_best[1]))]
 
     # ── Phase 2: LUT-Punkte + Pruning ─────────────────────────────────────────
     chosen_r_by_n   = {}
@@ -2019,18 +2067,42 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         points.append(pt)
 
     points = [p for p in points if p.best_score > -1.5]
+
+    # Sprung-Markierung: Rate > 10 Samples/Periode ODER abs. Abstand > 20 Samples
+    _sp_T_jump = search_periods * T_int
+    _pts_jump = sorted(points, key=lambda p: p.n)
+    for _ja, _jb in zip(_pts_jump, _pts_jump[1:]):
+        ta = float(getattr(_ja, 'track_r', _ja.best_r)) % _sp_T_jump
+        tb = float(getattr(_jb, 'track_r', _jb.best_r)) % _sp_T_jump
+        fwd = (tb - ta) % _sp_T_jump
+        dist = min(fwd, _sp_T_jump - fwd)
+        dn = max(1, _jb.n - _ja.n)
+        _jb.is_jump = (dist / dn > 10.0) or (dist > 20.0)
+
     pruned_before = len(points)
     if len(points) > 2:
         points = _prune_lut_points(points, T_int)
 
-    # approach_up aus track_r-Richtung ableiten (wie _assign_approach_flags)
+    # approach_up im gefalteten [0, sp_T)-Raum bestimmen — kurzer Kreisbogen gibt Richtung
+    sp_T = search_periods * T_int
     pts_s = sorted(points, key=lambda p: p.n)
     if pts_s:
         pts_s[0].approach_up = True
         for _a, _b in zip(pts_s, pts_s[1:]):
-            ta = float(getattr(_a, 'track_r', _a.best_r))
-            tb = float(getattr(_b, 'track_r', _b.best_r))
-            _b.approach_up = (tb >= ta)
+            ta = float(getattr(_a, 'track_r', _a.best_r)) % sp_T
+            tb = float(getattr(_b, 'track_r', _b.best_r)) % sp_T
+            fwd = (tb - ta) % sp_T
+            _b.approach_up = fwd <= sp_T // 2
+
+    # Drift-Diagnose + Stabilisierung: v2-Ergebnis ist immer besser als Legacy
+    if len(points) >= 4:
+        a, b, resid = _fit_track(points)
+        meta["stabilized"]       = True
+        meta["stable_at_n"]      = points[0].n
+        meta["drift_per_period"] = a
+        meta["drift_residual"]   = resid
+    else:
+        meta["stabilized"] = len(points) >= 1
 
     meta["predp_points"]        = list(points)
     meta["pre3b_points"]        = list(points)
@@ -2038,8 +2110,9 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     meta["chosen_r_by_n"]       = chosen_r_by_n
     meta["pruned_count"]        = pruned_before - len(points)
     meta["corr_at_data"]        = None
-    meta["folded"]              = False   # v2 liefert ungefaltete r-Werte
-    meta["fold_reason"]         = "v2-unfolded"
+    meta["folded"]              = True             # im Plot auf [0,sp_T) falten wie v1
+    meta["fold_reason"]         = "v2-folded"
+    meta["wrap_period"]         = search_periods * T_int
 
     return points, meta
 
@@ -2332,6 +2405,7 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.corr_at_data      = lut_meta.get("corr_at_data", None)
         pa.lut_r_search_max  = int(lut_meta.get("r_search_max",  2 * pa.T_int))
         pa.lut_search_periods = int(lut_meta.get("search_periods", 2))
+        pa.lut_wrap_period    = int(lut_meta.get("wrap_period", pa.T_int))
         pa.lut_score_p10 = float(lut_meta.get("score_p10", 0.0) or 0.0)
         pa.lut_score_median = float(lut_meta.get("score_median", 0.0) or 0.0)
         pa.lut_low_score_fraction = float(lut_meta.get("low_score_fraction", 0.0) or 0.0)
@@ -3406,6 +3480,27 @@ class CorrLandscapeWindow:
                                  font=("Consolas", 9))
         self._status.pack(side=tk.LEFT, padx=4)
 
+        # Periode T einstellen
+        bar2 = tk.Frame(self.win, bg=C_BG3, pady=3)
+        bar2.pack(fill=tk.X)
+        tk.Label(bar2, text="Periode T:", bg=C_BG3, fg=C_TEXT,
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(8, 2))
+        self._T_var = tk.StringVar(value=f"{self.pa.T_float:.4f}")
+        tk.Entry(bar2, textvariable=self._T_var, width=10,
+                 bg=C_BG2, fg=C_TEXT, font=("Consolas", 9),
+                 relief=tk.SUNKEN, bd=1).pack(side=tk.LEFT, padx=2)
+        tk.Button(bar2, text="autocorr_T",
+                  command=lambda: self._T_var.set(f"{self.pa.autocorr_T_float:.4f}"),
+                  **btn_kw).pack(side=tk.LEFT, padx=4)
+        tk.Button(bar2, text="hn_T",
+                  command=lambda: self._T_var.set(f"{self.pa.hn_T_float:.4f}"),
+                  **btn_kw).pack(side=tk.LEFT, padx=4)
+        tk.Button(bar2, text="smpl_T",
+                  command=lambda: self._T_var.set(f"{self.pa.smpl_T_float:.4f}"),
+                  **btn_kw).pack(side=tk.LEFT, padx=4)
+        tk.Label(bar2, text="(→ Berechnen drücken zum Anwenden)",
+                 bg=C_BG3, fg=C_TEXT2, font=("Consolas", 8)).pack(side=tk.LEFT, padx=8)
+
         # Info
         pa = self.pa
         r_info = getattr(pa, "lut_r_search_max", 0) or (2 * pa.T_int)
@@ -3474,9 +3569,14 @@ class CorrLandscapeWindow:
             atk_mono, sr, _, _ = read_wav_mono_float(pa.attack_path)
             rel_mono, _,  _, _ = read_wav_mono_float(pa.release_path)
 
-            T       = pa.T_int
-            T_f     = pa.T_float
-            ds      = min(4, T // 500) if T >= 500 else 1
+            try:
+                T_f = float(self._T_var.get())
+                if T_f < 4:
+                    raise ValueError("T zu klein")
+            except (ValueError, tk.TclError):
+                T_f = pa.T_float
+            T  = int(round(T_f))
+            ds = min(4, T // 500) if T >= 500 else 1
             # NDP-Fensterlaenge: crossfade_len_samples wie in compute_lut(), aber
             # mindestens 2*T damit die Heatmap immer zwei volle Perioden zeigt.
             # Fuer hohe Aliquote (HN=48+) kann crossfade_len_samples sehr kurz sein
@@ -3594,6 +3694,7 @@ class CorrLandscapeWindow:
             spine.set_edgecolor(C_BORDER)
 
         T   = self.T
+        W   = getattr(self.pa, "lut_wrap_period", T)   # Wrap-Periode: T für v1, sp_T für v2
         ds  = self.ds
         ns  = self.ns
         mat = self.matrix   # shape: (n_cols, r_max_d)
@@ -3671,29 +3772,31 @@ class CorrLandscapeWindow:
 
                 def _directed(x0, x1, r0, r1, up):
                     if lut_folded:
-                        r0i = int(round(r0)) % T
-                        r1i = int(round(r1)) % T
+                        r0i = int(round(r0)) % W
+                        r1i = int(round(r1)) % W
                         needs_wrap = (up and r1i < r0i) or (not up and r1i > r0i)
                         if not needs_wrap:
                             _seg(x0, x1, float(r0i), float(r1i))
                         elif up:
-                            span = (T - r0i) + r1i
+                            span = (W - r0i) + r1i
                             if span <= 0:
                                 _seg(x0, x1, float(r0i), float(r1i)); return
-                            x_w = x0 + (T - r0i) / float(span) * (x1 - x0)
-                            _seg(x0, x_w, float(r0i), float(T))
+                            x_w = x0 + (W - r0i) / float(span) * (x1 - x0)
+                            _seg(x0, x_w, float(r0i), float(W))
                             _seg(x_w, x1, 0.0, float(r1i))
                         else:
-                            span = r0i + (T - r1i)
+                            span = r0i + (W - r1i)
                             if span <= 0:
                                 _seg(x0, x1, float(r0i), float(r1i)); return
                             x_w = x0 + float(r0i) / float(span) * (x1 - x0)
                             _seg(x0, x_w, float(r0i), 0.0)
-                            _seg(x_w, x1, float(T), float(r1i))
+                            _seg(x_w, x1, float(W), float(r1i))
                     else:
                         _seg(x0, x1, float(r0), float(r1))
 
                 for pa_pt, pb_pt in zip(pts_sorted, pts_sorted[1:]):
+                    if getattr(pb_pt, "is_jump", False):
+                        continue
                     _directed(float(pa_pt.n), float(pb_pt.n),
                               float(pa_pt.best_r), float(pb_pt.best_r),
                               getattr(pb_pt, "approach_up", True))
@@ -3710,6 +3813,11 @@ class CorrLandscapeWindow:
                                c="white", marker="o", s=30, zorder=8,
                                edgecolors="black", linewidths=0.6,
                                label="LUT best_r")
+                    jump_pts_l = [p for p in pts_sorted if getattr(p, "is_jump", False)]
+                    if jump_pts_l:
+                        ax.scatter([p.n for p in jump_pts_l], [p.best_r for p in jump_pts_l],
+                                   c="#ff3333", marker="x", s=40, linewidths=1.5,
+                                   zorder=10, label="Ast-Wechsel")
 
         # predp-Punkte (vor Pruning): zeigt alle Messpunkte die der DP als Input hatte
         _show_predp = getattr(self, "_show_predp_pts", None)
@@ -3750,9 +3858,50 @@ class CorrLandscapeWindow:
                            label="v2 Kandidaten")
             if chosen_r_by_n:
                 chr_x = sorted(chosen_r_by_n.keys())
-                chr_y = [chosen_r_by_n[n_v] for n_v in chr_x]
-                ax.plot(chr_x, chr_y, color="#ff8800", linewidth=1.2,
-                        alpha=0.9, zorder=6, label="v2 gewählt")
+                chr_segs = []
+
+                def _v2seg(x0, x1, y0, y1):
+                    if x1 > x0:
+                        chr_segs.append(([x0, x1], [y0, y1]))
+
+                def _v2directed(x0, x1, r0, r1):
+                    if lut_folded:
+                        r0i = int(round(r0)) % W
+                        r1i = int(round(r1)) % W
+                        fwd = (r1i - r0i) % W
+                        up  = fwd <= W // 2
+                        needs_wrap = (up and r1i < r0i) or (not up and r1i > r0i)
+                        if not needs_wrap:
+                            _v2seg(x0, x1, float(r0i), float(r1i))
+                        elif up:
+                            span = (W - r0i) + r1i
+                            if span <= 0:
+                                _v2seg(x0, x1, float(r0i), float(r1i)); return
+                            x_w = x0 + (W - r0i) / float(span) * (x1 - x0)
+                            _v2seg(x0, x_w, float(r0i), float(W))
+                            _v2seg(x_w, x1, 0.0, float(r1i))
+                        else:
+                            span = r0i + (W - r1i)
+                            if span <= 0:
+                                _v2seg(x0, x1, float(r0i), float(r1i)); return
+                            x_w = x0 + float(r0i) / float(span) * (x1 - x0)
+                            _v2seg(x0, x_w, float(r0i), 0.0)
+                            _v2seg(x_w, x1, float(W), float(r1i))
+                    else:
+                        _v2seg(x0, x1, float(r0), float(r1))
+
+                pt_by_n = {p.n: p for p in (self._lab_pts or self.pa.lut_points)}
+                for i in range(len(chr_x) - 1):
+                    n_b = chr_x[i + 1]
+                    if getattr(pt_by_n.get(n_b), "is_jump", False):
+                        continue
+                    _v2directed(float(chr_x[i]), float(n_b),
+                                float(chosen_r_by_n[chr_x[i]]),
+                                float(chosen_r_by_n[n_b]))
+                lbl_v2 = "v2 gewählt"
+                for i, (xs, ys) in enumerate(chr_segs):
+                    ax.plot(xs, ys, color="#ff8800", linewidth=1.2,
+                            alpha=0.9, zorder=6, label=lbl_v2 if i == 0 else None)
 
         # Perioden-Linien T, 2T, 3T, 4T je nach Suchfenster
         sp = getattr(self.pa, "lut_search_periods", 2)
@@ -3866,6 +4015,19 @@ class CorrLandscapeWindow:
              tip="Phase 3b startet erst ab dieser Periode n. "
                  "0 = ab Beginn. Höher setzen um Rausch-Einfügungen am Anfang zu überspringen.")
 
+        # ── v2 Tracking ──────────────────────────────────────────────────────
+        tk.Label(frame, text="── v2 Tracking ──", **sec_kw).pack(
+            fill=tk.X, padx=6, pady=(8, 2))
+        self._lab_v2_half     = tk.StringVar(value=str(TRACKING_WINDOW_HALF))
+        self._lab_v2_rescan   = tk.StringVar(value=str(TRACKING_RESCAN_SCORE_RATIO))
+        self._lab_v2_min_peak = tk.StringVar(value="32")
+        _row("Track-Fenster ±",   self._lab_v2_half,
+             tip=f"±N Samples um erwartete Position (downsampled). Standard: {TRACKING_WINDOW_HALF}.")
+        _row("Rescan-Ratio",      self._lab_v2_rescan,
+             tip=f"Rescan wenn Score < Ratio × Vorgänger. Standard: {TRACKING_RESCAN_SCORE_RATIO}.")
+        _row("Min-Abstand (T/)",  self._lab_v2_min_peak,
+             tip="Mindestabstand zwischen Kandidaten = T ÷ Wert. Standard: 32 → T/32.")
+
         # ── DP-Parameter ─────────────────────────────────────────────────────
         tk.Label(frame, text="── DP-Parameter ──", **sec_kw).pack(
             fill=tk.X, padx=6, pady=(8, 2))
@@ -3942,7 +4104,10 @@ class CorrLandscapeWindow:
         self._lab_info.pack(fill=tk.BOTH, padx=6, pady=(0, 6), expand=True)
 
     def _on_lab_recompute(self):
-        """Recompute DP with current Tuning Lab parameters."""
+        """Recompute DP/Tracking with current Tuning Lab parameters."""
+        if getattr(self.pa, 'lut_method', 'v1') == 'v2':
+            self._on_lab_recompute_v2()
+            return
         import copy, time  # copy auch als _copy weiter unten verwendet
         pa = self.pa
         if not pa.lut_points:
@@ -4134,10 +4299,53 @@ class CorrLandscapeWindow:
                   + phase3b_info))
         self._plot()
 
+    def _on_lab_recompute_v2(self):
+        """Recompute v2-Tracking mit Lab-Parametern."""
+        import time
+        pa = self.pa
+        try:
+            top_k        = int(self._lab_topk.get())
+            half         = int(self._lab_v2_half.get())
+            rescan       = float(self._lab_v2_rescan.get())
+            min_peak_div = max(1, int(self._lab_v2_min_peak.get()))
+            min_peak     = max(1, pa.T_int // min_peak_div)
+        except (ValueError, tk.TclError) as exc:
+            self._lab_status.config(text=f"Ungültige Eingabe:\n{exc}")
+            return
+        try:
+            atk_mono, _, _, _ = read_wav_mono_float(pa.attack_path)
+            rel_mono, _, _, _ = read_wav_mono_float(pa.release_path)
+        except Exception as e:
+            self._lab_status.config(text=f"WAV-Reload fehlgeschlagen:\n{e}")
+            return
+        t0 = time.perf_counter()
+        try:
+            new_pts, _ = compute_lut_v2(
+                atk_mono, rel_mono, pa.T_float, pa.T_int,
+                pa.crossfade_len_samples, pa.harmonic_number,
+                pa.loop_start, pa.loop_end,
+                min_sample=getattr(pa, 'min_sample', 0) or 0,
+                max_sample=getattr(pa, 'max_sample', None),
+                downsampling=True,
+                _top_k=top_k, _window_half=half,
+                _min_peak_dist=min_peak, _rescan_ratio=rescan,
+            )
+        except Exception as exc:
+            self._lab_status.config(text=f"v2-Fehler:\n{exc}")
+            return
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        self._lab_pts = new_pts if new_pts else None
+        self._lab_status.config(
+            text=f"v2 OK: {len(new_pts)} Punkte  {elapsed_ms} ms")
+        self._plot()
+
     def _on_lab_reset(self):
         """Verwerfe Tuning-Lab-Ergebnis und setze alle Parameter auf Defaults."""
         self._lab_pts = None
         self._lab_topk.set(str(BRANCH_TOP_K))
+        self._lab_v2_half.set(str(TRACKING_WINDOW_HALF))
+        self._lab_v2_rescan.set(str(TRACKING_RESCAN_SCORE_RATIO))
+        self._lab_v2_min_peak.set("32")
         self._lab_phase_sep_div.set(str(int(round(1.0 / BRANCH_PHASE_SEPARATION_FACTOR))))
         self._lab_kink_pen.set(str(BRANCH_KINK_PENALTY))
         self._lab_switch_pen.set(str(BRANCH_SWITCH_PENALTY))
@@ -4417,7 +4625,7 @@ class LUTAnalyzerApp(tk.Tk):
                        ).pack(side=tk.LEFT, padx=(12, 4))
 
         # v168: Tracking-Algorithmus wählen
-        self._use_v2_var = tk.BooleanVar(value=False)
+        self._use_v2_var = tk.BooleanVar(value=True)
         self._use_v2_var.trace_add("write", lambda *_: self._on_algorithm_toggle())
         tk.Checkbutton(toolbar, text="Tracking v2",
                        variable=self._use_v2_var,
@@ -4465,6 +4673,10 @@ class LUTAnalyzerApp(tk.Tk):
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self._tree.pack(fill=tk.BOTH, expand=True)
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
+        self._tree_tip     = None
+        self._tree_tip_iid = None
+        self._tree.bind("<Motion>", self._on_tree_motion)
+        self._tree.bind("<Leave>",  self._on_tree_leave)
 
         # Rechtes Panel — Tabs
         right = tk.Frame(paned, bg=C_BG)
@@ -4533,6 +4745,8 @@ class LUTAnalyzerApp(tk.Tk):
                   command=self._open_corr_landscape, **btn_kw2).pack(side=tk.LEFT, padx=2)
         tk.Button(btn_frame, text="🎵  Crossfade-Simulation",
                   command=self._open_crossfade_sim, **btn_kw2).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_frame, text="🎲  Zufalls-Release",
+                  command=self._open_random_sim, **btn_kw2).pack(side=tk.LEFT, padx=2)
 
         # Plot-Bereich
         if HAS_MATPLOTLIB:
@@ -4657,6 +4871,66 @@ class LUTAnalyzerApp(tk.Tk):
                     self._analyses[key] = d  # temporär Descriptor
 
         self._title(f"GrandOrgue LUT Analyzer — {TOOL_VERSION} — {os.path.basename(path)}")
+        self._fit_tree_columns()
+
+    def _on_tree_motion(self, event):
+        iid = self._tree.identify_row(event.y)
+        if iid == self._tree_tip_iid:
+            return
+        self._hide_tree_tip()
+        self._tree_tip_iid = iid
+        if not iid:
+            return
+        tags = self._tree.item(iid, "tags")
+        key  = next((t for t in tags if "|" in t), None)
+        if not key:
+            return
+        pa = self._analyses.get(key)
+        if not isinstance(pa, PipeAnalysis) or pa.error:
+            return
+        lines = [
+            pa.status_text,
+            f"score_med={getattr(pa,'lut_score_median',0):.3f}"
+            f"  low%={getattr(pa,'lut_low_score_fraction',0)*100:.0f}%"
+            f"  q_n={getattr(pa,'lut_quality_score_count',0)}",
+            f"LUT-Punkte: {len(pa.lut_points)}"
+            f"  Legacy: {'ja ('+pa.legacy_reason+')' if pa.legacy_fallback else 'nein'}",
+        ]
+        self._tree_tip = tw = tk.Toplevel(self._tree)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{event.x_root+15}+{event.y_root+10}")
+        tk.Label(tw, text="\n".join(lines), justify=tk.LEFT,
+                 bg="#ffffe0", fg="#000000", relief=tk.SOLID, bd=1,
+                 font=("Consolas", 8), padx=5, pady=3).pack()
+
+    def _on_tree_leave(self, _event=None):
+        self._hide_tree_tip()
+        self._tree_tip_iid = None
+
+    def _hide_tree_tip(self):
+        if self._tree_tip:
+            self._tree_tip.destroy()
+            self._tree_tip = None
+
+    def _fit_tree_columns(self):
+        """Passt #0- und info-Spalte an längsten Inhalt an (Zeichenanzahl × px)."""
+        PX = 7   # Consolas 10: ~7 px pro Zeichen
+        max0, max1 = 180, 250
+
+        def _walk(item, depth):
+            nonlocal max0, max1
+            text = self._tree.item(item, "text")
+            max0 = max(max0, len(text) * PX + depth * 20 + 28)
+            vals = self._tree.item(item, "values")
+            if vals:
+                max1 = max(max1, len(str(vals[0])) * PX + 20)
+            for ch in self._tree.get_children(item):
+                _walk(ch, depth + 1)
+
+        for root in self._tree.get_children():
+            _walk(root, 0)
+        self._tree.column("#0",   width=max0)
+        self._tree.column("info", width=max1)
 
     def _title(self, t):
         self.title(t)
@@ -4721,6 +4995,7 @@ class LUTAnalyzerApp(tk.Tk):
                 self._btn_all.config(state=tk.NORMAL)
                 self._btn_report.config(state=tk.NORMAL)
                 self._build_report()
+                self._fit_tree_columns()
                 self._tabs.select(self._tab_report)
                 self.after(50, self._poll_results)
                 return
@@ -4803,6 +5078,25 @@ class LUTAnalyzerApp(tk.Tk):
         if pa.error:
             return
         CrossfadeSimWindow(self, pa)
+
+    def _open_random_sim(self):
+        import random
+        candidates = [(k, v) for k, v in self._analyses.items()
+                      if isinstance(v, (PipeAnalysis, dict))]
+        if not candidates:
+            return
+        key, pa = random.choice(candidates)
+        if isinstance(pa, dict):
+            pa = analyze_pipe({**pa, "downsampling": self._ds_var.get(),
+                               "use_v2": self._use_v2_var.get()})
+            self._analyses[key] = pa
+            self._update_tree_item(key, pa)
+        self._show_detail(pa)
+        if key in self._key_to_item:
+            iid = self._key_to_item[key]
+            self._tree.selection_set(iid)
+            self._tree.see(iid)
+
     def _open_corr_landscape(self):
         """Oeffnet separates Fenster mit vollstaendiger Korrelationslandschaft."""
         if not self._current_pa:
@@ -4859,6 +5153,8 @@ class LUTAnalyzerApp(tk.Tk):
             info = f"❌ Fehler: {pa.error}"
         else:
             info_parts = [
+                pa.status_text,
+                "─" * 60,
                 f"Tool-Version: {TOOL_VERSION}",
                 f"T_float={pa.T_float:.2f}  T_int={pa.T_int}  SR={pa.sample_rate}Hz"
                 + (f"  CMNDF: T/2={pa.cmndf_at_T_half:.3f}  T={pa.cmndf_at_T:.3f}  2T={pa.cmndf_at_2T:.3f}"
@@ -4916,6 +5212,7 @@ class LUTAnalyzerApp(tk.Tk):
 
         pts_sorted = sorted(pa.lut_points, key=lambda p: p.n)
         T = pa.T_int
+        W = getattr(pa, "lut_wrap_period", T)   # Wrap-Periode: T für v1, sp_T für v2
         lut_folded = getattr(pa, "lut_folded", True)
 
         # Interpolationslinie — v138: analytisches Zeichnen statt Sampling.
@@ -4945,10 +5242,11 @@ class LUTAnalyzerApp(tk.Tk):
 
             def _add_directed(x0, x1, r0, r1, up):
                 """Fuegt 1 oder 2 Teilsegmente fuer ein LUT-Segment hinzu.
-                Bei Phasenuebergang (Wrap) wird gesplittet; kein Verbindungsstrich."""
+                Bei Phasenuebergang (Wrap) wird gesplittet; kein Verbindungsstrich.
+                W = Wrap-Periode: T für v1, search_periods*T für v2."""
                 nonlocal visual_phase_wrap
-                r0i = int(round(r0)) % T
-                r1i = int(round(r1)) % T
+                r0i = int(round(r0)) % W
+                r1i = int(round(r1)) % W
                 if lut_folded:
                     needs_wrap = (up and r1i < r0i) or (not up and r1i > r0i)
                     if not needs_wrap:
@@ -4956,25 +5254,25 @@ class LUTAnalyzerApp(tk.Tk):
                     else:
                         visual_phase_wrap = True
                         if up:
-                            # Weg: r0 → T (oben raus), dann 0 → r1
-                            span = (T - r0i) + r1i  # Gesamtdelta
+                            # Weg: r0 → W (oben raus), dann 0 → r1
+                            span = (W - r0i) + r1i
                             if span <= 0:
                                 _add_seg(x0, x1, float(r0i), float(r1i))
                                 return
-                            t_w = (T - r0i) / float(span)
+                            t_w = (W - r0i) / float(span)
                             x_w = x0 + t_w * (x1 - x0)
-                            _add_seg(x0, x_w, float(r0i), float(T))
+                            _add_seg(x0, x_w, float(r0i), float(W))
                             _add_seg(x_w, x1, 0.0, float(r1i))
                         else:
-                            # Weg: r0 → 0 (unten raus), dann T → r1
-                            span = r0i + (T - r1i)
+                            # Weg: r0 → 0 (unten raus), dann W → r1
+                            span = r0i + (W - r1i)
                             if span <= 0:
                                 _add_seg(x0, x1, float(r0i), float(r1i))
                                 return
                             t_w = float(r0i) / float(span)
                             x_w = x0 + t_w * (x1 - x0)
                             _add_seg(x0, x_w, float(r0i), 0.0)
-                            _add_seg(x_w, x1, float(T), float(r1i))
+                            _add_seg(x_w, x1, float(W), float(r1i))
                 else:
                     # Ungefaltet: direkter linearer Weg
                     _add_seg(x0, x1, float(r0), float(r1))
@@ -4982,11 +5280,13 @@ class LUTAnalyzerApp(tk.Tk):
             # Lead-in: horizontal vor erstem Punkt (nur kuerzestes Release)
             if first_release and n_min < float(n_min_pts):
                 p0 = pts_sorted[0]
-                r0f = float(p0.best_r % T) if lut_folded else float(p0.best_r)
+                r0f = float(p0.best_r % W) if lut_folded else float(p0.best_r)
                 _add_seg(n_min, float(n_min_pts), r0f, r0f)
 
-            # Segmente zwischen LUT-Punkten
+            # Segmente zwischen LUT-Punkten (Sprünge nicht verbinden)
             for pa_pt, pb_pt in zip(pts_sorted, pts_sorted[1:]):
+                if getattr(pb_pt, "is_jump", False):
+                    continue   # kein Verbindungssegment über Ast-Wechsel
                 _add_directed(
                     float(pa_pt.n), float(pb_pt.n),
                     float(pa_pt.best_r), float(pb_pt.best_r),
@@ -5000,7 +5300,7 @@ class LUTAnalyzerApp(tk.Tk):
                 tb = float(getattr(plast, "track_r", plast.best_r))
                 slope = (tb - ta) / max(1, plast.n - pprev.n)
                 r_end_track = tb + slope * (n_max - plast.n)
-                r_end = int(round(r_end_track)) % T if lut_folded else max(0, min(
+                r_end = int(round(r_end_track)) % W if lut_folded else max(0, min(
                     getattr(pa, "lut_r_search_max", 2 * T) - 1, round(r_end_track)))
                 up_ext = slope >= 0
                 _add_directed(float(n_max_pts), n_max,
@@ -5020,12 +5320,20 @@ class LUTAnalyzerApp(tk.Tk):
             col = phase_color[phase]
             if pts_fold:
                 ax.scatter([p.n for p in pts_fold], [p.best_r for p in pts_fold],
-                           color=col, marker="o", s=36, zorder=3,
+                           color=col, marker="o", s=9, zorder=3,
                            label=f"{phase} (gefaltet)")
             if pts_unfold:
                 ax.scatter([p.n for p in pts_unfold], [p.best_r for p in pts_unfold],
-                           color=col, marker="D", s=36, zorder=3,
+                           color=col, marker="D", s=9, zorder=3,
                            label=f"{phase} (ungefaltet)")
+
+        # Sprungpunkte als rote X-Markierung
+        jump_pts = [p for p in pts_sorted if getattr(p, "is_jump", False)]
+        if jump_pts:
+            ax.scatter([p.n for p in jump_pts],
+                       [p.best_r % W for p in jump_pts] if lut_folded else [p.best_r for p in jump_pts],
+                       color="#ff3333", marker="x", s=40, linewidths=1.5,
+                       zorder=9, label="Ast-Wechsel")
 
         r_search_max   = getattr(pa, "lut_r_search_max",  2 * T)
         search_periods = getattr(pa, "lut_search_periods", 2)
