@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v199-jump-dense-resample"
+TOOL_VERSION = "v203-prune-cpp-iteration"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -974,67 +974,52 @@ def estimate_period_by_autocorr(samples: np.ndarray,
 
 
 def _prune_lut_points(pts: list, T_int: int, min_interp_err: float = None) -> list:
-    """Entfernt interpolierbare LUT-Punkte (extrahiert aus compute_lut._prune_lut).
+    """Douglas-Peucker Pruning — C++-kompatible Iteration (v203).
 
-    min_interp_err: Schwellwert für Abweichung von Gerade. Default: max(2, T/32).
+    Bugfix gegenüber vorheriger Version: Löschungen werden pro Pass nur
+    markiert; der aktive Index wird erst am Ende des Passes neu aufgebaut
+    (wie C++ PruneV2). Das verhindert den alten Fehler, bei dem sofortige
+    left-to-right-Löschungen den linken Gap progressiv über MAX_PRUNE_GAP_N
+    anwachsen ließen und Punkte dauerhaft unerreichbar machten.
+
+    Weitere Angleichungen an C++:
+    - Gap-Guard: Gesamtspan (next.n - prev.n) > MAX_PRUNE_GAP_N statt per-Seite.
+    - Score-Guard entfernt: schlechter Score verhindert kein Pruning mehr.
     """
     if len(pts) <= 2:
         return pts
     if min_interp_err is None:
         min_interp_err = max(2.0, T_int / 32.0)
-    all_scores = [p.best_score for p in pts]
-    mean_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
     track_rs = [float(getattr(p, "track_r", p.best_r)) for p in pts]
-    ns = [p.n for p in pts]
+    ns       = [p.n for p in pts]
+    sz       = len(pts)
+    active   = [True] * sz
 
-    # Douglas-Peucker-artiges iteratives Pruning:
-    # Vor jeder Löschung werden ALLE Originalpunkte zwischen den neuen Nachbarn
-    # gegen die entstehende Gerade geprüft — keine kaskadierenden Fehler.
-    active = list(range(len(pts)))
     changed = True
     while changed:
         changed = False
-        i = 1
-        while i < len(active) - 1:
-            idx    = active[i]
-            prev_i = active[i - 1]
-            next_i = active[i + 1]
+        idx = [i for i in range(sz) if active[i]]
+        for k in range(1, len(idx) - 1):
+            cur  = idx[k]
+            prev = idx[k - 1]
+            nxt  = idx[k + 1]
 
-            # Nicht-Interpolations-Guards
-            if pts[idx].best_score < mean_score - 0.15:
-                i += 1; continue
-            if pts[idx].phase == "curve" and pts[idx].best_score >= mean_score - 0.15:
-                i += 1; continue   # Curvature-Fill-Punkte mit gutem Score nie prunen
-            if getattr(pts[idx], 'is_jump', False):
-                i += 1; continue   # Sprungpunkt selbst nie löschen
-            if getattr(pts[next_i], 'is_jump', False):
-                i += 1; continue   # Vorgänger eines Sprungpunkts nie löschen
-            if (ns[idx] - ns[prev_i]) > MAX_PRUNE_GAP_N or (ns[next_i] - ns[idx]) > MAX_PRUNE_GAP_N:
-                i += 1; continue
-            if abs(track_rs[idx] - track_rs[prev_i]) > T_int / 4.0:
-                i += 1; continue
-            if abs(track_rs[next_i] - track_rs[idx]) > T_int / 4.0:
-                i += 1; continue
+            if getattr(pts[cur], 'is_jump', False):               continue
+            if getattr(pts[nxt], 'is_jump', False):               continue
+            if getattr(pts[cur], 'phase', '') == "curve":         continue
+            if ns[nxt] - ns[prev]          > MAX_PRUNE_GAP_N:     continue
+            if abs(track_rs[cur]  - track_rs[prev]) > T_int / 4.0: continue
+            if abs(track_rs[nxt]  - track_rs[cur])  > T_int / 4.0: continue
 
-            # Douglas-Peucker: alle Originalpunkte zwischen prev_i und next_i
-            # müssen innerhalb min_interp_err der neuen Gerade liegen
-            n0, r0 = ns[prev_i], track_rs[prev_i]
-            n1, r1 = ns[next_i], track_rs[next_i]
+            n0, r0 = ns[prev], track_rs[prev]
+            n1, r1 = ns[nxt],  track_rs[nxt]
             dn = max(1, n1 - n0)
-            can_delete = True
-            for j in range(prev_i + 1, next_i):
-                t = (ns[j] - n0) / dn
-                if abs(track_rs[j] - (r0 + t * (r1 - r0))) > min_interp_err:
-                    can_delete = False
-                    break
+            if all(abs(track_rs[j] - (r0 + (ns[j] - n0) / dn * (r1 - r0))) <= min_interp_err
+                   for j in range(prev + 1, nxt)):
+                active[cur] = False
+                changed     = True
 
-            if can_delete:
-                active.pop(i)
-                changed = True
-            else:
-                i += 1
-
-    return [pts[i] for i in active]
+    return [pts[i] for i in range(sz) if active[i]]
 
 
 def _go_default_crossfade_ms(midi_note: int) -> int:
@@ -1377,7 +1362,7 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
     if r_max == 0 or int(loop_len / T_float) < 4:
         return [], meta
 
-    ds           = (min(4, T_int // 500) if T_int >= 500 else 1) if downsampling else 1
+    ds           = (min(4, max(1, T_int // 100))) if downsampling else 1
     atk_full_len = len(attack_mono)
     n_total      = max(1, int((atk_full_len - window_len) / T_float))
 
@@ -1814,7 +1799,6 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
     candidates: list of (r_d, score, r_d_prev, dn_prev, cumulative_score, beam_id)  – in downsampled units
     Rückgabe:   (new_candidates, needs_rescan)
     """
-    half = _window_half if _window_half is not None else TRACKING_WINDOW_HALF
     if cs_d + window_len_d > len(loop_seg) or cs_d < 0:
         return candidates, False
     lw = loop_seg[cs_d : cs_d + window_len_d]
@@ -1823,39 +1807,62 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
         return candidates, False
     lw_n = (lw / na).astype(np.float32)
 
-    new_cands = []
+    n_beams = len(candidates)
+    _ratio  = _rescan_ratio if _rescan_ratio is not None else TRACKING_RESCAN_SCORE_RATIO
+
+    # Alle Beam-Extrapolationen vektorisiert
+    r_arr      = np.array([b[0] for b in candidates], dtype=np.float32)
+    r_prev_arr = np.array([b[2] for b in candidates], dtype=np.float32)
+    dn_prev_arr= np.array([b[3] for b in candidates], dtype=np.float32)
+    slopes     = (r_arr - r_prev_arr) / np.maximum(1.0, dn_prev_arr)
+    exp_pos    = np.round(r_arr + slopes * dn).astype(np.int32) % sp_T_d  # (n_beams,)
+
+    # Release-Fenster-View (O(1), kein Datenkopie)
+    from numpy.lib.stride_tricks import as_strided as _ast
+    _s = release_ds.strides[0]
+    rel_mat = _ast(release_ds, shape=(sp_T_d, window_len_d), strides=(_s, _s))
+
+    def _batch_score(pos2d):
+        """pos2d: (n, k) int32 → scores (n, k), alle Fensterpositionen auf einmal."""
+        pf   = pos2d.ravel()
+        ok   = (pf >= 0) & (pf + window_len_d <= len(release_ds))
+        wins = rel_mat[np.where(ok, pf, 0)]          # (n*k, wl)
+        nrm  = np.linalg.norm(wins, axis=1)
+        ok  &= nrm > 1e-12
+        sc   = np.where(ok, wins @ lw_n / np.where(ok, nrm, 1.0), -2.0)
+        return sc.reshape(pos2d.shape)
+
+    # Runde 1: ±1 (3 Punkte pro Beam)
+    offs1  = np.array([-1, 0, 1], dtype=np.int32)
+    pos1   = (exp_pos[:, None] + offs1[None, :]) % sp_T_d   # (n_beams, 3)
+    sc1    = _batch_score(pos1)                              # (n_beams, 3)
+    best1  = np.argmax(sc1, axis=1)                         # (n_beams,)
+
+    # Runde 2: Rand-Beams um 1 weiters erweitern (max 4 Punkte gesamt)
+    best_r  = pos1[np.arange(n_beams), best1].copy()
+    best_sc = sc1[np.arange(n_beams), best1].copy()
+
+    at_edge = (best1 == 0) | (best1 == 2)
+    if np.any(at_edge):
+        eb      = np.where(at_edge)[0]
+        ext_off = np.where(best1[eb] == 0, -2, 2).astype(np.int32)
+        ext_pos = (exp_pos[eb] + ext_off) % sp_T_d          # (n_edge,)
+        sc_ext  = _batch_score(ext_pos[:, None])[:, 0]      # (n_edge,)
+        better  = sc_ext > best_sc[eb]
+        best_r[eb]  = np.where(better, ext_pos,  best_r[eb])
+        best_sc[eb] = np.where(better, sc_ext, best_sc[eb])
+
+    # Neue Kandidaten aufbauen + Rescan prüfen
+    new_cands    = []
     needs_rescan = False
-
-    for r_d, sc_prev, r_d_prev, dn_prev, cum_sc, beam_id in candidates:
-        # Lineare Rückwärts-Extrapolation: r_expected = r_d + (r_d - r_d_prev)/dn_prev * dn
-        slope_d = (r_d - r_d_prev) / max(1, dn_prev)
-        exp_r_d = int(round(r_d + slope_d * dn)) % sp_T_d
-
-        # Messen an ±half Offsets um die Erwartungsposition
-        best_r_d = exp_r_d
-        best_sc  = -2.0
-        for off in range(-half, half + 1):
-            r_try = (exp_r_d + off) % sp_T_d
-            if r_try < 0 or r_try + window_len_d > len(release_ds):
-                continue
-            rel_w = release_ds[r_try : r_try + window_len_d]
-            nr = np.linalg.norm(rel_w)
-            if nr < 1e-12:
-                continue
-            sc = float(np.dot(lw_n, rel_w) / nr)
-            if sc > best_sc:
-                best_sc  = sc
-                best_r_d = r_try
-
-        # Rescan-Trigger
-        drift_d = abs(best_r_d - exp_r_d)
+    for i, (r_d, sc_prev, r_d_prev, dn_prev, cum_sc, beam_id) in enumerate(candidates):
+        br   = int(best_r[i])
+        bsc  = float(best_sc[i])
+        drift_d = abs(br - int(exp_pos[i]))
         drift_d = min(drift_d, sp_T_d - drift_d)
-        sc_ref  = max(0.05, sc_prev)
-        _ratio  = _rescan_ratio if _rescan_ratio is not None else TRACKING_RESCAN_SCORE_RATIO
-        if best_sc < _ratio * sc_ref or drift_d * ds > TRACKING_RESCAN_DRIFT:
+        if bsc < _ratio * max(0.05, sc_prev) or drift_d * ds > TRACKING_RESCAN_DRIFT:
             needs_rescan = True
-
-        new_cands.append((best_r_d, best_sc, r_d, dn, cum_sc + best_sc, beam_id))
+        new_cands.append((br, bsc, r_d, dn, cum_sc + bsc, beam_id))
 
     # Kandidaten nach Score sortieren, dann räumlich zu nahe liegende entfernen
     new_cands.sort(key=lambda x: x[4], reverse=True)
@@ -1916,7 +1923,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     if r_max == 0 or int(loop_len / T_float) < 4:
         return [], meta
 
-    ds           = (min(4, T_int // 500) if T_int >= 500 else 1) if downsampling else 1
+    ds           = (min(4, max(1, T_int // 100))) if downsampling else 1
     atk_full_len = len(attack_mono)
     n_total      = max(1, int((atk_full_len - window_len) / T_float))
 
@@ -2016,6 +2023,20 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     if not primary_by_n:
         return [], meta
 
+    # Sprünge auf Roh-Beam-Daten erkennen (VOR dichtem Resampling)
+    # → Phase 1.5 kann Sprünge nicht durch Interpolation maskieren
+    _raw_ns = sorted(primary_by_n.keys())
+    _raw_jump_intervals = set()
+    _sp_T_raw = search_periods * T_int
+    for _rna, _rnb in zip(_raw_ns, _raw_ns[1:]):
+        _rra, _ = primary_by_n[_rna]
+        _rrb, _ = primary_by_n[_rnb]
+        _rdist = abs(_rrb - _rra)
+        _rdist = min(_rdist, _sp_T_raw - _rdist)
+        _rdn   = max(1, _rnb - _rna)
+        if _rdist / _rdn > T_int / 16.0:
+            _raw_jump_intervals.add((_rna, _rnb))
+
     # ── Phase 1.5: Dichtes Resampling an verdächtigen Sprungstellen ──────────
     # Intervalle mit abs. Abstand > 20 Samples und dn > 2 werden mit dn=1 nachgemessen.
     JUMP_DENSE_ABS = 20
@@ -2066,10 +2087,11 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         pt.all_candidates = cands_full
         points.append(pt)
 
-    points = [p for p in points if p.best_score > -1.5]
+    points = [p for p in points if p.best_score > -1.5 and p.n is not None]
 
-    # Sprung-Markierung: Rate > 10 Samples/Periode ODER abs. Abstand > 20 Samples
-    _sp_T_jump = search_periods * T_int
+    # Sprung-Markierung: dist/dn > T/16 (normiert auf Periode, skaliert mit T)
+    _sp_T_jump  = search_periods * T_int
+    _jump_rate_t = T_int / 16.0
     _pts_jump = sorted(points, key=lambda p: p.n)
     for _ja, _jb in zip(_pts_jump, _pts_jump[1:]):
         ta = float(getattr(_ja, 'track_r', _ja.best_r)) % _sp_T_jump
@@ -2077,7 +2099,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         fwd = (tb - ta) % _sp_T_jump
         dist = min(fwd, _sp_T_jump - fwd)
         dn = max(1, _jb.n - _ja.n)
-        _jb.is_jump = (dist / dn > 10.0) or (dist > 20.0)
+        _jb.is_jump = dist / dn > _jump_rate_t
 
     pruned_before = len(points)
     if len(points) > 2:
@@ -2094,15 +2116,32 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
             fwd = (tb - ta) % sp_T
             _b.approach_up = fwd <= sp_T // 2
 
-    # Drift-Diagnose + Stabilisierung: v2-Ergebnis ist immer besser als Legacy
-    if len(points) >= 4:
-        a, b, resid = _fit_track(points)
+    # Drift-Diagnose nur auf sprungfreien Segmenten (Sprünge würden Residuum aufblasen)
+    pts_no_jump = [p for p in points if not getattr(p, 'is_jump', False)]
+    fit_pts = pts_no_jump if len(pts_no_jump) >= 4 else points
+    if len(fit_pts) >= 4:
+        a, b, resid = _fit_track(fit_pts)
         meta["stabilized"]       = True
-        meta["stable_at_n"]      = points[0].n
+        meta["stable_at_n"]      = fit_pts[0].n
         meta["drift_per_period"] = a
         meta["drift_residual"]   = resid
     else:
         meta["stabilized"] = len(points) >= 1
+
+    # Score-Qualität berechnen (wie in compute_lut)
+    quality_pts = [p for p in points if not getattr(p, 'is_jump', False)]
+    if not quality_pts:
+        quality_pts = list(points)
+    q_scores = [float(p.best_score) for p in quality_pts if p.best_score > -1.5]
+    if q_scores:
+        q_sorted = sorted(q_scores)
+        meta["score_median"]        = float(np.median(q_sorted))
+        meta["score_p10"]           = float(q_sorted[max(0, int(len(q_sorted)*0.10)-1)])
+        meta["low_score_fraction"]  = float(sum(1 for s in q_sorted if s < SCORE_BAD) / len(q_sorted))
+        meta["quality_score_count"] = int(len(q_sorted))
+    else:
+        meta["score_median"] = meta["score_p10"] = meta["low_score_fraction"] = 0.0
+        meta["quality_score_count"] = 0
 
     meta["predp_points"]        = list(points)
     meta["pre3b_points"]        = list(points)
@@ -2469,15 +2508,17 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             # v121: Legacy wegen schlechter Score-Qualitaet nur, wenn der typische
             # Score nach Stabilisierung schlecht ist. Einzelne Transientenpunkte
             # duerfen keine Legacy-/Warnlawine ausloesen.
-            if (pa.lut_quality_score_count >= 4 and pa.lut_score_median > 0.0
-                    and pa.lut_score_median < LEGACY_SCORE_MIN_THRESHOLD):
-                bad_reasons.append(f"score_median<{LEGACY_SCORE_MIN_THRESHOLD:.2f}")
+            # v2: nur negative Korrelation (kein Match) → Legacy; v1: LEGACY_SCORE_MIN_THRESHOLD
+            _score_floor = 0.0 if getattr(pa, 'lut_method', 'v1') == 'v2' else LEGACY_SCORE_MIN_THRESHOLD
+            if (pa.lut_quality_score_count >= 4 and pa.lut_score_median < _score_floor):
+                bad_reasons.append(f"score_median<{_score_floor:.2f}")
             # v72: R und Anzahl der Gap-Punkte sind fuer branch-getrackte,
             # linear driftende Pfade keine verlaesslichen Fehlerkriterien mehr.
             # Ein sauberer linearer Drift verteilt best_r % T ueber den Kreis
             # und kann deshalb ein kleines R erzeugen. Viele Gap-Punkte koennen
             # schlicht notwendige adaptive Stuetzpunkte sein.
-            if pa.drift_residual and pa.drift_residual > max(4.0, pa.T_int / 4.0):
+            if (getattr(pa, 'lut_method', 'v1') != 'v2'
+                    and pa.drift_residual and pa.drift_residual > max(4.0, pa.T_int / 4.0)):
                 bad_reasons.append("track_residual_high")
             if bad_reasons:
                 pa.legacy_fallback = True
