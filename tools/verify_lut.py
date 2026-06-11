@@ -84,6 +84,9 @@ except Exception as e:
     print(f"ERROR: cannot import analyze_lut: {e}", file=sys.stderr)
     sys.exit(2)
 
+# Patch analyze_lut's pruning globally with C++ style (once, before any threads).
+# Will be applied after prune_cpp_style is defined below.
+
 
 # ── Log parser ────────────────────────────────────────────────────────────────
 
@@ -313,6 +316,10 @@ def prune_cpp_style(pts: list, T_int: int) -> list:
     return [pts[i] for i in range(sz) if active[i]]
 
 
+# Apply global patch now that prune_cpp_style is defined.
+_al._prune_lut_points = lambda pts, T, tol=None: prune_cpp_style(pts, T)
+
+
 def go_lut_to_lutpoints(go_lut: dict) -> list:
     """Convert parsed GO LUT dict {n: entry} to list of LutPoint for simulator."""
     pts = []
@@ -382,15 +389,8 @@ def compare_entry(entry: dict, organ_path: str,
     min_sample = int(entry["min_ms"] * log_sr / 1000) if entry["min_ms"] > 0 else 0
     max_sample = int(entry["max_ms"] * log_sr / 1000) if entry["max_ms"] > 0 else None
 
-    # Run Python v2 with T_float/T_int from GO log, but replace the internal
-    # _prune_lut_points with our C++ style version.
-    # Python's built-in pruning updates the active list immediately
-    # (left-to-right), which progressively widens the left gap until it exceeds
-    # MAX_PRUNE_GAP_N=50 and leaves unreachable points.
-    # C++ collects all deletions in a single pass before rebuilding — this is
-    # more aggressive and correct.
-    _orig_prune = _al._prune_lut_points
-    _al._prune_lut_points = lambda pts, T, tol=None: prune_cpp_style(pts, T)
+    # Run Python v2 with T_float/T_int from GO log.
+    # _prune_lut_points is already globally patched to prune_cpp_style.
     try:
         py_lut, _ = _al.compute_lut_v2(
             attack_mono=atk_mono,
@@ -405,11 +405,8 @@ def compare_entry(entry: dict, organ_path: str,
             max_sample=max_sample,
         )
     except Exception as e:
-        _al._prune_lut_points = _orig_prune
         return {"label": label, "status": f"compute_error:{e}",
                 "lut_diffs": [], "sim_diffs": [], "simsrc_diffs": []}
-    finally:
-        _al._prune_lut_points = _orig_prune
 
     go_lut_dict = {p["n"]: p for p in entry["lut"]}
     py_lut_dict = {p.n: p    for p in py_lut}
@@ -501,6 +498,8 @@ def main():
                     help="Print all LUT points including matching ones")
     ap.add_argument("--sim-only",  "-s", action="store_true",
                     help="Skip LUT comparison, only test simulator outputs")
+    ap.add_argument("--workers",   "-j", type=int, default=os.cpu_count() or 4, metavar="N",
+                    help=f"Parallel worker threads (default: {os.cpu_count() or 4})")
     args = ap.parse_args()
 
     if not os.path.isfile(args.log):
@@ -520,10 +519,32 @@ def main():
     if args.max_pipes:
         entries = entries[:args.max_pipes]
 
+    import concurrent.futures
+
+    organ_path = args.organ
+    sim_only   = args.sim_only
+    verbose    = args.verbose
+
+    def _run(entry):
+        return compare_entry(entry, organ_path, sim_only=sim_only, verbose=verbose)
+
     ok = mis = skip = notfound = errs = 0
-    for entry in entries:
-        res = compare_entry(entry, args.organ,
-                            sim_only=args.sim_only, verbose=args.verbose)
+    results = []
+
+    n_workers = max(1, args.workers)
+    if n_workers == 1:
+        results = [_run(e) for e in entries]
+    else:
+        futures_to_idx = {}
+        ordered = [None] * len(entries)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+            for i, e in enumerate(entries):
+                futures_to_idx[pool.submit(_run, e)] = i
+            for fut in concurrent.futures.as_completed(futures_to_idx):
+                ordered[futures_to_idx[fut]] = fut.result()
+        results = ordered
+
+    for res in results:
         st = res["status"]
 
         if st == "OK":
