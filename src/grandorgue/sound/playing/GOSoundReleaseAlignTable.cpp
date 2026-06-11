@@ -1142,7 +1142,7 @@ lut_commit:
     std::ofstream vf(GetVerifyLogPath(), std::ios::app);
     if (vf.is_open()) {
       const auto &pts = m_CorrLuts.back().points;
-      vf << std::setprecision(10)
+      vf << std::setprecision(17)
          << "pipe=" << label
          << " T_float=" << m_CorrPeriodFloat
          << " T_int=" << m_CorrPeriodSamples
