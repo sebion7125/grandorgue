@@ -275,6 +275,64 @@ def circ_dist(a: int, b: int, T: int) -> int:
     return min(d, max(1, T) - d)
 
 
+def get_position_for_correlation_cpp(loop_pos: int, pts: list,
+                                     T_int: int, T_float: float) -> int:
+    """C++-compatible replica of GetPositionForCorrelation.
+
+    Two differences vs Python's get_position_for_correlation:
+    1. phi = round(loop_pos % T_float) % T  is ADDED to r_interp.
+    2. is_jump → step function (snap to nearest endpoint), not linear interp.
+    """
+    if not pts:
+        return 0
+    T = max(1, T_int)
+    T_f = T_float if T_float > 0.0 else float(T)
+    phi = int(round(math.fmod(loop_pos, T_f))) % T
+
+    sorted_pts = sorted(pts, key=lambda p: p.loop_pos)
+
+    if len(sorted_pts) == 1 or loop_pos <= sorted_pts[0].loop_pos:
+        r_interp = int(sorted_pts[0].best_r) % T
+    elif loop_pos >= sorted_pts[-1].loop_pos:
+        r_interp = int(sorted_pts[-1].best_r) % T
+    else:
+        # Binary search for segment
+        idx = 0
+        while idx + 1 < len(sorted_pts) and sorted_pts[idx + 1].loop_pos <= loop_pos:
+            idx += 1
+        p0 = sorted_pts[idx]
+        p1 = sorted_pts[idx + 1]
+        t = (loop_pos - p0.loop_pos) / max(1, p1.loop_pos - p0.loop_pos)
+        r0, r1 = int(p0.best_r) % T, int(p1.best_r) % T
+
+        is_valid = getattr(p1, 'is_jump', None) is not None  # v2 flags present
+        if is_valid:
+            is_jump = bool(getattr(p1, 'is_jump', False))
+            if not is_jump:
+                if getattr(p1, 'approach_up', True):
+                    diff = (r1 - r0 + T) % T
+                    if diff > T // 2: diff -= T
+                else:
+                    bwd = (r0 - r1 + T) % T
+                    diff = -bwd
+                    if diff < -(T // 2): diff += T
+            # else diff unused
+        else:
+            # Legacy: shortest arc, T/4 jump heuristic
+            diff = r1 - r0
+            if diff >  T // 2: diff -= T
+            if diff < -(T // 2): diff += T
+            is_jump = abs(diff) > T // 4
+
+        if is_jump:
+            r_interp = r0 if t < 0.5 else r1
+        else:
+            r_signed = r0 + int(round(t * diff))
+            r_interp = (r_signed % T + T) % T
+
+    return (r_interp + phi) % T
+
+
 def prune_cpp_style(pts: list, T_int: int) -> list:
     """Douglas-Peucker pruning matching C++ PruneV2 semantics.
 
@@ -446,20 +504,20 @@ def compare_entry(entry: dict, organ_path: str,
                     })
 
     # ── Simulator comparison ──────────────────────────────────────────────────
-    # sim_diffs: Python interp of Python LUT vs GO interp of GO LUT
-    # simsrc_diffs: Python interp of GO LUT vs GO interp of GO LUT
-    #   → simsrc_diffs isolates differences in interpolation logic only
-    sim_diffs   = []
+    # sim_diffs:    C++ sim (GO LUT)  vs  Python C++-compat sim (Python LUT)
+    # simsrc_diffs: C++ sim (GO LUT)  vs  Python C++-compat sim (GO LUT)
+    #   → simsrc_diffs isolates interpolation-logic differences only
+    sim_diffs    = []
     simsrc_diffs = []
     go_pts_list  = go_lut_to_lutpoints(go_lut_dict)
 
     for s in entry["sim"]:
         lp   = s["loop_pos"]
         go_r = s["r_interp"]
-        # Python sim with Python LUT
-        py_r  = _al.get_position_for_correlation(lp, py_lut,     T_int)
-        # Python sim with GO LUT (tests only interpolation code, not LUT)
-        py_r2 = _al.get_position_for_correlation(lp, go_pts_list, T_int)
+        # C++-compatible sim with Python LUT
+        py_r  = get_position_for_correlation_cpp(lp, py_lut,     T_int, T_float)
+        # C++-compatible sim with GO LUT (tests only interpolation, not LUT)
+        py_r2 = get_position_for_correlation_cpp(lp, go_pts_list, T_int, T_float)
 
         if circ_dist(go_r, py_r, T_int) > 1:
             sim_diffs.append({"loop_pos": lp, "go_r": go_r, "py_r": py_r,

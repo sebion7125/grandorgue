@@ -8,8 +8,11 @@
 #include "GOSoundReleaseAlignTable.h"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
+#include <map>
+#include <utility>
 
 #include "../GOCrossfadeParam.h"
 
@@ -18,6 +21,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <mutex>
 #include <string>
 
@@ -70,10 +74,13 @@ bool GOSoundReleaseAlignTable::Load(GOCache &cache) {
     return false;
 
   // ── Sparse correlation LUTs (optional — graceful on old cache files) ──────
-  // Format v3: n_luts (uint32), then period+crossfade, then each LUT's points.
-  uint32_t n_luts = 0;
-  if (!cache.Read(&n_luts, sizeof(n_luts)))
+  // Format v3 (old): n_luts (uint32), period+crossfade, per-LUT: count + {loop_pos,best_r}.
+  // Format v4 (new): n_luts | 0x80000000 → same layout but each point also has {flags,_pad}.
+  uint32_t n_luts_raw = 0;
+  if (!cache.Read(&n_luts_raw, sizeof(n_luts_raw)))
     return true; // EOF on old/v2 cache: not an error
+  const bool has_flags = (n_luts_raw & 0x80000000u) != 0;
+  const uint32_t n_luts = n_luts_raw & 0x7FFFFFFFu;
   if (n_luts > 0) {
     if (!cache.Read(&m_CorrPeriodSamples, sizeof(m_CorrPeriodSamples)))
       return false;
@@ -93,6 +100,13 @@ bool GOSoundReleaseAlignTable::Load(GOCache &cache) {
           return false;
         if (!cache.Read(&cp.best_r, sizeof(cp.best_r)))
           return false;
+        if (has_flags) {
+          if (!cache.Read(&cp.flags, sizeof(cp.flags))) return false;
+          if (!cache.Read(&cp._pad,  sizeof(cp._pad)))  return false;
+        } else {
+          cp.flags = 0;
+          cp._pad  = 0;
+        }
       }
     }
   }
@@ -109,11 +123,12 @@ bool GOSoundReleaseAlignTable::Save(GOCacheWriter &cache) {
   if (!cache.Write(&m_PositionEntries, sizeof(m_PositionEntries)))
     return false;
 
-  // ── Sparse correlation LUTs (v3 format) ─────────────────────────────────
-  uint32_t n_luts = (uint32_t)m_CorrLuts.size();
-  if (!cache.Write(&n_luts, sizeof(n_luts)))
+  // ── Sparse correlation LUTs (v4 format: n_luts | 0x80000000 → has flags) ──
+  const uint32_t n_luts_raw =
+    (uint32_t)m_CorrLuts.size() | 0x80000000u; // v4: high bit = flags present
+  if (!cache.Write(&n_luts_raw, sizeof(n_luts_raw)))
     return false;
-  if (n_luts > 0) {
+  if (!m_CorrLuts.empty()) {
     if (!cache.Write(&m_CorrPeriodSamples, sizeof(m_CorrPeriodSamples)))
       return false;
     if (!cache.Write(&m_CorrPeriodFloat, sizeof(m_CorrPeriodFloat)))
@@ -125,10 +140,10 @@ bool GOSoundReleaseAlignTable::Save(GOCacheWriter &cache) {
       if (!cache.Write(&n_points, sizeof(n_points)))
         return false;
       for (const CorrPoint &cp : lut.points) {
-        if (!cache.Write(&cp.loop_pos, sizeof(cp.loop_pos)))
-          return false;
-        if (!cache.Write(&cp.best_r, sizeof(cp.best_r)))
-          return false;
+        if (!cache.Write(&cp.loop_pos, sizeof(cp.loop_pos))) return false;
+        if (!cache.Write(&cp.best_r,   sizeof(cp.best_r)))   return false;
+        if (!cache.Write(&cp.flags,    sizeof(cp.flags)))    return false;
+        if (!cache.Write(&cp._pad,     sizeof(cp._pad)))     return false;
       }
     }
   }
@@ -356,6 +371,263 @@ static unsigned EstimatePeriodByAutocorr(
   return best_lag;
 }
 
+// ─── v2 Backward-Tracking Algorithm ──────────────────────────────────────────
+
+static constexpr unsigned V2_TOP_K            = 24;
+static constexpr unsigned V2_DN_DENSE         = 2;
+static constexpr unsigned V2_DENSE_N_LIMIT    = 35;
+static constexpr unsigned V2_DN_SPARSE        = 6;
+static constexpr float    V2_RESCAN_RATIO     = 0.90f;
+static constexpr float    V2_RESCAN_DRIFT     = 8.0f;  // original samples
+static constexpr unsigned V2_JUMP_RATE_FACTOR = 16;    // T/16 per period
+static constexpr unsigned V2_MAX_PRUNE_GAP_N  = 50;
+static constexpr float    V2_PRUNE_TOL_FACTOR = 32.0f; // T/32 Douglas-Peucker
+
+struct BeamState {
+  int   r_d;        // current position in downsampled units
+  float score;      // NDP score at this step
+  int   r_d_prev;   // position at previous step (for slope)
+  int   dn_prev;    // step count used at previous step
+  float cum_score;  // cumulative sum of scores (used to pick winner)
+  int   beam_id;    // stable identifier assigned in Phase 0
+};
+
+// Full NDP scan → top-K local maxima as initial beam states.
+// Scans [0, r_max_d). Returns at most top_k beams in descending score order.
+static std::vector<BeamState> FullScanV2(
+  const float *loop_d, unsigned loop_d_len,
+  const float *rel_d,  unsigned rel_d_len,
+  unsigned cs_d, unsigned window_d,
+  unsigned r_max_d, unsigned /*T_int_d*/,
+  unsigned top_k) {
+  if (cs_d + window_d > loop_d_len || r_max_d == 0)
+    return {};
+  const float *lw = loop_d + cs_d;
+  double e = 0.0;
+  for (unsigned i = 0; i < window_d; i++) e += (double)lw[i] * lw[i];
+  if (e < 1e-24)
+    return {};
+
+  // Score for each candidate position.
+  const unsigned n = std::min(r_max_d, rel_d_len > window_d ? rel_d_len - window_d : 0u);
+  std::vector<float> sc(n, -2.f);
+  for (unsigned r = 0; r < n; r++)
+    sc[r] = NormalizedDotProduct(lw, rel_d, r, window_d);
+
+  // Local maxima with non-max suppression (min distance = 3 downsampled samples,
+  // matching Python BRANCH_MIN_PEAK_DISTANCE=3).
+  static constexpr unsigned MIN_PEAK_DIST = 3u;
+  std::vector<unsigned> peaks;
+  peaks.reserve(64);
+  for (unsigned i = 0; i < n; i++) {
+    bool left_ok  = (i == 0)     || (sc[i] >= sc[i - 1]);
+    bool right_ok = (i + 1 >= n) || (sc[i] >= sc[i + 1]);
+    if (left_ok && right_ok)
+      peaks.push_back(i);
+  }
+  std::sort(peaks.begin(), peaks.end(),
+            [&](unsigned a, unsigned b) { return sc[a] > sc[b]; });
+
+  const float best_sc   = peaks.empty() ? -2.f : sc[peaks[0]];
+  const float sc_cutoff = best_sc - 0.40f; // BRANCH_SCORE_MARGIN
+
+  std::vector<BeamState> result;
+  result.reserve(top_k);
+  for (unsigned pk : peaks) {
+    if ((unsigned)result.size() >= top_k)
+      break;
+    if (sc[pk] < sc_cutoff && !result.empty())
+      continue;
+    bool too_close = false;
+    for (const BeamState &b : result) {
+      if ((unsigned)std::abs((int)pk - b.r_d) < MIN_PEAK_DIST) {
+        too_close = true;
+        break;
+      }
+    }
+    if (!too_close) {
+      float s = sc[pk];
+      result.push_back({(int)pk, s, (int)pk, 1, s, (int)result.size()});
+    }
+  }
+  if (result.empty() && n > 0) {
+    // Fallback: global argmax.
+    unsigned best = 0;
+    for (unsigned r = 1; r < n; r++)
+      if (sc[r] > sc[best]) best = r;
+    float s = sc[best];
+    result.push_back({(int)best, s, (int)best, 1, s, 0});
+  }
+  return result;
+}
+
+struct TrackResult {
+  std::vector<BeamState> beams;
+  bool needs_rescan;
+};
+
+// One backward step of the multi-beam tracker.
+// exp_pos per beam = round(r_d + slope * dn) % sp_T_d
+// Tests offsets -1, 0, +1; extends to ±2 if best was at edge.
+static TrackResult TrackStepV2(
+  const float *loop_d, unsigned loop_d_len,
+  const float *rel_d,  unsigned rel_d_len,
+  unsigned cs_d, unsigned window_d,
+  unsigned sp_T_d,
+  unsigned T_int_d,
+  const std::vector<BeamState> &cands,
+  unsigned dn,
+  float rescan_ratio, float rescan_drift_orig, unsigned ds,
+  unsigned top_k) {
+  if (cs_d + window_d > loop_d_len || cands.empty())
+    return {cands, false};
+  const float *lw = loop_d + cs_d;
+  double e = 0.0;
+  for (unsigned i = 0; i < window_d; i++) e += (double)lw[i] * lw[i];
+  if (e < 1e-24)
+    return {cands, false};
+
+  const unsigned min_dist_d = std::max(1u, T_int_d / 32u);
+  const int      sT         = (int)sp_T_d;
+  bool needs_rescan = false;
+
+  std::vector<BeamState> new_beams;
+  new_beams.reserve(cands.size());
+
+  auto ndp_at = [&](int r_d) -> float {
+    if (r_d < 0 || (unsigned)r_d + window_d > rel_d_len)
+      return -2.f;
+    return NormalizedDotProduct(lw, rel_d, (unsigned)r_d, window_d);
+  };
+
+  for (const BeamState &b : cands) {
+    float slope   = (b.dn_prev > 0)
+                    ? (float)(b.r_d - b.r_d_prev) / (float)b.dn_prev
+                    : 0.f;
+    int exp_pos   = (int)std::round((float)b.r_d + slope * (float)dn);
+    exp_pos       = ((exp_pos % sT) + sT) % sT;
+
+    // Round 1: offsets -1, 0, +1
+    int   best_r  = exp_pos;
+    float best_sc = -2.f;
+    int   best_off = 0;
+    for (int off = -1; off <= 1; off++) {
+      int r = ((exp_pos + off) % sT + sT) % sT;
+      float s = ndp_at(r);
+      if (s > best_sc) { best_sc = s; best_r = r; best_off = off; }
+    }
+
+    // Round 2: if at edge, probe one further sample in the same direction.
+    if (best_off != 0) {
+      int r2 = ((exp_pos + 2 * best_off) % sT + sT) % sT;
+      float s2 = ndp_at(r2);
+      if (s2 > best_sc) { best_sc = s2; best_r = r2; }
+    }
+
+    // Rescan criteria: score drop or large drift.
+    int drift_d = std::abs(best_r - exp_pos);
+    if (drift_d > sT / 2) drift_d = sT - drift_d;
+    const float prev_eff = std::max(0.05f, b.score);
+    if (best_sc < rescan_ratio * prev_eff
+        || (float)drift_d * (float)ds > rescan_drift_orig)
+      needs_rescan = true;
+
+    new_beams.push_back(
+      {best_r, best_sc, b.r_d, (int)dn, b.cum_score + best_sc, b.beam_id});
+  }
+
+  // Sort by cumulative score descending.
+  std::sort(new_beams.begin(), new_beams.end(),
+            [](const BeamState &a, const BeamState &b) {
+              return a.cum_score > b.cum_score;
+            });
+
+  // Spatial deduplication: keep at most top_k beams with min distance.
+  std::vector<BeamState> filtered;
+  filtered.reserve(top_k);
+  for (const BeamState &b : new_beams) {
+    if (filtered.size() >= top_k)
+      break;
+    bool too_close = false;
+    for (const BeamState &f : filtered) {
+      int dist = std::abs(b.r_d - f.r_d);
+      if (dist > sT / 2) dist = sT - dist;
+      if ((unsigned)dist < min_dist_d) { too_close = true; break; }
+    }
+    if (!too_close)
+      filtered.push_back(b);
+  }
+  return {std::move(filtered), needs_rescan};
+}
+
+// Douglas-Peucker pruning on v2 track points.
+// tolerance = max(2, T/V2_PRUNE_TOL_FACTOR).
+// Preserves jump points and predecessors of jump points.
+// Points are sorted by n ascending; r values are unfolded (may be ≥ T).
+struct V2TrackPt {
+  unsigned n;         // period index
+  unsigned loop_pos;  // absolute sample position (= round(n * T_f))
+  int      r;         // unfolded release offset in original samples
+  float    score;
+  bool     is_jump;
+  bool     approach_up;
+};
+
+static std::vector<V2TrackPt> PruneV2(
+  std::vector<V2TrackPt> pts, float T_int_f) {
+  const unsigned sz = (unsigned)pts.size();
+  if (sz <= 2)
+    return pts;
+  const float tol = std::max(2.0f, T_int_f / V2_PRUNE_TOL_FACTOR);
+
+  std::vector<bool> active(sz, true);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    // Build list of currently active indices.
+    std::vector<unsigned> idx;
+    idx.reserve(sz);
+    for (unsigned i = 0; i < sz; i++)
+      if (active[i]) idx.push_back(i);
+
+    for (unsigned k = 1; k + 1 < (unsigned)idx.size(); k++) {
+      const unsigned cur  = idx[k];
+      const unsigned prev = idx[k - 1];
+      const unsigned next = idx[k + 1];
+
+      // Never prune jump points or predecessors of jump points.
+      if (pts[cur].is_jump)           continue;
+      if (pts[next].is_jump)          continue;
+      // Skip if neighbour gap is too wide.
+      if (pts[next].n - pts[prev].n > V2_MAX_PRUNE_GAP_N) continue;
+      // Skip if r-discontinuity > T/4 at either side.
+      if (std::abs(pts[cur].r  - pts[prev].r) > (int)(T_int_f / 4.0f)) continue;
+      if (std::abs(pts[next].r - pts[cur].r)  > (int)(T_int_f / 4.0f)) continue;
+
+      // Douglas-Peucker: ALL original points in (prev, next) must fit within tol.
+      const float n0 = (float)pts[prev].n, r0 = (float)pts[prev].r;
+      const float n1 = (float)pts[next].n, r1 = (float)pts[next].r;
+      const float dn = std::max(1.0f, n1 - n0);
+      bool can_del = true;
+      for (unsigned j = prev + 1; j < next; j++) {
+        const float t  = (float)(pts[j].n - pts[prev].n) / dn;
+        const float er = r0 + t * (r1 - r0);
+        if (std::abs((float)pts[j].r - er) > tol) { can_del = false; break; }
+      }
+      if (can_del) {
+        active[cur] = false;
+        changed     = true;
+      }
+    }
+  }
+
+  std::vector<V2TrackPt> out;
+  out.reserve(sz);
+  for (unsigned i = 0; i < sz; i++)
+    if (active[i]) out.push_back(pts[i]);
+  return out;
+}
+
 void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   const GOSoundAudioSection &loop_section,
   const GOSoundAudioSection &release_section,
@@ -366,7 +638,11 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   unsigned min_key_press_ms,
   unsigned max_key_press_ms,
   bool     permissive,
-  bool     exhaustive) {
+  bool     exhaustive
+#if __has_include("GOLogReleaseAlignEnable.h")
+  , const char *label
+#endif
+  ) {
   if (exhaustive) permissive = true; // exhaustive implies permissive
 #if __has_include("GOLogReleaseAlignEnable.h")
   const auto t0 = std::chrono::high_resolution_clock::now();
@@ -456,7 +732,11 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   if (r_max == 0)
     return;
 
-  unsigned n_total = loop_len / m_CorrPeriodSamples;
+  // Match Python: n_total = max(1, int((loop_len - window_len) / T_float))
+  // Ensures n_last = n_total-1 stays within the loop buffer (cs + window <= loop_len).
+  unsigned n_total = (loop_len > window_len)
+    ? std::max(1u, (unsigned)((double)(loop_len - window_len) / T_f))
+    : 1u;
   if (n_total < 4)
     return;
 
@@ -473,9 +753,10 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     : n_total;
   if (n_start >= n_end) { n_start = 1; n_end = n_total; }
 
-  const unsigned ds = (GOAudioParams::GetCorrLutDownsampling()
-                       && m_CorrPeriodSamples >= 500u)
-    ? std::min(4u, m_CorrPeriodSamples / 500u)
+  // Match Python: ds = min(4, max(1, T // 100)).
+  // Python starts downsampling at T=100 (ds=1..4); old C++ threshold was T=500.
+  const unsigned ds = GOAudioParams::GetCorrLutDownsampling()
+    ? std::min(4u, std::max(1u, m_CorrPeriodSamples / 100u))
     : 1u;
   const unsigned window_len_d = std::max(4u, window_len / ds);
   const unsigned r_max_d      = std::max(1u, r_max / ds);
@@ -498,6 +779,23 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     loop_mono[i] = s / loop_ch;
   }
 
+  // Silent loop guard: if the loop has negligible energy, there is nothing
+  // to correlate with.  This catches ranks like traktur noise where the ODF
+  // uses BlankLoop.wav (±1 LSB impulses) as the attack placeholder.
+  //
+  // GetSample() returns raw integers in the native bit-depth range:
+  //   24-bit → ±8388608;  16-bit → ±32768.
+  // BlankLoop: mean(lw²) ≈ 0.05 (≪ 1).
+  // Real pipe: mean(lw²) ≫ 1 000 000 even for quiet samples.
+  // Threshold 1.0 provides a generous safety margin on both sides.
+  {
+    double loop_e = 0.0;
+    for (unsigned i = 0; i < loop_needed_d; i++)
+      loop_e += (double)loop_mono[i] * loop_mono[i];
+    if (loop_needed_d > 0 && loop_e / loop_needed_d < 1.0)
+      return; // essentially silent attack → no meaningful correlation
+  }
+
   // Build downsampled release mono.
   const unsigned release_needed_d = (r_max + window_len) / ds + 1;
   GOSoundCompressionCache rel_cache;
@@ -518,20 +816,9 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     float    score;
   };
 
-  // Fold constants matching Python v47:
-  // If the globally best r falls near a branch multiple (r % T ≈ folded),
-  // restrict to that branch so oscillation between branches is suppressed.
+  // Fold constants used by the exhaustive corr_at() lambda.
   constexpr float FOLD_ACCEPT_RATIO    = 0.85f;
   constexpr int   FOLD_SEARCH_RADIUS_D = 2;
-
-  // Circular distance between two best_r values, always in [0, T/2].
-  auto circ_dist = [&](uint16_t a, uint16_t b) -> int {
-    int d = (int)a - (int)b;
-    if (d < 0) d = -d;
-    if (d > (int)m_CorrPeriodSamples / 2)
-      d = (int)m_CorrPeriodSamples - d;
-    return d;
-  };
 
   // Correlation at period n: full argmax then fold-constrain to nearest branch.
   auto corr_at = [&](unsigned n) -> ScoredPoint {
@@ -578,6 +865,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   };
 
   std::vector<ScoredPoint> spoints;
+  std::vector<V2TrackPt>   v2_pts;  // filled by v2 algorithm; empty if exhaustive
 
   // ── Exhaustive mode: dense scan of [n_start, n_end) ─────────────────────
   // Covers every key-press duration with evenly-spaced support points.
@@ -598,189 +886,220 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     goto lut_commit;
   }
 
-  // ── Short loop (n_total ≤ 30) ─────────────────────────────────────────────
-  if (n_total <= 30) {
-    const unsigned span = (n_end > n_start) ? n_end - n_start : 0u;
-    const unsigned step = (span > 1) ? std::max(1u, (span - 1) / 9u) : 1u;
-    for (unsigned i = 0; i < std::min(10u, span); i++) {
-      const unsigned p = n_start + i * step;
-      if (p < n_end) {
-        ScoredPoint sp = corr_at(p);
-        if (sp.score > -1.5f) spoints.push_back(sp);
+  // ── v2 Backward Multi-Beam Tracking ─────────────────────────────────────
+  //
+  // Phase 0  : full NDP scan at n_last → Top-K initial beams.
+  // Phase 1  : backward tracking from n_last to n_start.
+  //            dn = V2_DN_DENSE (n ≤ V2_DENSE_N_LIMIT) or V2_DN_SPARSE otherwise.
+  //            Each step: ±1 probe; extends to ±2 when best hits the edge.
+  //            Rescan trigger: score drops < 90 % of prev or drift > 8 samples.
+  // Phase 1.5: dense re-track (dn=1) at jump intervals (dist/dn > T/16).
+  // Phase 2  : V2TrackPt list → is_jump / approach_up → Douglas-Peucker prune.
+  {
+    const unsigned sp_T_d = 2u * T_d;  // search window width (downsampled)
+
+    // ── Phase 0 ───────────────────────────────────────────────────────────
+    const unsigned n_last    = n_end - 1;
+    const unsigned cs_last_d = (unsigned)std::round(n_last * T_f) / ds;
+
+    std::vector<BeamState> vis_cands = FullScanV2(
+      loop_mono.data(), loop_needed_d,
+      release_mono.data(), release_needed_d,
+      cs_last_d, window_len_d, r_max_d, T_d, V2_TOP_K);
+    if (vis_cands.empty()) return;
+
+    // ── Phase 1 ───────────────────────────────────────────────────────────
+    using PathMap = std::map<unsigned, std::pair<int, float>>;
+    std::vector<PathMap> beam_paths(V2_TOP_K);
+
+    unsigned n_cur = n_last;
+    while (n_cur >= n_start) {
+      // Record current position for all active beams.
+      const unsigned cs_cur_d = (unsigned)std::round(n_cur * T_f) / ds;
+      if (cs_cur_d + window_len_d <= loop_needed_d) {
+        for (const BeamState &b : vis_cands)
+          if (b.beam_id >= 0 && (unsigned)b.beam_id < V2_TOP_K)
+            beam_paths[(unsigned)b.beam_id][n_cur] = {b.r_d * (int)ds, b.score};
       }
-    }
-    // Short loops: stabilized by definition, no drift/quality check.
-    if (spoints.empty()) return;
 
-  } else {
-    // ── Long loop ─────────────────────────────────────────────────────────────
-    constexpr unsigned DENSE_STEP_MAX        = 6;
-    constexpr unsigned STABLE_WIN            = 4;
-    constexpr unsigned N_SPARSE              = 5;
-    constexpr unsigned MAX_TOTAL             = 30;
-    constexpr unsigned DRIFT_FIT_WIN         = 12;
-    constexpr float    DRIFT_MAX_RESID_FACTOR = 1.0f;
-    constexpr float    SCORE_MIN_THRESHOLD   = 0.35f;
-    constexpr float    COHERENCE_THRESHOLD   = 0.75f;
-    constexpr unsigned PHASE3_MAX            = 8;
+      // Compute step size and next n.
+      const unsigned dn =
+        (n_cur <= V2_DENSE_N_LIMIT) ? V2_DN_DENSE : V2_DN_SPARSE;
+      const unsigned n_next =
+        (n_cur >= n_start + dn) ? n_cur - dn : n_start;
+      if (n_next >= n_cur)
+        break;  // already at n_start; we recorded it above
+      const unsigned dn_actual = n_cur - n_next;
 
-    const int stable_thresh = std::max(
-      (int)m_CorrPeriodSamples
-        / (!CorrIsOctaveStop(harmonic_number) ? 6 : 8),
-      4);
+      const unsigned cs_next_d = (unsigned)std::round(n_next * T_f) / ds;
+      TrackResult res = TrackStepV2(
+        loop_mono.data(), loop_needed_d,
+        release_mono.data(), release_needed_d,
+        cs_next_d, window_len_d, sp_T_d, T_d,
+        vis_cands, dn_actual,
+        V2_RESCAN_RATIO, V2_RESCAN_DRIFT, ds, V2_TOP_K);
 
-    // Dynamic dense_step: enough steps to fit STABLE_WIN+1 points in the range.
-    const unsigned dense_start  = std::max(n_start, 5u);
-    const unsigned available_n  = (n_end > dense_start) ? n_end - dense_start : 1u;
-    const unsigned dense_step
-      = std::min(DENSE_STEP_MAX, std::max(1u, available_n / (STABLE_WIN + 1)));
-    const unsigned dense_stop
-      = std::min(n_end, dense_start + dense_step * (STABLE_WIN + 2));
-
-    // Phase 1: dense — sample until stable or dense_stop reached.
-    bool     stabilized = false;
-    unsigned n_dense    = 0;
-    for (unsigned n = dense_start; n < dense_stop; n += dense_step) {
-      ScoredPoint sp = corr_at(n);
-      if (sp.score > -1.5f) {
-        spoints.push_back(sp);
-        n_dense++;
-        if ((unsigned)spoints.size() >= STABLE_WIN) {
-          bool ok = true;
-          for (unsigned k = (unsigned)spoints.size() - STABLE_WIN;
-               k + 1 < (unsigned)spoints.size() && ok; ++k)
-            if (circ_dist(spoints[k].best_r, spoints[k + 1].best_r) > stable_thresh)
-              ok = false;
-          if (ok) { stabilized = true; break; }
-        }
-      }
-    }
-    if (!stabilized) {
-      // permissive: continue with partial spoints if at least one was computed
-      if (!permissive || spoints.empty()) return;
-    }
-
-    // Drift detection: linear phase shift over DRIFT_FIT_WIN dense points.
-    // Slope ≥ T/(4·STABLE_WIN·DENSE_STEP) with low residual → drift → Legacy.
-    {
-      const unsigned drift_n = std::min((unsigned)spoints.size(), DRIFT_FIT_WIN);
-      if (drift_n >= 4) {
-        const double half_T = m_CorrPeriodSamples / 2.0;
-        double prev_phase   = (double)(spoints[0].best_r % m_CorrPeriodSamples);
-        double sx = 0, sy = 0, sxy = 0, sxx = 0;
-        double unwrapped = prev_phase;
-        double x0        = std::round(spoints[0].loop_pos / T_f);
-        sx += x0; sy += unwrapped; sxy += x0 * unwrapped; sxx += x0 * x0;
-        for (unsigned i = 1; i < drift_n; i++) {
-          const double cur = (double)(spoints[i].best_r % m_CorrPeriodSamples);
-          double d = cur - prev_phase;
-          while (d >  half_T) d -= m_CorrPeriodSamples;
-          while (d < -half_T) d += m_CorrPeriodSamples;
-          unwrapped  += d;
-          prev_phase  = cur;
-          const double xi = std::round(spoints[i].loop_pos / T_f);
-          sx += xi; sy += unwrapped; sxy += xi * unwrapped; sxx += xi * xi;
-        }
-        const double N     = (double)drift_n;
-        const double denom = N * sxx - sx * sx;
-        const double slope = (denom != 0.0) ? (N * sxy - sx * sy) / denom : 0.0;
-        const double icept = (sy - slope * sx) / N;
-
-        double max_resid = 0.0;
-        prev_phase = (double)(spoints[0].best_r % m_CorrPeriodSamples);
-        unwrapped  = prev_phase;
-        double xi0  = std::round(spoints[0].loop_pos / T_f);
-        max_resid  = std::abs(unwrapped - (slope * xi0 + icept));
-        for (unsigned i = 1; i < drift_n; i++) {
-          const double cur = (double)(spoints[i].best_r % m_CorrPeriodSamples);
-          double d = cur - prev_phase;
-          while (d >  half_T) d -= m_CorrPeriodSamples;
-          while (d < -half_T) d += m_CorrPeriodSamples;
-          unwrapped  += d;
-          prev_phase  = cur;
-          const double xi = std::round(spoints[i].loop_pos / T_f);
-          const double r  = std::abs(unwrapped - (slope * xi + icept));
-          if (r > max_resid) max_resid = r;
-        }
-
-        const double drift_slope_thresh
-          = m_CorrPeriodSamples / (4.0 * STABLE_WIN * DENSE_STEP_MAX);
-        if (std::abs(slope) >= drift_slope_thresh
-            && max_resid <= (double)stable_thresh * DRIFT_MAX_RESID_FACTOR)
-          if (!permissive) return;  // drift detected → Legacy path
-      }
-    }
-
-    // Phase 2: sparse — N_SPARSE points from last dense n to n_end-1.
-    const unsigned last_n
-      = (unsigned)std::round(spoints.back().loop_pos / T_f);
-    if (last_n + 1 < n_end) {
-      const unsigned n_rem
-        = std::min(N_SPARSE, MAX_TOTAL - (unsigned)spoints.size());
-      for (unsigned i = 1; i <= n_rem; i++) {
-        const unsigned n = last_n + i * (n_end - 1 - last_n) / n_rem;
-        if (n > last_n && n < n_end) {
-          ScoredPoint sp = corr_at(n);
-          if (sp.score > -1.5f) spoints.push_back(sp);
-        }
-      }
-    }
-
-    // Phase 3: gap fill — insert midpoint between pairs with circ_dist > T/4.
-    const int gap_thresh = (int)m_CorrPeriodSamples / 4;
-    unsigned  gap_count  = 0;
-    unsigned  idx        = 0;
-    while (idx + 1 < spoints.size() && (unsigned)spoints.size() < MAX_TOTAL) {
-      if (circ_dist(spoints[idx].best_r, spoints[idx + 1].best_r) > gap_thresh) {
-        const unsigned na = (unsigned)std::round(spoints[idx].loop_pos     / T_f);
-        const unsigned nb = (unsigned)std::round(spoints[idx + 1].loop_pos / T_f);
-        const unsigned nm = (na + nb) / 2;
-        if (nm > na && nm < nb) {
-          ScoredPoint sp = corr_at(nm);
-          if (sp.score > -1.5f) {
-            spoints.insert(spoints.begin() + idx + 1, sp);
-            gap_count++;
+      if (!res.beams.empty()) {
+        vis_cands = res.beams;
+        if (res.needs_rescan) {
+          std::vector<BeamState> fresh = FullScanV2(
+            loop_mono.data(), loop_needed_d,
+            release_mono.data(), release_needed_d,
+            cs_next_d, window_len_d, r_max_d, T_d, V2_TOP_K);
+          if (!fresh.empty()) {
+            // Match each fresh candidate to the nearest existing beam.
+            std::vector<bool> id_used(V2_TOP_K, false);
+            std::vector<BeamState> refreshed;
+            refreshed.reserve(fresh.size());
+            for (const BeamState &fr : fresh) {
+              int best_bid  = -1;
+              int best_dist = INT_MAX;
+              for (const BeamState &vb : vis_cands) {
+                if (vb.beam_id < 0 || (unsigned)vb.beam_id >= V2_TOP_K) continue;
+                if (id_used[(unsigned)vb.beam_id]) continue;
+                int d = std::abs(fr.r_d - vb.r_d);
+                if (d > (int)sp_T_d / 2) d = (int)sp_T_d - d;
+                if (d < best_dist) { best_dist = d; best_bid = vb.beam_id; }
+              }
+              if (best_bid < 0) continue;
+              id_used[(unsigned)best_bid] = true;
+              float prev_cum = 0.f;
+              for (const BeamState &vb : vis_cands)
+                if (vb.beam_id == best_bid) { prev_cum = vb.cum_score; break; }
+              refreshed.push_back(
+                {fr.r_d, fr.score, fr.r_d, 1, prev_cum + fr.score, best_bid});
+            }
+            if (!refreshed.empty()) vis_cands = refreshed;
           }
-          continue;  // recheck this pair (or advance if midpoint was invalid)
         }
       }
-      ++idx;
+      n_cur = n_next;
     }
 
-    if (spoints.empty()) return;
+    // Winner beam = vis_cands[0] (sorted by cumulative score descending).
+    const int   best_id = vis_cands.empty() ? 0 : vis_cands[0].beam_id;
+    const auto &primary = ((unsigned)best_id < V2_TOP_K)
+                          ? beam_paths[(unsigned)best_id]
+                          : beam_paths[0];
+    if (primary.empty()) return;
 
-    // Quality check on steady-state (sparse + gap) points.
-    // Short loops and unstabilised long loops never reach here.
-    if (n_dense < (unsigned)spoints.size()) {
-      const unsigned n_ss = (unsigned)spoints.size() - n_dense;
+    // Working copy of the winner path (may be extended in Phase 1.5).
+    PathMap primary_path(primary);
 
-      float score_min = spoints[n_dense].score;
-      for (unsigned i = n_dense + 1; i < (unsigned)spoints.size(); i++)
-        score_min = std::min(score_min, spoints[i].score);
+    // ── Phase 1.5: dense re-tracking at jump intervals ────────────────────
+    {
+      const unsigned sp_T_raw  = 2u * m_CorrPeriodSamples;
+      const float jump_thresh = (float)m_CorrPeriodSamples
+                                / (float)V2_JUMP_RATE_FACTOR;
 
-      // Circular coherence R ∈ [0,1]: 1 = all best_r on one branch, 0 = scattered.
-      const double two_pi = 2.0 * std::acos(-1.0);
-      double sum_sin = 0.0, sum_cos = 0.0;
-      for (unsigned i = n_dense; i < (unsigned)spoints.size(); i++) {
-        const double angle = two_pi * spoints[i].best_r / m_CorrPeriodSamples;
-        sum_sin += std::sin(angle);
-        sum_cos += std::cos(angle);
+      std::vector<std::pair<unsigned, unsigned>> jump_ivs;
+      // Python JUMP_DENSE_ABS = 20 original samples: trigger Phase 1.5 for any
+      // interval with dn > 2 AND circular distance >= 20 samples.
+      static constexpr unsigned JUMP_DENSE_ABS = 20u;
+      for (auto it = primary_path.begin(); it != primary_path.end(); ) {
+        auto nxt = std::next(it);
+        if (nxt == primary_path.end()) break;
+        int dist = std::abs(nxt->second.first - it->second.first);
+        if ((unsigned)dist > sp_T_raw / 2u) dist = (int)sp_T_raw - dist;
+        const unsigned dn_ab = nxt->first - it->first;
+        if (dn_ab > 2u && (unsigned)dist >= JUMP_DENSE_ABS)
+          jump_ivs.push_back({it->first, nxt->first});
+        it = nxt;
       }
-      const double R = std::sqrt(sum_sin * sum_sin + sum_cos * sum_cos) / n_ss;
 
-      if (score_min < SCORE_MIN_THRESHOLD
-          || R < COHERENCE_THRESHOLD
-          || gap_count > PHASE3_MAX)
-        if (!permissive) return;  // bad LUT quality → Legacy path
+      for (const auto &iv : jump_ivs) {
+        auto it_b = primary_path.find(iv.second);
+        if (it_b == primary_path.end()) continue;
+        const int   rb  = it_b->second.first;
+        const float scb = it_b->second.second;
+        std::vector<BeamState> dense_beam = {
+          {(int)((unsigned)rb / ds), scb,
+           (int)((unsigned)rb / ds), 1, scb, 0}};
+        for (int nd = (int)iv.second - 1; nd > (int)iv.first; nd--) {
+          if (nd < (int)n_start) break;
+          const unsigned cs_d = (unsigned)std::round((double)nd * T_f) / ds;
+          if (cs_d + window_len_d > loop_needed_d) continue;
+          TrackResult step = TrackStepV2(
+            loop_mono.data(), loop_needed_d,
+            release_mono.data(), release_needed_d,
+            cs_d, window_len_d, sp_T_d, T_d,
+            dense_beam, 1u,
+            V2_RESCAN_RATIO, V2_RESCAN_DRIFT, ds, 1u);
+          if (step.beams.empty()) break;
+          dense_beam = step.beams;
+          primary_path[(unsigned)nd] =
+            {dense_beam[0].r_d * (int)ds, dense_beam[0].score};
+        }
+      }
     }
+
+    // ── Phase 2: build V2TrackPt list ─────────────────────────────────────
+    v2_pts.reserve(primary_path.size());
+    for (const auto &kv : primary_path) {
+      if (kv.second.second < -1.5f) continue;
+      V2TrackPt p;
+      p.n           = kv.first;
+      p.r           = kv.second.first;
+      p.score       = kv.second.second;
+      p.loop_pos    = (unsigned)std::round(p.n * T_f);
+      p.is_jump     = false;
+      p.approach_up = true;
+      v2_pts.push_back(p);
+    }
+    // primary_path is std::map ordered by n ascending — no sort needed.
+
+    if (v2_pts.empty()) return;
+
+    // Compute is_jump and approach_up on a sorted V2TrackPt list.
+    const unsigned sp_T_full = 2u * m_CorrPeriodSamples;
+    const float jump_rate    =
+      (float)m_CorrPeriodSamples / (float)V2_JUMP_RATE_FACTOR;
+    auto mark_flags = [&](std::vector<V2TrackPt> &pts) {
+      if (pts.empty()) return;
+      pts[0].approach_up = true;
+      pts[0].is_jump     = false;
+      for (unsigned i = 1; i < (unsigned)pts.size(); i++) {
+        int dist = std::abs(pts[i].r - pts[i - 1].r);
+        if ((unsigned)dist > sp_T_full / 2u) dist = (int)sp_T_full - dist;
+        const unsigned dn_ab = std::max(1u, pts[i].n - pts[i - 1].n);
+        pts[i].is_jump = ((float)dist / (float)dn_ab > jump_rate);
+        const int fwd =
+          ((pts[i].r - pts[i - 1].r) % (int)sp_T_full + (int)sp_T_full)
+          % (int)sp_T_full;
+        pts[i].approach_up = ((unsigned)fwd <= sp_T_full / 2u);
+      }
+    };
+    mark_flags(v2_pts);
+
+    // Douglas-Peucker pruning.
+    if (v2_pts.size() > 2)
+      v2_pts = PruneV2(std::move(v2_pts), (float)m_CorrPeriodSamples);
+
+    // Recompute flags after pruning (neighbours may have changed).
+    mark_flags(v2_pts);
   }
 
 lut_commit:
   // Convert to CorrPoint and append LUT entry.
   std::vector<CorrPoint> points;
-  points.reserve(spoints.size());
-  for (const ScoredPoint &sp : spoints)
-    points.push_back({sp.loop_pos, sp.best_r});
+  if (!v2_pts.empty()) {
+    // v2 path: fold r into [0,T) and encode direction/jump flags.
+    points.reserve(v2_pts.size());
+    for (const V2TrackPt &p : v2_pts) {
+      uint8_t flags = CorrPoint::kFlagValid;
+      if (p.approach_up) flags |= CorrPoint::kFlagApproachUp;
+      if (p.is_jump)     flags |= CorrPoint::kFlagIsJump;
+      const int r_fold = ((p.r % (int)m_CorrPeriodSamples)
+                          + (int)m_CorrPeriodSamples)
+                         % (int)m_CorrPeriodSamples;
+      points.push_back({p.loop_pos, (uint16_t)r_fold, flags, 0u});
+    }
+  } else {
+    // exhaustive path: no v2 flags (legacy runtime behaviour).
+    points.reserve(spoints.size());
+    for (const ScoredPoint &sp : spoints)
+      points.push_back({sp.loop_pos, sp.best_r, 0u, 0u});
+  }
 
 #if __has_include("GOLogReleaseAlignEnable.h")
   {
@@ -802,6 +1121,64 @@ lut_commit:
   }
 #endif
   m_CorrLuts.push_back({&loop_section, std::move(points)});
+
+#if __has_include("GOLogReleaseAlignEnable.h")
+  // LUT verify log — written when a pipe label is provided so Python's
+  // verify_lut.py can independently recompute and compare results.
+  // Activated by the same GOLogReleaseAlignEnable.h sentinel as the timing log.
+  if (label) {
+    static std::mutex s_VerifyLogMutex;
+    std::lock_guard<std::mutex> vlock(s_VerifyLogMutex);
+    auto GetVerifyLogPath = []() -> std::string {
+#ifdef _WIN32
+      const char *tmp = std::getenv("TEMP");
+      if (!tmp) tmp = std::getenv("TMP");
+      if (!tmp) tmp = "C:\\";
+      return std::string(tmp) + "\\go_lut_verify.csv";
+#else
+      return "/tmp/go_lut_verify.csv";
+#endif
+    };
+    std::ofstream vf(GetVerifyLogPath(), std::ios::app);
+    if (vf.is_open()) {
+      const auto &pts = m_CorrLuts.back().points;
+      vf << std::setprecision(10)
+         << "pipe=" << label
+         << " T_float=" << m_CorrPeriodFloat
+         << " T_int=" << m_CorrPeriodSamples
+         << " crossfade_len=" << crossfade_len
+         << " ds=" << ds
+         << " harmonic=" << harmonic_number
+         << " n_start=" << n_start
+         << " n_end=" << n_end
+         << " min_ms=" << min_key_press_ms
+         << " max_ms=" << max_key_press_ms
+         << " sample_rate=" << sample_rate
+         << " loop_len=" << loop_section.GetLength()
+         << " release_len=" << release_section.GetLength()
+         << "\n";
+      for (const CorrPoint &p : pts) {
+        const unsigned n = (unsigned)std::round((double)p.loop_pos / T_f);
+        vf << "lut," << n << "," << p.loop_pos << "," << p.best_r
+           << "," << (p.IsApproachUp() ? 1 : 0)
+           << "," << (p.IsJump() ? 1 : 0)
+           << "\n";
+      }
+      // Simulator samples: ~50-point grid + last n so Python can verify
+      // GetPositionForCorrelation (interpolation + phi logic).
+      const unsigned sim_step = std::max(1u, (n_end - n_start) / 50u);
+      unsigned last_lp = (unsigned)-1;
+      for (unsigned n = n_start; n < n_end; n += sim_step) {
+        const unsigned lp = (unsigned)std::round(n * T_f);
+        vf << "sim," << lp << "," << GetPositionForCorrelation(lp) << "\n";
+        last_lp = lp;
+      }
+      const unsigned end_lp = (unsigned)std::round((n_end - 1) * T_f);
+      if (end_lp != last_lp)
+        vf << "sim," << end_lp << "," << GetPositionForCorrelation(end_lp) << "\n";
+    }
+  }
+#endif
 }
 
 void GOSoundReleaseAlignTable::AssignAttackPointers(
@@ -851,27 +1228,45 @@ unsigned GOSoundReleaseAlignTable::GetPositionForCorrelation(
     const CorrPoint &p0 = m_CorrPoints[idx];
     const CorrPoint &p1 = m_CorrPoints[idx + 1];
 
-    // Circular interpolation on [0, T): take the shortest arc.
-    // best_r values are stored modulo T, so both are in [0, T).
-    int diff    = (int)p1.best_r - (int)p0.best_r;
-    int half_T  = (int)m_CorrPeriodSamples / 2;
-    if (diff >  half_T) diff -= (int)m_CorrPeriodSamples;
-    if (diff < -half_T) diff += (int)m_CorrPeriodSamples;
+    const double t = (double)(loop_pos - p0.loop_pos)
+                   / (double)(p1.loop_pos - p0.loop_pos);
+    const int    T = (int)m_CorrPeriodSamples;
 
-    double t = (double)(loop_pos - p0.loop_pos)
-             / (double)(p1.loop_pos - p0.loop_pos);
+    // v2 LUT points carry explicit is_jump and approach_up flags.
+    // Legacy points (flags==0) fall back to shortest-arc + T/4 heuristic.
+    bool is_jump;
+    int  diff;
+    if (p1.IsValid()) {
+      // v2 path: directed interpolation
+      is_jump = p1.IsJump();
+      if (!is_jump) {
+        if (p1.IsApproachUp()) {
+          // Forward direction preferred: fwd = (r1-r0+T)%T, prefer positive
+          diff = ((int)p1.best_r - (int)p0.best_r + T) % T;
+          if (diff > T / 2) diff -= T;
+        } else {
+          // Backward direction preferred: bwd = (r0-r1+T)%T, prefer negative
+          const int bwd = ((int)p0.best_r - (int)p1.best_r + T) % T;
+          diff = -bwd;
+          if (diff < -T / 2) diff += T;
+        }
+      } else {
+        diff = 0; // unused when is_jump
+      }
+    } else {
+      // Legacy path: shortest arc; branch-jump heuristic via T/4
+      diff   = (int)p1.best_r - (int)p0.best_r;
+      if (diff >  T / 2) diff -= T;
+      if (diff < -T / 2) diff += T;
+      is_jump = (std::abs(diff) > T / 4);
+    }
 
-    // Residual branch-jump > T/4: step function instead of interpolation.
-    // Interpolating between branches produces values on neither branch —
-    // a hard midpoint-switch is always better than a meaningless average.
-    if (std::abs(diff) > (int)m_CorrPeriodSamples / 4) {
+    // Step function for branch jumps; linear interpolation otherwise.
+    if (is_jump) {
       r_interp = (t < 0.5) ? p0.best_r : p1.best_r;
     } else {
       int r_signed = (int)p0.best_r + (int)std::round(t * diff);
-      // Fold into [0, T) — r_signed can go slightly negative when diff < 0
-      r_interp = (unsigned)((r_signed % (int)m_CorrPeriodSamples
-                             + (int)m_CorrPeriodSamples)
-                            % (int)m_CorrPeriodSamples);
+      r_interp = (unsigned)((r_signed % T + T) % T);
     }
   }
 
