@@ -1868,14 +1868,8 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
             needs_rescan = True
         new_cands.append((br, bsc, r_d, dn, cum_sc + bsc, beam_id))
 
-    # Sort by cumulative score descending; within V2_BEAM_SORT_EPS tiebreak by
-    # beam_id ascending — deterministic, matches C++ TrackStepV2 sort.
-    from functools import cmp_to_key as _c2k
-    def _beam_cmp(a, b):
-        d = a[4] - b[4]
-        if abs(d) > V2_BEAM_SORT_EPS: return -1 if d > 0 else 1
-        return (a[5] > b[5]) - (a[5] < b[5])
-    new_cands.sort(key=_c2k(_beam_cmp))
+    # Kandidaten nach Score sortieren, dann räumlich zu nahe liegende entfernen
+    new_cands.sort(key=lambda x: x[4], reverse=True)
     filtered = []
     min_dist_d = (_min_peak_dist_d if _min_peak_dist_d is not None
                   else max(1, T_int_d // 32))
@@ -1971,9 +1965,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
             return []
         raw_cands_d, scores_d = _corr_scores_and_candidates(lw, release_ds_a, r_max_d, window_len_d)
         cands = _ensure_per_window_candidates(raw_cands_d, scores_d, T_int_d, search_periods)
-        # Sort by score descending; tiebreak by position ascending (deterministic,
-        # matches C++ FullScanV2 sort with position tiebreaker).
-        cands = sorted(cands, key=lambda x: (-x[1], x[0]))[:(_top_k if _top_k else BRANCH_TOP_K)]
+        cands = sorted(cands, key=lambda x: x[1], reverse=True)[:(_top_k if _top_k else BRANCH_TOP_K)]
         # State: (r_d, score, r_d_prev=r_d, dn_prev=1, cumulative_score, beam_id)
         return [(r_d, float(sc), r_d, 1, float(sc), i) for i, (r_d, sc) in enumerate(cands)]
 
