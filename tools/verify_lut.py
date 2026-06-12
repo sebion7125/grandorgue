@@ -610,12 +610,32 @@ def compare_entry(entry: dict, organ_path: str,
             simsrc_diffs.append({"loop_pos": lp, "go_r": go_r, "py_r": py_r2,
                                  "dist": circ_dist(go_r, py_r2, T_int)})
 
-    status = "OK" if not lut_diffs and not sim_diffs and not simsrc_diffs else "MISMATCH"
+    # Compute max circular distance across sim and simsrc diffs.
+    # Only large Δr (> T/8) is acoustically relevant.
+    max_sim_dr    = max((d["dist"] for d in sim_diffs),    default=0)
+    max_simsrc_dr = max((d["dist"] for d in simsrc_diffs), default=0)
+    # Structural LUT difference: different number of points
+    lut_count_diff = abs(len(go_lut_dict) - len(py_lut_dict))
+
+    has_any_diff = lut_diffs or sim_diffs or simsrc_diffs
+    if not has_any_diff:
+        status = "OK"
+        severity = "none"
+    else:
+        status = "MISMATCH"
+        # MINOR: only small Δr (≤ T/8) and point count similar
+        minor = (max_sim_dr    <= T_int // 8 and
+                 max_simsrc_dr <= T_int // 8 and
+                 lut_count_diff <= 2)
+        severity = "minor" if minor else "major"
+
     return {
         "label":       label,
         "min_ms":      entry["min_ms"],
         "max_ms":      entry["max_ms"],
         "status":      status,
+        "severity":    severity,
+        "max_sim_dr":  max_sim_dr,
         "go_pts":      len(go_lut_dict),
         "py_pts":      len(py_lut_dict),
         "lut_diffs":   lut_diffs,
@@ -759,8 +779,12 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
             return f"[≤{mx}ms]"
         return "[always]"
 
+    minor_mis = 0
+    major_mis = 0
+
     for res in results:
         st  = res["status"]
+        sev = res.get("severity", "none")
         rel = _rel_tag(res)
         if st == "OK":
             ok += 1
@@ -776,6 +800,15 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
             emit(f"  ERR    {res['label']} {rel}: {st}")
         else:
             mis += 1
+            if sev == "minor":
+                minor_mis += 1
+            else:
+                major_mis += 1
+
+            # Only print minor diffs in verbose mode
+            if sev == "minor" and not verbose:
+                continue
+
             has_lut  = bool(res["lut_diffs"])
             has_sim  = bool(res["sim_diffs"])
             has_ssrc = bool(res["simsrc_diffs"])
@@ -783,7 +816,9 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
             if has_lut:  tags.append(f"LUT:{len(res['lut_diffs'])}")
             if has_ssrc: tags.append(f"SIM_LOGIC:{len(res['simsrc_diffs'])}")
             if has_sim and not has_ssrc: tags.append(f"SIM_FROM_LUT:{len(res['sim_diffs'])}")
-            emit(f"  DIFF   {res['label']:50s} {rel:20s} go={res.get('go_pts','?'):3} py={res.get('py_pts','?'):3}  [{', '.join(tags)}]")
+            sev_tag = "" if sev == "major" else f" [{sev}]"
+            max_dr = res.get("max_sim_dr", 0)
+            emit(f"  DIFF{sev_tag} {res['label']:50s} {rel:20s} go={res.get('go_pts','?'):3} py={res.get('py_pts','?'):3}  [{', '.join(tags)}]  maxΔr={max_dr}")
             for d in res["lut_diffs"][:10]:
                 if d.get("issue","").startswith("MISMATCH") or d.get("issue","") in ("GO_MISSING","PY_MISSING"):
                     if d["go_r"] is None or d["py_r"] is None:
@@ -801,7 +836,8 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                 emit(f"         ... and {len(res['simsrc_diffs'])-5} more sim-logic diffs")
 
     emit(f"\nResult: {total} entries — "
-         f"OK={ok}  MISMATCH={mis}  SKIP={skip}  NOT_FOUND={notfound}  ERR={errs}")
+         f"OK={ok}  MISMATCH={mis} (major={major_mis} minor={minor_mis})  "
+         f"SKIP={skip}  NOT_FOUND={notfound}  ERR={errs}")
     return ok, mis, skip, notfound, errs
 
 
