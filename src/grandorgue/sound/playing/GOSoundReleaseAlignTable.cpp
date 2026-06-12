@@ -282,6 +282,7 @@ static unsigned PeriodFromFrequency(float freq_hz, unsigned sample_rate) {
 
 // Normalized dot product between loop_window[0..window_len) and
 // release[r..r+window_len). Returns value in [-1, +1].
+// Used for autocorr (double-precision accumulation, keeps T_float accurate).
 static float NormalizedDotProduct(
   const float *loop_window,
   const float *release,
@@ -297,6 +298,23 @@ static float NormalizedDotProduct(
   if (denom < 1e-12)
     return 0.f;
   return (float)(num / denom);
+}
+
+// Float32 NDP with pre-normalized loop window (||lw_n|| = 1).
+// Matches Python: dot(rel_window, lw_n) / norm(rel_window)
+// Used in FullScanV2 / TrackStepV2 to align with Python's float32 computation.
+static float NDP_f32(
+  const float *lw_n,
+  const float *rel,
+  unsigned r,
+  unsigned W) {
+  float num = 0.f, er = 0.f;
+  for (unsigned i = 0; i < W; i++) {
+    num += lw_n[i] * rel[r + i];
+    er  += rel[r + i] * rel[r + i];
+  }
+  float denom = std::sqrt(er);
+  return (denom < 1e-12f) ? 0.f : num / denom;
 }
 
 // Estimates the true fundamental period via autocorrelation on a stable
@@ -422,16 +440,20 @@ static std::vector<BeamState> FullScanV2(
   if (cs_d + window_d > loop_d_len || r_max_d == 0)
     return {};
   const float *lw = loop_d + cs_d;
-  double e = 0.0;
-  for (unsigned i = 0; i < window_d; i++) e += (double)lw[i] * lw[i];
-  if (e < 1e-24)
+  // Pre-normalize loop window (float32, matches Python: lw_n = (lw/norm(lw)).astype(float32))
+  float e_lw = 0.f;
+  for (unsigned i = 0; i < window_d; i++) e_lw += lw[i] * lw[i];
+  if (e_lw < 1e-24f)
     return {};
+  const float inv_lw = 1.f / std::sqrt(e_lw);
+  std::vector<float> lw_n(window_d);
+  for (unsigned i = 0; i < window_d; i++) lw_n[i] = lw[i] * inv_lw;
 
-  // Score for each candidate position.
+  // Score for each candidate position (float32, matches Python _compute_corr_scores).
   const unsigned n = std::min(r_max_d, rel_d_len > window_d ? rel_d_len - window_d : 0u);
   std::vector<float> sc(n, -2.f);
   for (unsigned r = 0; r < n; r++)
-    sc[r] = NormalizedDotProduct(lw, rel_d, r, window_d);
+    sc[r] = NDP_f32(lw_n.data(), rel_d, r, window_d);
 
   // Local maxima with non-max suppression (min distance = 3 downsampled samples,
   // matching Python BRANCH_MIN_PEAK_DISTANCE=3).
@@ -501,10 +523,14 @@ static TrackResult TrackStepV2(
   if (cs_d + window_d > loop_d_len || cands.empty())
     return {cands, false};
   const float *lw = loop_d + cs_d;
-  double e = 0.0;
-  for (unsigned i = 0; i < window_d; i++) e += (double)lw[i] * lw[i];
-  if (e < 1e-24)
+  // Pre-normalize loop window (float32, matches Python _track_step_v2: lw_n = (lw/na).astype(float32))
+  float e_lw = 0.f;
+  for (unsigned i = 0; i < window_d; i++) e_lw += lw[i] * lw[i];
+  if (e_lw < 1e-24f)
     return {cands, false};
+  const float inv_lw = 1.f / std::sqrt(e_lw);
+  std::vector<float> lw_n(window_d);
+  for (unsigned i = 0; i < window_d; i++) lw_n[i] = lw[i] * inv_lw;
 
   const unsigned min_dist_d = std::max(1u, T_int_d / 32u);
   const int      sT         = (int)sp_T_d;
@@ -516,7 +542,7 @@ static TrackResult TrackStepV2(
   auto ndp_at = [&](int r_d) -> float {
     if (r_d < 0 || (unsigned)r_d + window_d > rel_d_len)
       return -2.f;
-    return NormalizedDotProduct(lw, rel_d, (unsigned)r_d, window_d);
+    return NDP_f32(lw_n.data(), rel_d, (unsigned)r_d, window_d);
   };
 
   for (const BeamState &b : cands) {
@@ -1046,7 +1072,8 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
             cs_d, window_len_d, sp_T_d, T_d,
             dense_beam, 1u,
             V2_RESCAN_RATIO, V2_RESCAN_DRIFT, ds, 1u);
-          if (step.beams.empty()) break;
+          // Python continues with last good beam on failed step; match that.
+          if (step.beams.empty()) continue;
           dense_beam = step.beams;
           primary_path[(unsigned)nd] =
             {dense_beam[0].r_d * (int)ds, dense_beam[0].score};
