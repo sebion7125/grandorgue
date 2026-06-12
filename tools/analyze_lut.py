@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v224"
+TOOL_VERSION = "v225"
 
 # ─── C++ Numerics Mode ────────────────────────────────────────────────────────
 # When enabled, NDP is computed with pre-normalised float32 scalar loops,
@@ -704,8 +704,7 @@ def _compute_corr_scores(lw: np.ndarray, release_mono: np.ndarray,
         # Entspricht C++ FullScanV2 / NDP_f32 in GOSoundReleaseAlignTable.cpp
         lw_f32 = lw.astype(np.float32)
         # Norm in float32 (wie C++: e_lw = sum(lw[i]^2), inv_lw = 1/sqrt(e_lw))
-        e_lw = np.einsum('i,i->', lw_f32, lw_f32, optimize=False,
-                         dtype=np.float64).astype(np.float32)
+        e_lw = np.einsum('i,i->', lw_f32, lw_f32, optimize=False).astype(np.float32)
         if e_lw < np.float32(1e-24):
             return None, 0
         lw_n = (lw_f32 * (np.float32(1.0) / np.sqrt(e_lw))).astype(np.float32)
@@ -1880,8 +1879,7 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
     # Normierung: C++ Numerik-Modus = float32 scalar (wie NDP_f32 in C++)
     if _cpp_numerics_enabled:
         lw_f32 = lw.astype(np.float32)
-        e_lw = np.einsum('i,i->', lw_f32, lw_f32, optimize=False,
-                         dtype=np.float64).astype(np.float32)
+        e_lw = np.einsum('i,i->', lw_f32, lw_f32, optimize=False).astype(np.float32)
         if e_lw < np.float32(1e-24):
             return candidates, False
         lw_n = (lw_f32 * (np.float32(1.0) / np.sqrt(e_lw))).astype(np.float32)
