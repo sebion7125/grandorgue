@@ -343,77 +343,131 @@ static double RefineNDPPeak(const float *ndp, unsigned idx, unsigned n) {
 
 // excerpt of the loop sample. Returns best lag in [min_period, max_period]
 // as a double for sub-sample precision (matches Python refine_peak_parabolic).
+//
+// Full 1:1 port of analyze_lut.py estimate_period_by_autocorr():
+//   1. NDP for all lags 1..max_period (ndp_all[lag], index 0 unused)
+//   2. CMNDF cumsum from lag 1 with absolute lag as multiplier (correct YIN)
+//   3. Local-minimum valley search in [min_period, max_period]
+//   4. Later much-deeper valley may replace first (no early break)
+//   5. Submultiple guard using expected_period (T_hn from call site)
+//   6. Parabolic refinement on ndp_all
 static double EstimatePeriodByAutocorr(
   const float *samples,
-  unsigned len,
-  unsigned min_period,
-  unsigned max_period) {
+  unsigned     len,
+  unsigned     min_period,
+  unsigned     max_period,
+  double       expected_period)  // HN-corrected nominal period (T_hn)
+{
   if (len < max_period * 2)
     return min_period;
 
-  // DC removal + Hann window.  Removing the mean before windowing prevents
-  // the DC offset from inflating the autocorrelation at sub-harmonic lags
-  // (the same step ChatGPT's reference script applies before FFT-ACF).
+  // DC removal + Hann window.
   float mean = 0.f;
   for (unsigned i = 0; i < len; i++) mean += samples[i];
   mean /= (float)len;
-
   std::vector<float> windowed(len);
   for (unsigned i = 0; i < len; i++) {
     const float w = 0.5f * (1.f - std::cos(2.f * (float)M_PI * i / (len - 1)));
     windowed[i] = (samples[i] - mean) * w;
   }
-  const float *s   = windowed.data();
+  const float   *s = windowed.data();
   const unsigned W = len - max_period;
 
-  // Collect NDP for all lags — used by both YIN and the fallback.
-  const unsigned n_lags = max_period - min_period + 1;
-  std::vector<float> ndp_vals(n_lags);
-  for (unsigned i = 0; i < n_lags; i++)
-    ndp_vals[i] = NormalizedDotProduct(s, s, min_period + i, W);
+  // NDP for all lags 1..max_period.  ndp_all[lag] == NDP at that lag; index 0 unused.
+  std::vector<float> ndp_all(max_period + 1, 0.f);
+  for (unsigned lag = 1; lag <= max_period; lag++)
+    ndp_all[lag] = NormalizedDotProduct(s, s, lag, W);
 
-  // YIN cumulative mean normalised difference (CMNDF).
-  // d'[i] = 1 - NDP[i];  CMNDF[i] = d'[i] / mean(d'[0..i])
-  // Returns the FIRST lag in [min_period, max_period] where CMNDF dips below
-  // the threshold — i.e. the true fundamental rather than T/2 or 2T.
+  // CMNDF from lag 1 with absolute lag multiplier (correct YIN formula).
+  std::vector<float> cmndf_all(max_period + 1, 1.f);
+  double cumsum = 0.0;
+  for (unsigned lag = 1; lag <= max_period; lag++) {
+    const double d = 1.0 - (double)ndp_all[lag];
+    cumsum += d;
+    cmndf_all[lag] = (cumsum > 0.0) ? (float)(d * lag / cumsum) : 1.f;
+  }
+
   static constexpr float YIN_THRESHOLD = 0.15f;
-  double   cumsum      = 0.0;
-  bool     in_valley   = false;
-  float    best_cmndf  = 2.f;
-  unsigned yin_lag     = 0;
 
-  for (unsigned i = 0; i < n_lags; i++) {
-    const float d    = 1.f - ndp_vals[i];
-    cumsum          += d;
-    const float cmndf = (cumsum > 0.0)
-                        ? d * (float)(i + 1) / (float)cumsum : 1.f;
-    if (cmndf < YIN_THRESHOLD) {
-      if (!in_valley || cmndf < best_cmndf) {
-        best_cmndf = cmndf;
-        yin_lag    = min_period + i;
-        in_valley  = true;
-      } else {
-        break; // past valley bottom
+  // Collect local-minimum valleys in (min_period, max_period) — exclusive endpoints.
+  struct Valley { float cmndf; unsigned lag; float ndp; };
+  std::vector<Valley> valleys;
+  for (unsigned lag = min_period + 1; lag < max_period; lag++) {
+    const float c = cmndf_all[lag];
+    if (c < YIN_THRESHOLD && c <= cmndf_all[lag - 1] && c <= cmndf_all[lag + 1])
+      valleys.push_back({c, lag, ndp_all[lag]});
+  }
+
+  // Fallback: first continuous valley including endpoints (matches Python).
+  if (valleys.empty()) {
+    bool in_v = false; float best_c = 2.f; unsigned v_lag = 0;
+    for (unsigned lag = min_period; lag <= max_period; lag++) {
+      const float c = cmndf_all[lag];
+      if (c < YIN_THRESHOLD) {
+        if (!in_v || c < best_c) { best_c = c; v_lag = lag; in_v = true; }
+        else break;
+      } else if (in_v) break;
+    }
+    if (in_v) valleys.push_back({best_c, v_lag, ndp_all[v_lag]});
+  }
+
+  // ndp_all[1..] passed as base so RefineNDPPeak index 0 == lag 1.
+  const float *ndp_base = ndp_all.data() + 1;
+
+  double result;
+  if (!valleys.empty()) {
+    Valley chosen = valleys[0];
+    for (size_t k = 1; k < valleys.size(); k++) {
+      const Valley &v = valleys[k];
+      const bool much_deeper     = v.cmndf <= std::max(0.050f, chosen.cmndf * 0.35f);
+      const bool much_better_ndp = v.ndp   >= chosen.ndp + 0.03f;
+      bool near_int_mul = false;
+      if (chosen.lag > 0) {
+        const float ratio   = (float)v.lag / (float)chosen.lag;
+        const int   nearest = (int)std::round(ratio);
+        near_int_mul = nearest >= 2 && std::abs(ratio - (float)nearest) < 0.18f;
       }
-    } else if (in_valley) {
-      break; // rose above threshold after valley
+      if (much_deeper && (much_better_ndp || near_int_mul))
+        chosen = v;  // no break — iterate all candidates
+    }
+    result = 1.0 + RefineNDPPeak(ndp_base, chosen.lag - 1, max_period);
+  } else {
+    // Fallback: penalized NDP over search range.
+    float best_score = -2.f; unsigned best_lag = min_period;
+    for (unsigned lag = min_period; lag <= max_period; lag++) {
+      const float sc = ndp_all[lag] * (1.f - 0.10f * (float)lag / (float)max_period);
+      if (sc > best_score) { best_score = sc; best_lag = lag; }
+    }
+    result = 1.0 + RefineNDPPeak(ndp_base, best_lag - 1, max_period);
+  }
+
+  // Submultiple guard: if result ≈ expected_period/k (k=2..8) and expected_period
+  // shows good periodicity, override to expected_period (port of Python v75/v76).
+  if (expected_period > 0.0) {
+    const int exp_i = (int)std::round(expected_period);
+    const int res_i = (int)std::round(result);
+    if (exp_i >= 1 && exp_i <= (int)max_period && res_i >= 1 && res_i <= (int)max_period) {
+      const double ratio = expected_period / result;
+      const int    k     = (int)std::round(ratio);
+      if (k >= 2 && k <= 8 && std::abs(ratio - (double)k) <= 0.18) {
+        const float cm_res  = cmndf_all[res_i];
+        const float cm_exp  = cmndf_all[exp_i];
+        const float ndp_res = ndp_all[res_i];
+        const float ndp_exp = ndp_all[exp_i];
+
+        const bool exp_good           = cm_exp <= 0.03f || ndp_exp >= 0.96f;
+        const bool res_suspicious     = result < expected_period * 0.70;
+        const bool exp_not_worse      = cm_exp <= cm_res * 1.25f || ndp_exp >= ndp_res - 0.03f;
+        const bool exp_clearly_better = cm_exp <  cm_res * 0.50f || ndp_exp >  ndp_res + 0.03f;
+
+        if (exp_good && res_suspicious &&
+            (exp_not_worse || exp_clearly_better || (cm_exp <= 0.05f && ndp_exp >= 0.90f)))
+          result = 1.0 + RefineNDPPeak(ndp_base, (unsigned)exp_i - 1, max_period);
+      }
     }
   }
-  if (in_valley) {
-    unsigned idx = yin_lag - min_period;
-    return (double)min_period + RefineNDPPeak(ndp_vals.data(), idx, n_lags);
-  }
 
-  // Fallback: penalized NDP — prefers shorter periods when NDP values tie.
-  float    best_score = -2.f;
-  unsigned best_idx   = 0;
-  const float alpha   = 0.10f;
-  for (unsigned i = 0; i < n_lags; i++) {
-    const unsigned lag = min_period + i;
-    const float sc = ndp_vals[i] * (1.f - alpha * (float)lag / (float)max_period);
-    if (sc > best_score) { best_score = sc; best_idx = i; }
-  }
-  return (double)min_period + RefineNDPPeak(ndp_vals.data(), best_idx, n_lags);
+  return result;
 }
 
 // ─── v2 Backward-Tracking Algorithm ──────────────────────────────────────────
@@ -759,7 +813,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
           ac_mono[i] = (float)(s / loop_ch);
         }
         const double refined_T = EstimatePeriodByAutocorr(
-          ac_mono.data(), ac_window, min_p, max_p);
+          ac_mono.data(), ac_window, min_p, max_p, (double)T_hn);
         m_CorrPeriodSamples = (unsigned)std::round(refined_T);
         m_CorrPeriodFloat   = refined_T;
       }
