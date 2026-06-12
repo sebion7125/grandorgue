@@ -36,6 +36,17 @@ public:
   struct CorrPoint {
     uint32_t loop_pos; // absolute sample position in loop (= n * period_samples)
     uint16_t best_r;   // best release offset r* in samples, in [0, T)
+    uint8_t  flags;    // bit0=approach_up, bit1=is_jump, bit2=valid (v2 algorithm)
+    uint8_t  _pad;     // padding for 8-byte struct size
+
+    // Flag constants
+    static constexpr uint8_t kFlagApproachUp = 0x01; // travel direction to this point is forward
+    static constexpr uint8_t kFlagIsJump     = 0x02; // circ dist/dn > T/16 → step, don't interpolate
+    static constexpr uint8_t kFlagValid      = 0x04; // flags computed by v2 algorithm (else: legacy)
+
+    bool IsApproachUp() const { return (flags & kFlagApproachUp) != 0; }
+    bool IsJump()       const { return (flags & kFlagIsJump)     != 0; }
+    bool IsValid()      const { return (flags & kFlagValid)      != 0; }
   };
 
 private:
@@ -94,7 +105,11 @@ public:
     unsigned min_key_press_ms = 0,
     unsigned max_key_press_ms = 0,
     bool     permissive       = false,
-    bool     exhaustive       = false);
+    bool     exhaustive       = false
+#if __has_include("GOLogReleaseAlignEnable.h")
+    , const char *label       = nullptr
+#endif
+    );
 
   // Restore runtime attack pointers after cache load (in joinable order).
   void AssignAttackPointers(

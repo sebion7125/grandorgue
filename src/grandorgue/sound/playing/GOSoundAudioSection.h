@@ -207,6 +207,11 @@ public:
 
   inline unsigned GetLength() const { return m_SampleCount; }
 
+  // Returns the sample offset of the first sustain loop, or 0 if no loop.
+  inline unsigned GetLoopStart() const {
+    return (m_StartSegments.size() > 1) ? m_StartSegments[1].start_offset : 0;
+  }
+
   unsigned GetReleaseCrossfadeLength() const {
     return m_ReleaseCrossfadeLength;
   }
@@ -287,7 +292,11 @@ public:
     unsigned harmonic_number   = 8,
     unsigned min_key_press_ms  = 0,
     unsigned max_key_press_ms  = 0,
-    bool     skipCorrLut       = false);
+    bool     skipCorrLut       = false
+#if __has_include("GOLogReleaseAlignEnable.h")
+    , const char *label        = nullptr
+#endif
+    );
 
   void AssignAttackLutPointers(
     const std::vector<const GOSoundAudioSection *> &attacks);

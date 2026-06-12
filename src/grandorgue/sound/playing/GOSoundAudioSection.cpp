@@ -600,7 +600,11 @@ void GOSoundAudioSection::SetupStreamAlignment(
   unsigned harmonic_number,
   unsigned min_key_press_ms,
   unsigned max_key_press_ms,
-  bool     skipCorrLut) {
+  bool     skipCorrLut
+#if __has_include("GOLogReleaseAlignEnable.h")
+  , const char *label
+#endif
+  ) {
   if (m_ReleaseAligner) {
     delete m_ReleaseAligner;
     m_ReleaseAligner = NULL;
@@ -635,7 +639,11 @@ void GOSoundAudioSection::SetupStreamAlignment(
         for (const GOSoundAudioSection *pAttack : joinables)
           m_ReleaseAligner->ComputeCorrelationLut(
             *pAttack, *this, crossfade_samples, m_SampleRate, sample_freq_hz,
-            harmonic_number, min_key_press_ms, max_key_press_ms);
+            harmonic_number, min_key_press_ms, max_key_press_ms
+#if __has_include("GOLogReleaseAlignEnable.h")
+            , false, false, label
+#endif
+          );
       } else {
         // LUT cache will be applied after loading — just set the period so
         // that OverrideCorrLutsFromCache (which guards on period != 0) works.
