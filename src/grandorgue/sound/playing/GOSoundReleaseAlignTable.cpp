@@ -791,6 +791,15 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   if (r_max == 0)
     return;
 
+  // Latest sustain-loop end: upper bound for the unbounded (final) release.
+  // Spec: the final release can be triggered at any point while the attack
+  // loops — so its LUT must cover up to the latest loop-end marker.
+  // Fallback: if no sustain loops exist, use loop_len - 1.
+  const unsigned latest_loop_end = [&]() -> unsigned {
+    unsigned v = loop_section.GetLatestLoopEnd();
+    return (v > 0) ? v : (loop_len > 0 ? loop_len - 1 : 0u);
+  }();
+
   // Match Python: n_total = max(1, int((loop_len - window_len) / T_float))
   // Ensures n_last = n_total-1 stays within the loop buffer (cs + window <= loop_len).
   unsigned n_total = (loop_len > window_len)
@@ -800,8 +809,9 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     return;
 
   // n_start / n_end: restrict LUT to the key-press time window of this release.
-  // min_key_press_ms=0 means start from the beginning;
-  // max_key_press_ms=0 means cover to the end of the attack.
+  // min_key_press_ms > 0  → range starts after previous release's max time.
+  // max_key_press_ms == 0 → unbounded final release: use latest_loop_end.
+  // max_key_press_ms > 0  → bounded release: use explicit end time.
   const unsigned min_samp       = min_key_press_ms * sample_rate / 1000;
   const unsigned max_samp_limit = (max_key_press_ms > 0)
     ? max_key_press_ms * sample_rate / 1000 : 0u;
@@ -809,7 +819,8 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     ? std::max(1u, (unsigned)std::ceil((double)min_samp / T_f)) : 1u;
   unsigned n_end = (max_samp_limit > 0)
     ? std::min(n_total, (unsigned)std::ceil((double)max_samp_limit / T_f) + 2)
-    : n_total;
+    : std::min(n_total,
+               std::max(1u, (unsigned)std::ceil((double)latest_loop_end / T_f) + 2));
   if (n_start >= n_end) { n_start = 1; n_end = n_total; }
 
   // Match Python: ds = min(4, max(1, T // 100)).
@@ -1251,6 +1262,13 @@ lut_commit:
          << " loop_len=" << loop_section.GetLength()
          << " release_len=" << release_section.GetLength()
          << " r_max=" << r_max
+         << " latest_loop_end=" << latest_loop_end
+         << " loop_count=" << [&]() {
+              unsigned c = 0;
+              for (unsigned i = 0; i < loop_section.GetEndSegmentCount(); i++)
+                if (loop_section.GetEndSegment(i).next_start_segment_index >= 0) c++;
+              return c;
+            }()
          << "\n";
       // Phase-0 candidates: initial NDP peaks that seeded the tracking.
       // Format: phase0,beam_id,r_samples,score,n_last

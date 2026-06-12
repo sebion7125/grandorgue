@@ -143,6 +143,9 @@ def parse_verify_log(path: str) -> list:
                 current["release_len"]   = int(kv.get("release_len", "0"))
                 # r_max added in v214: unfolded search range for 2T comparison
                 current["r_max"]         = int(kv.get("r_max", "0"))
+                # latest_loop_end/loop_count added in v227
+                current["latest_loop_end"] = int(kv.get("latest_loop_end", "0"))
+                current["loop_count"]      = int(kv.get("loop_count", "0"))
 
             elif line.startswith("lut,") and current is not None:
                 parts = line.split(",")
@@ -502,6 +505,11 @@ def compare_entry(entry: dict, organ_path: str,
     # Pass C++ n_start/n_end directly to avoid ±1 off in n_total from
     # float-truncation, which shifts the sparse tracking grid by one period.
     try:
+        # latest_loop_end from CSV (v227+) or derived from SMPL loops.
+        latest_loop_end = entry.get("latest_loop_end") or 0
+        if latest_loop_end == 0 and loops:
+            latest_loop_end = max(l[1] for l in loops)
+
         py_lut, _ = _al.compute_lut_v2(
             attack_mono=atk_mono,
             release_mono=rel_mono,
@@ -515,6 +523,7 @@ def compare_entry(entry: dict, organ_path: str,
             max_sample=max_sample,
             _n_start_override=entry["n_start"],
             _n_end_override=entry["n_end"],
+            latest_loop_end_sample=latest_loop_end if latest_loop_end > 0 else None,
         )
     except Exception as e:
         return _skip(f"compute_error:{e}")
