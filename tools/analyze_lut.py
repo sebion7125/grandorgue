@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v206-no-fold-v2"
+TOOL_VERSION = "v207-fix-folded-meta"
 
 # ─── C++ Numerics Mode ────────────────────────────────────────────────────────
 # When enabled, NDP is computed with pre-normalised float32 scalar loops,
@@ -2232,8 +2232,8 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     meta["chosen_r_by_n"]       = chosen_r_by_n
     meta["pruned_count"]        = pruned_before - len(points)
     meta["corr_at_data"]        = None
-    meta["folded"]              = True             # im Plot auf [0,sp_T) falten wie v1
-    meta["fold_reason"]         = "v2-folded"
+    meta["folded"]              = False            # v2: r in [0,2T), kein T-Fold
+    meta["fold_reason"]         = "v2-unfolded"
     meta["wrap_period"]         = search_periods * T_int
 
     return points, meta
