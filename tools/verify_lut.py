@@ -853,9 +853,10 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
             if len(res["simsrc_diffs"]) > 5:
                 emit(f"         ... and {len(res['simsrc_diffs'])-5} more sim-logic diffs")
 
+    minor_hint = f"  (minor diffs hidden — use --verbose to show)" if minor_mis > 0 and not verbose else ""
     emit(f"\nResult: {total} entries — "
          f"OK={ok}  MISMATCH={mis} (major={major_mis} minor={minor_mis})  "
-         f"SKIP={skip}  NOT_FOUND={notfound}  ERR={errs}")
+         f"SKIP={skip}  NOT_FOUND={notfound}  ERR={errs}{minor_hint}")
     return ok, mis, skip, notfound, errs
 
 
