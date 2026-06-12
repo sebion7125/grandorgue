@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v225"
+TOOL_VERSION = "v226"
 
 # ─── C++ Numerics Mode ────────────────────────────────────────────────────────
 # When enabled, NDP is computed with pre-normalised float32 scalar loops,
@@ -5336,7 +5336,7 @@ class LUTAnalyzerApp(tk.Tk):
                 f"Tool-Version: {TOOL_VERSION}",
                 f"T_float={pa.T_float:.2f}  T_int={pa.T_int}  SR={pa.sample_rate}Hz"
                 + (f"  CMNDF: T/2={pa.cmndf_at_T_half:.3f}  T={pa.cmndf_at_T:.3f}  2T={pa.cmndf_at_2T:.3f}"
-                   if not (pa.cmndf_at_T_half != pa.cmndf_at_T_half) else ""),  # nan check
+                   if not any(v != v for v in [pa.cmndf_at_T_half, pa.cmndf_at_T, pa.cmndf_at_2T]) else ""),
                 f"Perioden-Debug: smpl_T={pa.smpl_T_float:.4f}  hn_T={pa.hn_T_float:.4f}  autocorr_T={pa.autocorr_T_float:.4f}  search=[{pa.autocorr_min_p},{pa.autocorr_max_p}]",
                 f"Attack: {pa.attack_path}",
                 f"Loop: {pa.loop_start}–{pa.loop_end}  ({pa.loop_len} Samples, {pa.n_total} Perioden)",
