@@ -1012,21 +1012,28 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
             release_mono.data(), release_needed_d,
             cs_next_d, window_len_d, r_max_d, T_d, V2_TOP_K);
           if (!fresh.empty()) {
-            // Match each fresh candidate to the nearest existing beam.
+            // Match each fresh peak to the geometrically nearest existing beam.
+            // Important: find the nearest beam WITHOUT skipping used IDs first.
+            // If two fresh peaks share the same nearest old beam, the branches
+            // have locally collapsed — assigning the second peak to the next free
+            // beam would create artificial beam crossings and chaotic histories.
+            // Instead, discard the second peak (matches Python semantics exactly).
             std::vector<bool> id_used(V2_TOP_K, false);
             std::vector<BeamState> refreshed;
             refreshed.reserve(fresh.size());
             for (const BeamState &fr : fresh) {
+              // Step 1: find nearest beam (ignore id_used).
               int best_bid  = -1;
               int best_dist = INT_MAX;
               for (const BeamState &vb : vis_cands) {
                 if (vb.beam_id < 0 || (unsigned)vb.beam_id >= V2_TOP_K) continue;
-                if (id_used[(unsigned)vb.beam_id]) continue;
                 int d = std::abs(fr.r_d - vb.r_d);
                 if (d > (int)sp_T_d / 2) d = (int)sp_T_d - d;
                 if (d < best_dist) { best_dist = d; best_bid = vb.beam_id; }
               }
               if (best_bid < 0) continue;
+              // Step 2: discard if nearest beam already claimed (no fallback).
+              if (id_used[(unsigned)best_bid]) continue;
               id_used[(unsigned)best_bid] = true;
               float prev_cum = 0.f;
               for (const BeamState &vb : vis_cands)
