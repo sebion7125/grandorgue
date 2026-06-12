@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v203-prune-cpp-iteration"
+TOOL_VERSION = "v204-cpp-autocorr-aligned-to-python"
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -2355,9 +2355,9 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.loop_len = pa.loop_end - pa.loop_start + 1
 
         # Periodenbestimmung per Autokorrelation.
-        # Suchbereich [0.5*T_hn, 1.5*T_hn] um die HN-korrigierte Tastennoten-Periode.
-        # T_hn ist bereits in pa.T_float — der Suchraum deckt ±50 % ab, was sowohl
-        # leichte Verstimmung als auch Oktavmehrdeutigkeit (T/2, 2T) abfängt.
+        # Suchbereich [0.5*T_hn, 2.0*T_hn] um die HN-korrigierte Tastennoten-Periode.
+        # T_hn ist bereits in pa.T_float — der Suchraum deckt Oktavmehrdeutigkeit
+        # (T/2, 2T) und leichte Verstimmung ab.
         T_hn_int = pa.T_int  # = round(pa.T_float) = round(T_hn)
         min_p = max(16, int(round(0.5  * T_hn_int)))
         max_p = min(sr // 20, int(round(2.0 * T_hn_int)))

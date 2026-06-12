@@ -18,7 +18,8 @@ static constexpr uint32_t GOLUT_FORMAT_VERSION = 2;
 
 // Increment when the LUT computation algorithm changes such that previously
 // cached {loop_pos, best_r} values would be incorrect for new GO builds.
-static constexpr uint32_t GOLUT_ALGORITHM_VERSION = 1;
+// v2: backward multi-beam tracking (v2 algorithm); adds approach_up/is_jump flags.
+static constexpr uint32_t GOLUT_ALGORITHM_VERSION = 2;
 
 // Magic bytes at the start of every .golut file (8 bytes incl. null).
 static constexpr char GOLUT_MAGIC[8] = {'G', 'O', 'R', 'A', 'L', 'C', '1', '\0'};
@@ -27,6 +28,8 @@ static constexpr char GOLUT_MAGIC[8] = {'G', 'O', 'R', 'A', 'L', 'C', '1', '\0'}
 struct GOLutPoint {
   uint32_t loop_pos; // absolute sample position in attack (n * period_samples)
   uint16_t best_r;   // best release offset r* in [0, T)
+  uint8_t  flags;    // approach_up/is_jump/valid — same encoding as CorrPoint::flags
+  uint8_t  _pad;     // reserved, must be 0
 };
 
 // One complete LUT for a single release: the period used during generation

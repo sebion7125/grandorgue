@@ -523,7 +523,7 @@ static void ApplyLutReaderToOrgan(
       std::vector<GOSoundReleaseAlignTable::CorrPoint> pts;
       pts.reserve(entry.points.size());
       for (const GOLutPoint &pt : entry.points)
-        pts.push_back({pt.loop_pos, pt.best_r});
+        pts.push_back({pt.loop_pos, pt.best_r, pt.flags, pt._pad});
       aligner->OverrideCorrLutsFromCache(
         std::move(pts), entry.period_samples, entry.period_float);
     }

@@ -215,14 +215,16 @@ void GOSoundingPipe::LoadReleaseFileInfo(
     MAX_SAMPLE_LENGTH,
     false,
     -1);
-  rinfo.m_ReleaseCrossfadeLength = cfg.ReadInteger(
-    ODFSetting,
-    group,
-    prefix + wxT("ReleaseCrossfadeLength"),
-    0,
-    3000,
-    false,
-    0);
+  // -1 default = key absent in ODF (ReadInteger does not range-check the default).
+  // UINT_MAX = "not set" sentinel → midiKeyCrossfadeLength fallback at load time.
+  // Explicit 0 in ODF = "no crossfade" (traktur noise / key click) → no LUT.
+  {
+    const int rawXfade = cfg.ReadInteger(
+      ODFSetting, group, prefix + wxT("ReleaseCrossfadeLength"),
+      0, 3000, false, -1);
+    rinfo.m_ReleaseCrossfadeLength
+      = (rawXfade >= 0) ? (unsigned)rawXfade : (unsigned)-1u;
+  }
   m_ReleaseFileInfos.push_back(rinfo);
 }
 
@@ -298,6 +300,15 @@ void GOSoundingPipe::Load(
 void GOSoundingPipe::LoadData(
   const GOFileStore &fileStore, GOMemoryPool &pool) {
   m_SoundProvider.SetHarmonicNumber(m_HarmonicNumber);
+#if __has_include("sound/playing/GOLogReleaseAlignEnable.h")
+  if (m_Rank) {
+    char lbl[128];
+    std::snprintf(
+      lbl, sizeof(lbl), "%s|midi=%u",
+      m_Rank->GetName().Lower().utf8_str().data(), m_MidiKeyNumber);
+    m_SoundProvider.SetLabel(lbl);
+  }
+#endif
   try {
     m_SoundProvider.LoadFromMultipleFiles(
       fileStore,

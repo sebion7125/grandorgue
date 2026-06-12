@@ -96,6 +96,8 @@ bool GOLutCacheWriter::Write(
     for (const auto &pt : entry.points) {
       put(&pt.loop_pos, sizeof(pt.loop_pos));
       put(&pt.best_r,   sizeof(pt.best_r));
+      put(&pt.flags,    sizeof(pt.flags));
+      put(&pt._pad,     sizeof(pt._pad));
     }
   }
 
@@ -224,6 +226,8 @@ bool GOLutCacheReader::Load(
       for (GOLutPoint &pt : entry.points) {
         if (!r.Read(&pt.loop_pos, sizeof(pt.loop_pos))) return false;
         if (!r.Read(&pt.best_r,   sizeof(pt.best_r)))   return false;
+        if (!r.Read(&pt.flags,    sizeof(pt.flags)))    return false;
+        if (!r.Read(&pt._pad,     sizeof(pt._pad)))     return false;
       }
     }
   }

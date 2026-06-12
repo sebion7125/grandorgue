@@ -665,26 +665,27 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
 
   // Period estimation via autocorrelation.
   //
-  // Non-octave stops (aliquots, mixtures): smpl-pitch independent broad search
-  // [16, sr/20] — the true waveform period can be far from the smpl note.
-  //
-  // Octave stops: the smpl pitch is normally reliable, but a mixture rank
-  // labelled as a power-of-2 HN can still contain odd-harmonic content that
-  // doubles the true waveform period (smpl encodes the 2nd harmonic, actual
-  // period = 2×T_smpl).  Verify by running autocorr in [T_smpl, 3×T_smpl].
+  // Search range [T_hn/2, 2*T_hn] centred on the HN-corrected working period
+  // T_hn = T_smpl * harmonic_number / 8.  This covers octave ambiguity (T/2
+  // and 2T peaks) and moderate detuning, matching the Python analyze_pipe
+  // behaviour exactly.  Read from the middle of the sustain loop region for
+  // a stable, oscillatory signal.
   if (first_call) {
     const unsigned loop_len_full = loop_section.GetLength();
     const unsigned T_smpl        = m_CorrPeriodSamples;
-    const unsigned min_p = CorrIsOctaveStop(harmonic_number)
-                           ? T_smpl                              // octave: never shorter than smpl T
-                           : 16u;                               // non-octave: full open range
-    const unsigned max_p = CorrIsOctaveStop(harmonic_number)
-                           ? std::min(T_smpl * 3u, sample_rate / 20u)
-                           : sample_rate / 20u;
+    // HN-corrected working period (same formula as Python hn_T_float).
+    const unsigned T_hn = (unsigned)std::round(
+      (double)T_smpl * harmonic_number / 8.0);
+    const unsigned min_p = std::max(16u, T_hn / 2u);
+    const unsigned max_p = std::min(sample_rate / 20u, T_hn * 2u);
 
-    if (max_p >= min_p * 2 && T_smpl >= 16u) {
+    if (max_p >= min_p * 2 && T_hn >= 16u) {
+      // Read from the middle of the sustain loop region (matches Python
+      // loop_mid = loop_start + loop_len // 2).
+      const unsigned loop_start  = loop_section.GetLoopStart();
+      const unsigned loop_len    = loop_len_full - loop_start;
+      unsigned ac_offset = loop_start + loop_len / 2;
       unsigned ac_window = 8 * max_p;
-      unsigned ac_offset = loop_len_full / 2;
       if (ac_offset + ac_window > loop_len_full)
         ac_offset = loop_len_full > ac_window ? loop_len_full - ac_window : 0;
       ac_window = std::min(ac_window, loop_len_full - ac_offset);

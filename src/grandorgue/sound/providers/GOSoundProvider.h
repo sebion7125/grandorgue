@@ -60,6 +60,11 @@ protected:
   float m_VelocityVolumeIncrement;
   unsigned m_AttackSwitchCrossfadeLength;
 
+#if __has_include("sound/playing/GOLogReleaseAlignEnable.h")
+#include <string>
+  std::string m_label;
+#endif
+
   // Debug Sollution for retrieving the rank/pipe, that is associated with the sound provider. Needed to test Rank specific Release gain model
   GOSoundingPipe* m_OwnerPipe = nullptr;
   unsigned m_OwnerRankId = 0; // optionally, the sound provider can be associated with a rank, that is used to retrieve the rank/pipe, that is associated with the sound provider. Needed to test Rank specific Release gain model
@@ -78,6 +83,10 @@ public:
   // Setters and getters for the above mentioned debug solution 
   void SetOwnerPipe(GOSoundingPipe* p) { m_OwnerPipe = p; }
   GOSoundingPipe* GetOwnerPipe() const { return m_OwnerPipe; }
+#if __has_include("sound/playing/GOLogReleaseAlignEnable.h")
+  void SetLabel(const std::string &label) { m_label = label; }
+  const std::string &GetLabel() const { return m_label; }
+#endif
   void SetSkipCorrLutCompute(bool skip) { m_skipCorrLutCompute = skip; }
   void SetHarmonicNumber(unsigned n) { m_HarmonicNumber = (n > 0) ? n : 8; }
   void SetOwnerRankId(unsigned id) { m_OwnerRankId = id; } // optional

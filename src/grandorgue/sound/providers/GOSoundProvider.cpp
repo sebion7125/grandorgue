@@ -205,7 +205,11 @@ void GOSoundProvider::ComputeReleaseAlignmentInfo() {
       const unsigned max_ms = (my_max == (unsigned)-1) ? 0u : my_max;
       m_Release[i]->SetupStreamAlignment(
         sections, 0, sample_freq_hz, m_HarmonicNumber, min_ms, max_ms,
-        m_skipCorrLutCompute);
+        m_skipCorrLutCompute
+#if __has_include("sound/playing/GOLogReleaseAlignEnable.h")
+        , m_label.empty() ? nullptr : m_label.c_str()
+#endif
+      );
     }
 
     sections.clear();
