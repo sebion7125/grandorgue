@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v207-fix-folded-meta"
+TOOL_VERSION = "v208-cpp-numerics-phase1"
 
 # ─── C++ Numerics Mode ────────────────────────────────────────────────────────
 # When enabled, NDP is computed with pre-normalised float32 scalar loops,
@@ -1876,10 +1876,20 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
     if cs_d + window_len_d > len(loop_seg) or cs_d < 0:
         return candidates, False
     lw = loop_seg[cs_d : cs_d + window_len_d]
-    na = np.linalg.norm(lw)
-    if na < 1e-12:
-        return candidates, False
-    lw_n = (lw / na).astype(np.float32)
+
+    # Normierung: C++ Numerik-Modus = float32 scalar (wie NDP_f32 in C++)
+    if _cpp_numerics_enabled:
+        lw_f32 = lw.astype(np.float32)
+        e_lw = np.einsum('i,i->', lw_f32, lw_f32, optimize=False,
+                         dtype=np.float64).astype(np.float32)
+        if e_lw < np.float32(1e-24):
+            return candidates, False
+        lw_n = (lw_f32 * (np.float32(1.0) / np.sqrt(e_lw))).astype(np.float32)
+    else:
+        na = np.linalg.norm(lw)
+        if na < 1e-12:
+            return candidates, False
+        lw_n = (lw / na).astype(np.float32)
 
     n_beams = len(candidates)
     _ratio  = _rescan_ratio if _rescan_ratio is not None else TRACKING_RESCAN_SCORE_RATIO
@@ -1900,10 +1910,20 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
         """pos2d: (n, k) int32 → scores (n, k), alle Fensterpositionen auf einmal."""
         pf   = pos2d.ravel()
         ok   = (pf >= 0) & (pf + window_len_d <= len(release_ds))
-        wins = rel_mat[np.where(ok, pf, 0)]          # (n*k, wl)
-        nrm  = np.linalg.norm(wins, axis=1)
-        ok  &= nrm > 1e-12
-        sc   = np.where(ok, wins @ lw_n / np.where(ok, nrm, 1.0), -2.0)
+        wins = rel_mat[np.where(ok, pf, 0)].astype(np.float32)   # (n*k, wl)
+        if _cpp_numerics_enabled:
+            # C++ scalar float32: einsum statt BLAS, float32-Norm
+            nrm = np.sqrt(np.einsum('rw,rw->r', wins, wins,
+                                    optimize=False).astype(np.float32))
+            ok &= nrm > np.float32(1e-12)
+            num = np.einsum('rw,w->r', wins, lw_n,
+                            optimize=False).astype(np.float32)
+            sc  = np.where(ok, num / np.where(ok, nrm, np.float32(1.0)),
+                           np.float32(-2.0))
+        else:
+            nrm = np.linalg.norm(wins, axis=1)
+            ok &= nrm > 1e-12
+            sc  = np.where(ok, wins @ lw_n / np.where(ok, nrm, 1.0), -2.0)
         return sc.reshape(pos2d.shape)
 
     # Runde 1: ±1 (3 Punkte pro Beam)
