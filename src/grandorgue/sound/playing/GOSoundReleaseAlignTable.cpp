@@ -300,8 +300,24 @@ static float NormalizedDotProduct(
 }
 
 // Estimates the true fundamental period via autocorrelation on a stable
-// excerpt of the loop sample. Returns best lag in [min_period, max_period].
-static unsigned EstimatePeriodByAutocorr(
+// Parabolic sub-sample refinement of an NDP peak.
+// Matches Python's refine_peak_parabolic: delta = 0.5*(y[i-1]-y[i+1])/(y[i-1]-2y[i]+y[i+1]).
+static double RefineNDPPeak(const float *ndp, unsigned idx, unsigned n) {
+  if (idx == 0 || idx + 1 >= n)
+    return (double)idx;
+  float ym1 = ndp[idx - 1], y0 = ndp[idx], yp1 = ndp[idx + 1];
+  float denom = ym1 - 2.f * y0 + yp1;
+  if (std::abs(denom) < 1e-12f)
+    return (double)idx;
+  float delta = 0.5f * (ym1 - yp1) / denom;
+  if (delta >  1.f) delta =  1.f;
+  if (delta < -1.f) delta = -1.f;
+  return (double)idx + delta;
+}
+
+// excerpt of the loop sample. Returns best lag in [min_period, max_period]
+// as a double for sub-sample precision (matches Python refine_peak_parabolic).
+static double EstimatePeriodByAutocorr(
   const float *samples,
   unsigned len,
   unsigned min_period,
@@ -357,18 +373,21 @@ static unsigned EstimatePeriodByAutocorr(
       break; // rose above threshold after valley
     }
   }
-  if (in_valley) return yin_lag;
+  if (in_valley) {
+    unsigned idx = yin_lag - min_period;
+    return (double)min_period + RefineNDPPeak(ndp_vals.data(), idx, n_lags);
+  }
 
   // Fallback: penalized NDP — prefers shorter periods when NDP values tie.
   float    best_score = -2.f;
-  unsigned best_lag   = min_period;
+  unsigned best_idx   = 0;
   const float alpha   = 0.10f;
   for (unsigned i = 0; i < n_lags; i++) {
     const unsigned lag = min_period + i;
     const float sc = ndp_vals[i] * (1.f - alpha * (float)lag / (float)max_period);
-    if (sc > best_score) { best_score = sc; best_lag = lag; }
+    if (sc > best_score) { best_score = sc; best_idx = i; }
   }
-  return best_lag;
+  return (double)min_period + RefineNDPPeak(ndp_vals.data(), best_idx, n_lags);
 }
 
 // ─── v2 Backward-Tracking Algorithm ──────────────────────────────────────────
@@ -701,9 +720,10 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
             s += loop_section.GetSample(ac_offset + i, c, &ac_cache);
           ac_mono[i] = (float)(s / loop_ch);
         }
-        m_CorrPeriodSamples = EstimatePeriodByAutocorr(
+        const double refined_T = EstimatePeriodByAutocorr(
           ac_mono.data(), ac_window, min_p, max_p);
-        m_CorrPeriodFloat = m_CorrPeriodSamples;
+        m_CorrPeriodSamples = (unsigned)std::round(refined_T);
+        m_CorrPeriodFloat   = refined_T;
       }
     }
   }
