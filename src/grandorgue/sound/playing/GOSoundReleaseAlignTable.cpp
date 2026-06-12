@@ -74,13 +74,17 @@ bool GOSoundReleaseAlignTable::Load(GOCache &cache) {
     return false;
 
   // ── Sparse correlation LUTs (optional — graceful on old cache files) ──────
-  // Format v3 (old): n_luts (uint32), period+crossfade, per-LUT: count + {loop_pos,best_r}.
-  // Format v4 (new): n_luts | 0x80000000 → same layout but each point also has {flags,_pad}.
+  // Format v3: n_luts (uint32), period+crossfade, per-LUT: count + {loop_pos,best_r}.
+  // Format v4: n_luts | 0x80000000 → same layout but each point also has {flags,_pad}.
+  //            best_r stored folded [0,T).
+  // Format v5: n_luts | 0x80000000 | 0x40000000 → v4 layout, best_r unfolded [0,2T).
+  //            Old v4 caches are loaded in legacy mode (flags cleared → T-modulus interp).
   uint32_t n_luts_raw = 0;
   if (!cache.Read(&n_luts_raw, sizeof(n_luts_raw)))
     return true; // EOF on old/v2 cache: not an error
-  const bool has_flags = (n_luts_raw & 0x80000000u) != 0;
-  const uint32_t n_luts = n_luts_raw & 0x7FFFFFFFu;
+  const bool has_flags    = (n_luts_raw & 0x80000000u) != 0;
+  const bool has_unfolded = (n_luts_raw & 0x40000000u) != 0; // v5: best_r in [0,2T)
+  const uint32_t n_luts   =  n_luts_raw & 0x3FFFFFFFu;
   if (n_luts > 0) {
     if (!cache.Read(&m_CorrPeriodSamples, sizeof(m_CorrPeriodSamples)))
       return false;
@@ -103,6 +107,10 @@ bool GOSoundReleaseAlignTable::Load(GOCache &cache) {
         if (has_flags) {
           if (!cache.Read(&cp.flags, sizeof(cp.flags))) return false;
           if (!cache.Read(&cp._pad,  sizeof(cp._pad)))  return false;
+          // v4 cache has folded best_r [0,T); clear flags so GetPositionForCorrelation
+          // uses legacy T-modulus path and the old values remain correct.
+          if (!has_unfolded)
+            cp.flags = 0;
         } else {
           cp.flags = 0;
           cp._pad  = 0;
@@ -123,9 +131,9 @@ bool GOSoundReleaseAlignTable::Save(GOCacheWriter &cache) {
   if (!cache.Write(&m_PositionEntries, sizeof(m_PositionEntries)))
     return false;
 
-  // ── Sparse correlation LUTs (v4 format: n_luts | 0x80000000 → has flags) ──
+  // ── Sparse correlation LUTs (v5 format: 0x80000000=has_flags, 0x40000000=unfolded) ──
   const uint32_t n_luts_raw =
-    (uint32_t)m_CorrLuts.size() | 0x80000000u; // v4: high bit = flags present
+    (uint32_t)m_CorrLuts.size() | 0x80000000u | 0x40000000u; // v5: flags + unfolded
   if (!cache.Write(&n_luts_raw, sizeof(n_luts_raw)))
     return false;
   if (!m_CorrLuts.empty()) {
