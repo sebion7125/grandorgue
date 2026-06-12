@@ -416,6 +416,10 @@ static constexpr unsigned V2_DENSE_N_LIMIT    = 35;
 static constexpr unsigned V2_DN_SPARSE        = 6;
 static constexpr float    V2_RESCAN_RATIO     = 0.90f;
 static constexpr float    V2_RESCAN_DRIFT     = 8.0f;  // original samples
+// Epsilon for deterministic beam tiebreaking: if two beams differ in cumulative
+// score by less than this value, prefer the one with the lower beam_id (= higher
+// Phase-0 NDP peak). Absorbs BLAS-vs-scalar float32 drift (~4e-3 over 400 steps).
+static constexpr float    V2_BEAM_SORT_EPS    = 0.02f;
 static constexpr unsigned V2_JUMP_RATE_FACTOR = 16;    // T/16 per period
 static constexpr unsigned V2_MAX_PRUNE_GAP_N  = 50;
 static constexpr float    V2_PRUNE_TOL_FACTOR = 32.0f; // T/32 Douglas-Peucker
@@ -466,8 +470,12 @@ static std::vector<BeamState> FullScanV2(
     if (left_ok && right_ok)
       peaks.push_back(i);
   }
+  // Sort by score descending; tiebreak by position ascending (deterministic).
   std::sort(peaks.begin(), peaks.end(),
-            [&](unsigned a, unsigned b) { return sc[a] > sc[b]; });
+            [&](unsigned a, unsigned b) {
+              if (sc[a] != sc[b]) return sc[a] > sc[b];
+              return a < b;
+            });
 
   const float best_sc   = peaks.empty() ? -2.f : sc[peaks[0]];
   const float sc_cutoff = best_sc - 0.40f; // BRANCH_SCORE_MARGIN
@@ -581,10 +589,14 @@ static TrackResult TrackStepV2(
       {best_r, best_sc, b.r_d, (int)dn, b.cum_score + best_sc, b.beam_id});
   }
 
-  // Sort by cumulative score descending.
+  // Sort by cumulative score descending; within V2_BEAM_SORT_EPS tiebreak by
+  // beam_id ascending. This makes the winner selection deterministic even when
+  // BLAS-vs-scalar float32 causes sub-epsilon score differences.
   std::sort(new_beams.begin(), new_beams.end(),
             [](const BeamState &a, const BeamState &b) {
-              return a.cum_score > b.cum_score;
+              if (std::abs(a.cum_score - b.cum_score) > V2_BEAM_SORT_EPS)
+                return a.cum_score > b.cum_score;
+              return a.beam_id < b.beam_id;
             });
 
   // Spatial deduplication: keep at most top_k beams with min distance.
