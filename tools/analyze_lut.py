@@ -31,7 +31,45 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v204-cpp-autocorr-aligned-to-python"
+TOOL_VERSION = "v205-cpp-numerics"
+
+# ─── C++ Numerics Mode ────────────────────────────────────────────────────────
+# When enabled, NDP is computed with pre-normalised float32 scalar loops,
+# matching C++ NDP_f32 in GOSoundReleaseAlignTable.cpp exactly.
+# Without numba the einsum fallback is close but not byte-identical.
+_cpp_numerics_enabled: bool = False
+
+def set_cpp_numerics(enabled: bool) -> None:
+    global _cpp_numerics_enabled
+    _cpp_numerics_enabled = bool(enabled)
+
+def get_cpp_numerics() -> bool:
+    return _cpp_numerics_enabled
+
+# Try to JIT-compile a byte-identical scalar loop (requires: pip install numba)
+_CPP_NUMERICS_BACKEND = "einsum"
+try:
+    import numba as _numba
+
+    @_numba.njit(cache=True, fastmath=False, nogil=True)
+    def _ndp_scan_numba(lw_n: np.ndarray, rel_f32: np.ndarray,
+                        r_max: int, W: int) -> np.ndarray:
+        """Scalar float32 NDP scan — byte-identical to C++ NDP_f32."""
+        scores = np.empty(r_max, dtype=np.float32)
+        for r in range(r_max):
+            num = np.float32(0.0)
+            er  = np.float32(0.0)
+            for i in range(W):
+                v = rel_f32[r + i]
+                num += lw_n[i] * v
+                er  += v * v
+            denom = np.sqrt(er)
+            scores[r] = num / denom if denom > np.float32(1e-12) else np.float32(0.0)
+        return scores
+
+    _CPP_NUMERICS_BACKEND = "numba"
+except Exception:
+    pass  # numba not available → einsum fallback
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -658,8 +696,40 @@ def _compute_corr_scores(lw: np.ndarray, release_mono: np.ndarray,
     Rückgabe: (scores: np.ndarray, r_max_actual: int) oder (None, 0) bei Fehler."""
     if r_max + window_len > len(release_mono):
         r_max = max(1, len(release_mono) - window_len)
+    if r_max <= 0:
+        return None, 0
+
+    if _cpp_numerics_enabled:
+        # ── C++ Numerik: pre-normiertes float32, skalare Schleife ──────────
+        # Entspricht C++ FullScanV2 / NDP_f32 in GOSoundReleaseAlignTable.cpp
+        lw_f32 = lw.astype(np.float32)
+        # Norm in float32 (wie C++: e_lw = sum(lw[i]^2), inv_lw = 1/sqrt(e_lw))
+        e_lw = np.einsum('i,i->', lw_f32, lw_f32, optimize=False,
+                         dtype=np.float64).astype(np.float32)
+        if e_lw < np.float32(1e-24):
+            return None, 0
+        lw_n = (lw_f32 * (np.float32(1.0) / np.sqrt(e_lw))).astype(np.float32)
+        rel_f32 = release_mono[:r_max + window_len].astype(np.float32)
+        if _CPP_NUMERICS_BACKEND == "numba":
+            scores = _ndp_scan_numba(lw_n, rel_f32, r_max, window_len)
+        else:
+            # einsum mit optimize=False → umgeht BLAS SGEMV (näherungsweise C++)
+            from numpy.lib.stride_tricks import as_strided
+            s = rel_f32.strides[0]
+            wins = as_strided(rel_f32, shape=(r_max, window_len), strides=(s, s))
+            nums = np.einsum('rw,w->r', wins, lw_n,
+                             optimize=False).astype(np.float32)
+            er   = np.einsum('rw,rw->r', wins, wins,
+                             optimize=False).astype(np.float32)
+            norms_f32 = np.sqrt(er)
+            ok = norms_f32 > np.float32(1e-12)
+            scores = np.where(ok, nums / np.where(ok, norms_f32, np.float32(1.0)),
+                              np.float32(0.0)).astype(np.float32)
+        return scores, r_max
+
+    # ── Standard: Python BLAS (numpy) ──────────────────────────────────────
     na = np.linalg.norm(lw)
-    if na < 1e-12 or r_max <= 0:
+    if na < 1e-12:
         return None, 0
     lw_n = lw / na
     from numpy.lib.stride_tricks import as_strided
@@ -4689,6 +4759,21 @@ class LUTAnalyzerApp(tk.Tk):
                        bg=C_BG3, fg="#ffaa44",
                        selectcolor=C_BG2, activebackground=C_BG3,
                        activeforeground="#ffaa44",
+                       font=("Consolas", 10)
+                       ).pack(side=tk.LEFT, padx=(4, 4))
+
+        # C++ Numerik: skalare float32-Schleifen statt numpy BLAS
+        _backend_hint = " (numba)" if _CPP_NUMERICS_BACKEND == "numba" else " (einsum)"
+        self._cpp_num_var = tk.BooleanVar(value=False)
+        def _on_cpp_num_toggle(*_):
+            set_cpp_numerics(self._cpp_num_var.get())
+            self._on_algorithm_toggle()  # invalidiert Cache + reanalysiert aktuelle Pfeife
+        self._cpp_num_var.trace_add("write", _on_cpp_num_toggle)
+        tk.Checkbutton(toolbar, text=f"C++ Numerik{_backend_hint}",
+                       variable=self._cpp_num_var,
+                       bg=C_BG3, fg="#44ccff",
+                       selectcolor=C_BG2, activebackground=C_BG3,
+                       activeforeground="#44ccff",
                        font=("Consolas", 10)
                        ).pack(side=tk.LEFT, padx=(4, 4))
 

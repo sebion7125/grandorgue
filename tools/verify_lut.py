@@ -854,8 +854,14 @@ def run_gui():
     var_organ   = _tk.StringVar(value=settings.get("organ",   ""))
     var_filter  = _tk.StringVar(value=settings.get("filter",  ""))
     var_workers = _tk.IntVar(   value=settings.get("workers", os.cpu_count() or 4))
-    var_status  = _tk.StringVar(value="Ready")
-    var_prog    = _tk.DoubleVar(value=0.0)
+    var_status      = _tk.StringVar(value="Ready")
+    var_prog        = _tk.DoubleVar(value=0.0)
+    var_cpp_num     = _tk.BooleanVar(value=settings.get("cpp_numerics", False))
+
+    def _apply_cpp_numerics(*_):
+        _al.set_cpp_numerics(var_cpp_num.get())
+    var_cpp_num.trace_add("write", _apply_cpp_numerics)
+    _al.set_cpp_numerics(var_cpp_num.get())  # apply on startup
 
     # ── File pickers ──────────────────────────────────────────────────────────
     def browse_log():
@@ -895,6 +901,9 @@ def run_gui():
     _ttk.Entry(filter_row, textvariable=var_filter, width=30).pack(side="left")
     _ttk.Label(filter_row, text="  Workers:").pack(side="left")
     _ttk.Spinbox(filter_row, from_=1, to=64, textvariable=var_workers, width=5).pack(side="left")
+    _backend_hint = " (numba)" if _al._CPP_NUMERICS_BACKEND == "numba" else " (einsum)"
+    _ttk.Checkbutton(filter_row, text=f"  C++ Numerik{_backend_hint}",
+                     variable=var_cpp_num).pack(side="left", padx=(12, 0))
     top.columnconfigure(1, weight=1)
 
     # Buttons
@@ -968,6 +977,7 @@ def run_gui():
             "log": log_p, "organ": organ_p,
             "filter": var_filter.get(),
             "workers": var_workers.get(),
+            "cpp_numerics": var_cpp_num.get(),
         })
 
         out.config(state="normal")
@@ -1028,6 +1038,9 @@ def main():
                     help="Print all LUT points including matching ones")
     ap.add_argument("--sim-only",  "-s", action="store_true",
                     help="Skip LUT comparison, only test simulator outputs")
+    ap.add_argument("--cpp-numerics", "-c", action="store_true",
+                    help="Use C++-style scalar float32 NDP (pre-normalized, "
+                         "no BLAS) for Python comparison")
     ap.add_argument("--workers",   "-j", type=int, default=os.cpu_count() or 4, metavar="N",
                     help=f"Parallel worker threads (default: {os.cpu_count() or 4})")
     args = ap.parse_args()
@@ -1046,6 +1059,9 @@ def main():
     if not os.path.isfile(args.organ):
         print(f"Organ file not found: {args.organ}", file=sys.stderr)
         sys.exit(1)
+
+    if args.cpp_numerics:
+        _al.set_cpp_numerics(True)
 
     result = run_analysis(
         args.log, args.organ,
