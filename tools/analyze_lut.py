@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v208-cpp-numerics-phase1"
+TOOL_VERSION = "v209-cpp-numerics-f32-cumsc"
 
 # ─── C++ Numerics Mode ────────────────────────────────────────────────────────
 # When enabled, NDP is computed with pre-normalised float32 scalar loops,
@@ -1956,7 +1956,13 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
         drift_d = min(drift_d, sp_T_d - drift_d)
         if bsc < _ratio * max(0.05, sc_prev) or drift_d * ds > TRACKING_RESCAN_DRIFT:
             needs_rescan = True
-        new_cands.append((br, bsc, r_d, dn, cum_sc + bsc, beam_id))
+        # C++ Numerik: Kumulative Score in float32 akkumulieren (wie C++ float cum_score).
+        # Python float64 akkumuliert über 4000 Steps ~2.4e-4 anders als float32 in C++.
+        if _cpp_numerics_enabled:
+            new_cum = float(np.float32(cum_sc) + np.float32(bsc))
+        else:
+            new_cum = cum_sc + bsc
+        new_cands.append((br, bsc, r_d, dn, new_cum, beam_id))
 
     # Kandidaten nach Score sortieren, dann räumlich zu nahe liegende entfernen
     new_cands.sort(key=lambda x: x[4], reverse=True)
@@ -2058,6 +2064,10 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         cands = _ensure_per_window_candidates(raw_cands_d, scores_d, T_int_d, search_periods)
         cands = sorted(cands, key=lambda x: x[1], reverse=True)[:(_top_k if _top_k else BRANCH_TOP_K)]
         # State: (r_d, score, r_d_prev=r_d, dn_prev=1, cumulative_score, beam_id)
+        # C++ Numerik: initialer cum_score als float32 (wie C++ BeamState.cum_score).
+        if _cpp_numerics_enabled:
+            return [(r_d, float(np.float32(sc)), r_d, 1, float(np.float32(sc)), i)
+                    for i, (r_d, sc) in enumerate(cands)]
         return [(r_d, float(sc), r_d, 1, float(sc), i) for i, (r_d, sc) in enumerate(cands)]
 
     # ── Phase 0: Voller Scan bei n_end → Primärstrahl initialisieren ─────────
