@@ -737,6 +737,16 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
         emit("Local disk detected — workers load WAVs in parallel.")
 
     ok = mis = skip = notfound = errs = 0
+    # ProcessPoolExecutor spawns fresh interpreter processes — module-level globals
+    # like _al._cpp_numerics_enabled are NOT inherited. Pass them via initializer.
+    def _worker_init(cpp_num: bool) -> None:
+        _al.set_cpp_numerics(cpp_num)
+
+    _pool_kwargs: dict = {}
+    if use_processes:
+        _pool_kwargs["initializer"] = _worker_init
+        _pool_kwargs["initargs"]    = (_al.get_cpp_numerics(),)
+
     PoolClass = (concurrent.futures.ProcessPoolExecutor if use_processes
                  else concurrent.futures.ThreadPoolExecutor)
 
@@ -755,7 +765,7 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
         # Do NOT use "with pool:" — the context manager calls shutdown(wait=True)
         # on __exit__, blocking until all workers finish even after cancel.
         # We manage the pool manually so cancel returns immediately.
-        pool = PoolClass(max_workers=n_workers)
+        pool = PoolClass(max_workers=n_workers, **_pool_kwargs)
         futures_to_idx: dict = {}
         ordered = [None] * total
         completed = 0
