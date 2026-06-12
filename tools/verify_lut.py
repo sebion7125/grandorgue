@@ -885,6 +885,7 @@ def run_gui():
     var_status      = _tk.StringVar(value="Ready")
     var_prog        = _tk.DoubleVar(value=0.0)
     var_cpp_num     = _tk.BooleanVar(value=settings.get("cpp_numerics", False))
+    var_verbose     = _tk.BooleanVar(value=settings.get("verbose",      False))
 
     def _apply_cpp_numerics(*_):
         _al.set_cpp_numerics(var_cpp_num.get())
@@ -932,6 +933,8 @@ def run_gui():
     _backend_hint = " (numba)" if _al._CPP_NUMERICS_BACKEND == "numba" else " (einsum)"
     _ttk.Checkbutton(filter_row, text=f"  C++ Numerik{_backend_hint}",
                      variable=var_cpp_num).pack(side="left", padx=(12, 0))
+    _ttk.Checkbutton(filter_row, text="  Verbose",
+                     variable=var_verbose).pack(side="left", padx=(8, 0))
     top.columnconfigure(1, weight=1)
 
     # Buttons
@@ -1006,6 +1009,7 @@ def run_gui():
             "filter": var_filter.get(),
             "workers": var_workers.get(),
             "cpp_numerics": var_cpp_num.get(),
+            "verbose": var_verbose.get(),
         })
 
         out.config(state="normal")
@@ -1022,6 +1026,7 @@ def run_gui():
                 log_p, organ_p,
                 filter_str=var_filter.get(),
                 workers=var_workers.get(),
+                verbose=var_verbose.get(),
                 line_cb=lambda s: q.put(("line", s)),
                 progress_cb=lambda d, t: q.put(("progress", d, t)),
                 cancel_event=cancel_ev,
