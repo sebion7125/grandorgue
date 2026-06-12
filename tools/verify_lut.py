@@ -668,6 +668,11 @@ def _save_settings(s: dict):
         pass
 
 
+# Module-level initializer for ProcessPoolExecutor workers (must be picklable).
+def _worker_init(cpp_num: bool) -> None:
+    _al.set_cpp_numerics(cpp_num)
+
+
 # ── Core analysis (shared by CLI and GUI) ────────────────────────────────────
 
 def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
@@ -739,9 +744,7 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
     ok = mis = skip = notfound = errs = 0
     # ProcessPoolExecutor spawns fresh interpreter processes — module-level globals
     # like _al._cpp_numerics_enabled are NOT inherited. Pass them via initializer.
-    def _worker_init(cpp_num: bool) -> None:
-        _al.set_cpp_numerics(cpp_num)
-
+    # _worker_init is defined at module level (required for pickling).
     _pool_kwargs: dict = {}
     if use_processes:
         _pool_kwargs["initializer"] = _worker_init
