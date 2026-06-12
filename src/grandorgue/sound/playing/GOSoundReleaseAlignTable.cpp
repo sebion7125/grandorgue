@@ -1140,9 +1140,12 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
 lut_commit:
   // Convert to CorrPoint and append LUT entry.
   std::vector<CorrPoint> points;
+  // Unfolded r values for CSV logging (v2 path only): r in [0,2T) before fold.
+  std::vector<int> v2_r_raw;
   if (!v2_pts.empty()) {
     // v2 path: fold r into [0,T) and encode direction/jump flags.
     points.reserve(v2_pts.size());
+    v2_r_raw.reserve(v2_pts.size());
     for (const V2TrackPt &p : v2_pts) {
       uint8_t flags = CorrPoint::kFlagValid;
       if (p.approach_up) flags |= CorrPoint::kFlagApproachUp;
@@ -1150,6 +1153,7 @@ lut_commit:
       const int r_fold = ((p.r % (int)m_CorrPeriodSamples)
                           + (int)m_CorrPeriodSamples)
                          % (int)m_CorrPeriodSamples;
+      v2_r_raw.push_back(p.r);  // save unfolded r for CSV
       points.push_back({p.loop_pos, (uint16_t)r_fold, flags, 0u});
     }
   } else {
@@ -1238,6 +1242,7 @@ lut_commit:
          << " sample_rate=" << sample_rate
          << " loop_len=" << loop_section.GetLength()
          << " release_len=" << release_section.GetLength()
+         << " r_max=" << r_max
          << "\n";
       // Phase-0 candidates: initial NDP peaks that seeded the tracking.
       // Format: phase0,beam_id,r_samples,score,n_last
@@ -1247,11 +1252,15 @@ lut_commit:
            << "," << b.score
            << "," << phase0_n_last
            << "\n";
-      for (const CorrPoint &p : pts) {
+      for (size_t i = 0; i < pts.size(); ++i) {
+        const CorrPoint &p = pts[i];
         const unsigned n = (unsigned)std::round((double)p.loop_pos / T_f);
+        // r_raw: unfolded r in [0,2T) from v2 path; folded best_r for exhaustive path.
+        const int r_raw = (i < v2_r_raw.size()) ? v2_r_raw[i] : (int)p.best_r;
         vf << "lut," << n << "," << p.loop_pos << "," << p.best_r
            << "," << (p.IsApproachUp() ? 1 : 0)
            << "," << (p.IsJump() ? 1 : 0)
+           << "," << r_raw
            << "\n";
       }
       // Simulator samples: ~50-point grid + last n so Python can verify

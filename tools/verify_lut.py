@@ -141,15 +141,22 @@ def parse_verify_log(path: str) -> list:
                 current["sample_rate"]   = int(kv.get("sample_rate", "44100"))
                 current["loop_len"]      = int(kv.get("loop_len", "0"))
                 current["release_len"]   = int(kv.get("release_len", "0"))
+                # r_max added in v214: unfolded search range for 2T comparison
+                current["r_max"]         = int(kv.get("r_max", "0"))
 
             elif line.startswith("lut,") and current is not None:
                 parts = line.split(",")
-                # lut,n,loop_pos,best_r,approach_up,is_jump
+                # lut,n,loop_pos,best_r,approach_up,is_jump[,r_raw]
+                # best_r: folded to [0,T)  (used for runtime sim comparison)
+                # r_raw:  unfolded [0,2T) added in v214 (used for 2T LUT comparison)
                 if len(parts) >= 6:
+                    best_r = int(parts[3])
+                    r_raw  = int(parts[6]) if len(parts) >= 7 else best_r
                     current["lut"].append({
                         "n":           int(parts[1]),
                         "loop_pos":    int(parts[2]),
-                        "best_r":      int(parts[3]),
+                        "best_r":      best_r,   # folded, for sim interpolation
+                        "r_raw":       r_raw,     # unfolded [0,2T), for LUT diff
                         "approach_up": parts[4].strip() != "0",
                         "is_jump":     parts[5].strip() != "0",
                     })
@@ -516,15 +523,13 @@ def compare_entry(entry: dict, organ_path: str,
     except Exception as e:
         return _skip(f"compute_error:{e}")
 
-    def _fold(r: int) -> int:
-        """Fold release offset into [0, T_int) — matches C++ lut_commit folding."""
-        return int(r) % T_int if T_int > 0 else int(r)
-
     # ── LUT comparison ─────────────────────────────────────────────────────────
-    # Match by loop_pos (±T_float/2 tolerance), NOT by n.
-    # Reason: C++ and Python may compute slightly different T_float values from
-    # autocorr, making n = round(loop_pos / T_float) differ by several indices
-    # even though both refer to the same physical crossfade position.
+    # Compare in [0, 2T) space so cross-period divergences are detected correctly.
+    # go r_raw: unfolded [0,2T) from new CSV (v214+); falls back to folded best_r
+    # for old CSV files (both values then in [0,T), circ_dist still works fine).
+    # py best_r: already in [0, 2T) from compute_lut_v2 (never folded in Python).
+    r_mod = entry.get("r_max") or (2 * T_int)  # comparison modulus
+
     lut_diffs = []
     if not sim_only:
         tol = max(1, int(T_float / 2))
@@ -562,12 +567,14 @@ def compare_entry(entry: dict, organ_path: str,
 
         for glp, (gp, pp) in sorted(go_matched.items()):
             n_go = gp["n"]
+            # go_r_raw: unfolded [0,2T) from new CSV, or folded best_r for old CSV
+            go_r_raw = gp.get("r_raw", gp["best_r"])
             if pp is None:
                 lut_diffs.append({"n": n_go, "issue": "PY_MISSING",
-                                  "go_r": gp["best_r"], "py_r": None})
+                                  "go_r": go_r_raw, "py_r": None})
             else:
-                py_r_folded = _fold(pp.best_r)
-                dist = circ_dist(gp["best_r"], py_r_folded, T_int)
+                py_r_raw = int(pp.best_r)  # [0, 2T) from compute_lut_v2
+                dist = circ_dist(go_r_raw, py_r_raw, r_mod)
                 flags_ok = (gp["approach_up"] == pp.approach_up
                             and gp["is_jump"]  == pp.is_jump)
                 if dist > 1 or not flags_ok:
@@ -575,7 +582,7 @@ def compare_entry(entry: dict, organ_path: str,
                         "n": n_go,
                         "issue": ("MISMATCH_r" if dist > 1 else "") +
                                  ("_flags" if not flags_ok else ""),
-                        "go_r":  gp["best_r"],  "py_r":  py_r_folded,
+                        "go_r":  go_r_raw,  "py_r":  py_r_raw,
                         "dist":  dist,
                         "go_up": gp["approach_up"], "py_up": pp.approach_up,
                         "go_jmp":gp["is_jump"],     "py_jmp":pp.is_jump,
@@ -583,7 +590,7 @@ def compare_entry(entry: dict, organ_path: str,
 
         for pp in unmatched_py:
             lut_diffs.append({"n": pp.n, "issue": "GO_MISSING",
-                              "go_r": None, "py_r": _fold(pp.best_r)})
+                              "go_r": None, "py_r": int(pp.best_r)})
 
     # ── Simulator comparison ──────────────────────────────────────────────────
     # sim_diffs:    C++ sim (GO LUT)  vs  Python C++-compat sim (Python LUT)
@@ -614,6 +621,7 @@ def compare_entry(entry: dict, organ_path: str,
     # Only large Δr (> T/8) is acoustically relevant.
     max_sim_dr    = max((d["dist"] for d in sim_diffs),    default=0)
     max_simsrc_dr = max((d["dist"] for d in simsrc_diffs), default=0)
+    max_lut_dr    = max((d.get("dist", 0) for d in lut_diffs), default=0)
     # Structural LUT difference: different number of points
     lut_count_diff = abs(len(go_lut_dict) - len(py_lut_dict))
 
@@ -636,6 +644,7 @@ def compare_entry(entry: dict, organ_path: str,
         "status":      status,
         "severity":    severity,
         "max_sim_dr":  max_sim_dr,
+        "max_lut_dr":  max_lut_dr,
         "go_pts":      len(go_lut_dict),
         "py_pts":      len(py_lut_dict),
         "lut_diffs":   lut_diffs,
@@ -817,7 +826,7 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
             if has_ssrc: tags.append(f"SIM_LOGIC:{len(res['simsrc_diffs'])}")
             if has_sim and not has_ssrc: tags.append(f"SIM_FROM_LUT:{len(res['sim_diffs'])}")
             sev_tag = "" if sev == "major" else f" [{sev}]"
-            max_dr = res.get("max_sim_dr", 0)
+            max_dr = max(res.get("max_lut_dr", 0), res.get("max_sim_dr", 0))
             emit(f"  DIFF{sev_tag} {res['label']:50s} {rel:20s} go={res.get('go_pts','?'):3} py={res.get('py_pts','?'):3}  [{', '.join(tags)}]  maxΔr={max_dr}")
             for d in res["lut_diffs"][:10]:
                 if d.get("issue","").startswith("MISMATCH") or d.get("issue","") in ("GO_MISSING","PY_MISSING"):
