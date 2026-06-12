@@ -212,6 +212,22 @@ public:
     return (m_StartSegments.size() > 1) ? m_StartSegments[1].start_offset : 0;
   }
 
+  // Returns the latest loop-end sample position across all sustain loops,
+  // or 0 if no sustain loops exist.
+  // end_seg.end_pos = loop.m_EndPosition + 1 (exclusive), so end = end_pos - 1.
+  // next_start_segment_index >= 0 identifies loop ends (vs. release end = -1).
+  inline unsigned GetLatestLoopEnd() const {
+    unsigned latest = 0;
+    for (const auto &seg : m_EndSegments)
+      if (seg.next_start_segment_index >= 0 && seg.end_pos > 0)
+        latest = std::max(latest, seg.end_pos - 1);
+    return latest;
+  }
+
+  inline unsigned GetEndSegmentCount() const {
+    return (unsigned)m_EndSegments.size();
+  }
+
   unsigned GetReleaseCrossfadeLength() const {
     return m_ReleaseCrossfadeLength;
   }

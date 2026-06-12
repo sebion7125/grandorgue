@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v226"
+TOOL_VERSION = "v227"
 
 # ─── C++ Numerics Mode ────────────────────────────────────────────────────────
 # When enabled, NDP is computed with pre-normalised float32 scalar loops,
@@ -1997,7 +1997,8 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
                    downsampling: bool = True,
                    _top_k: int = None, _window_half: int = None,
                    _min_peak_dist: int = None, _rescan_ratio: float = None,
-                   _n_start_override: int = None, _n_end_override: int = None) -> tuple:
+                   _n_start_override: int = None, _n_end_override: int = None,
+                   latest_loop_end_sample: Optional[int] = None) -> tuple:
     """Rückwärts-Tracking-Ersatz für compute_lut().
 
     Algorithmus:
@@ -2038,7 +2039,15 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     if max_sample is not None:
         max_sample = max(min_sample + 1, max_sample)
     n_start = max(1, int(math.ceil(min_sample / T_float)))
-    n_end   = n_total if max_sample is None else min(n_total, int(math.ceil(max_sample / T_float)) + 2)
+    if max_sample is None:
+        # Unbounded (final) release: use latest_loop_end_sample as upper bound.
+        # Spec: LUT must cover up to the latest attack-loop end, not WAV length.
+        if latest_loop_end_sample is not None and latest_loop_end_sample > 0:
+            n_end = min(n_total, int(math.ceil(latest_loop_end_sample / T_float)) + 2)
+        else:
+            n_end = n_total
+    else:
+        n_end = min(n_total, int(math.ceil(max_sample / T_float)) + 2)
     if n_start >= n_end:
         n_start, n_end = 1, n_total
 
@@ -2467,9 +2476,13 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         if loops:
             pa.loop_start = loops[0][0]
             pa.loop_end   = loops[0][1]
+            # Spec: für unbounded releases muss LUT bis zum LETZTEN Loop-End reichen,
+            # nicht nur bis zum ersten. max() über alle gültigen Loop-Enden.
+            pa.latest_loop_end = max(l[1] for l in loops)
         else:
             pa.loop_start = 0
             pa.loop_end   = len(atk_mono) - 1
+            pa.latest_loop_end = pa.loop_end
         pa.loop_len = pa.loop_end - pa.loop_start + 1
 
         # Periodenbestimmung per Autokorrelation.
@@ -2528,9 +2541,10 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.max_sample = (int(pa.max_key_press_ms * sr / 1000)
                          if pa.max_key_press_ms is not None else None)
 
-        # C++ loads the attack section only up to loop_end (GOSoundAudioSection
-        # length = loop_end + 1).  Truncate here so n_total matches C++ exactly.
-        atk_for_lut = atk_mono[:pa.loop_end + 1]
+        # Truncate attack to latest_loop_end (spec: LUT must not exceed latest loop end).
+        # C++ loop_section.GetLength() = total WAV samples; latest_loop_end from SMPL.
+        latest_loop_end = getattr(pa, "latest_loop_end", pa.loop_end)
+        atk_for_lut = atk_mono[:latest_loop_end + 1]
 
         _lut_fn = compute_lut_v2 if desc.get("use_v2", False) else compute_lut
         pa.lut_points, lut_meta = _lut_fn(
@@ -2545,6 +2559,7 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             min_sample=pa.min_sample,
             max_sample=pa.max_sample,
             downsampling=desc.get("downsampling", True),
+            latest_loop_end_sample=latest_loop_end if latest_loop_end > 0 else None,
         )
         pa.lut_method              = lut_meta.get("lut_method", "v1")
         pa.lut_all_candidates_by_n = lut_meta.get("all_candidates_by_n", {})
