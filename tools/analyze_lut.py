@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v205-cpp-numerics"
+TOOL_VERSION = "v206-no-fold-v2"
 
 # ─── C++ Numerics Mode ────────────────────────────────────────────────────────
 # When enabled, NDP is computed with pre-normalised float32 scalar loops,
@@ -1986,6 +1986,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         "drift_residual": 0.0, "max_interp_gap_n": 0,
         "dense_step_used": TRACKING_DN_SPARSE,
         "lut_method": "v2",
+        "folded": False,  # v2 stores r in [0,2T) — no T-fold
     }
 
     if window_len < 4 or loop_len < window_len or release_len < window_len:

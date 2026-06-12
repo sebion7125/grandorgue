@@ -1140,21 +1140,14 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
 lut_commit:
   // Convert to CorrPoint and append LUT entry.
   std::vector<CorrPoint> points;
-  // Unfolded r values for CSV logging (v2 path only): r in [0,2T) before fold.
-  std::vector<int> v2_r_raw;
   if (!v2_pts.empty()) {
-    // v2 path: fold r into [0,T) and encode direction/jump flags.
+    // v2 path: store r in [0,2T) — NO fold.  Flags encode direction/jump.
     points.reserve(v2_pts.size());
-    v2_r_raw.reserve(v2_pts.size());
     for (const V2TrackPt &p : v2_pts) {
       uint8_t flags = CorrPoint::kFlagValid;
       if (p.approach_up) flags |= CorrPoint::kFlagApproachUp;
       if (p.is_jump)     flags |= CorrPoint::kFlagIsJump;
-      const int r_fold = ((p.r % (int)m_CorrPeriodSamples)
-                          + (int)m_CorrPeriodSamples)
-                         % (int)m_CorrPeriodSamples;
-      v2_r_raw.push_back(p.r);  // save unfolded r for CSV
-      points.push_back({p.loop_pos, (uint16_t)r_fold, flags, 0u});
+      points.push_back({p.loop_pos, (uint16_t)p.r, flags, 0u});
     }
   } else {
     // exhaustive path: no v2 flags (legacy runtime behaviour).
@@ -1252,15 +1245,12 @@ lut_commit:
            << "," << b.score
            << "," << phase0_n_last
            << "\n";
-      for (size_t i = 0; i < pts.size(); ++i) {
-        const CorrPoint &p = pts[i];
+      for (const CorrPoint &p : pts) {
         const unsigned n = (unsigned)std::round((double)p.loop_pos / T_f);
-        // r_raw: unfolded r in [0,2T) from v2 path; folded best_r for exhaustive path.
-        const int r_raw = (i < v2_r_raw.size()) ? v2_r_raw[i] : (int)p.best_r;
+        // best_r is unfolded [0,2T) for v2 path; legacy exhaustive path keeps [0,T).
         vf << "lut," << n << "," << p.loop_pos << "," << p.best_r
            << "," << (p.IsApproachUp() ? 1 : 0)
            << "," << (p.IsJump() ? 1 : 0)
-           << "," << r_raw
            << "\n";
       }
       // Simulator samples: ~50-point grid + last n so Python can verify
@@ -1329,28 +1319,28 @@ unsigned GOSoundReleaseAlignTable::GetPositionForCorrelation(
 
     const double t = (double)(loop_pos - p0.loop_pos)
                    / (double)(p1.loop_pos - p0.loop_pos);
-    const int    T = (int)m_CorrPeriodSamples;
+    const int    T  = (int)m_CorrPeriodSamples;
+    // v2 LUT points store r in [0,2T); legacy points in [0,T).
+    const int    T2 = p1.IsValid() ? 2 * T : T;
 
     // v2 LUT points carry explicit is_jump and approach_up flags.
     // Legacy points (flags==0) fall back to shortest-arc + T/4 heuristic.
     bool is_jump;
     int  diff;
     if (p1.IsValid()) {
-      // v2 path: directed interpolation
+      // v2 path: directed interpolation in [0, 2T)
       is_jump = p1.IsJump();
       if (!is_jump) {
         if (p1.IsApproachUp()) {
-          // Forward direction preferred: fwd = (r1-r0+T)%T, prefer positive
-          diff = ((int)p1.best_r - (int)p0.best_r + T) % T;
-          if (diff > T / 2) diff -= T;
+          diff = ((int)p1.best_r - (int)p0.best_r + T2) % T2;
+          if (diff > T2 / 2) diff -= T2;
         } else {
-          // Backward direction preferred: bwd = (r0-r1+T)%T, prefer negative
-          const int bwd = ((int)p0.best_r - (int)p1.best_r + T) % T;
+          const int bwd = ((int)p0.best_r - (int)p1.best_r + T2) % T2;
           diff = -bwd;
-          if (diff < -T / 2) diff += T;
+          if (diff < -T2 / 2) diff += T2;
         }
       } else {
-        diff = 0; // unused when is_jump
+        diff = 0;
       }
     } else {
       // Legacy path: shortest arc; branch-jump heuristic via T/4
@@ -1365,13 +1355,15 @@ unsigned GOSoundReleaseAlignTable::GetPositionForCorrelation(
       r_interp = (t < 0.5) ? p0.best_r : p1.best_r;
     } else {
       int r_signed = (int)p0.best_r + (int)std::round(t * diff);
-      r_interp = (unsigned)((r_signed % T + T) % T);
+      r_interp = (unsigned)((r_signed % T2 + T2) % T2);
     }
   }
 
-  // Fold into [0, T): r_interp and phi are both in [0, T), sum in [0, 2T).
-  // Modulo ensures the earliest phase-correct release entry point is used.
-  return (r_interp + phi) % m_CorrPeriodSamples;
+  // For v2 points: r_interp in [0,2T), sum with phi in [0,3T), fold to [0,2T).
+  // For legacy:    r_interp in [0,T),  sum with phi in [0,2T), fold to [0,T).
+  const bool v2_lut = !m_CorrPoints.empty() && m_CorrPoints.back().IsValid();
+  const unsigned T_mod = v2_lut ? 2u * m_CorrPeriodSamples : m_CorrPeriodSamples;
+  return (r_interp + phi) % T_mod;
 }
 
 unsigned GOSoundReleaseAlignTable::GetPositionFor(
