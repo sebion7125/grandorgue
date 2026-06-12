@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v221"
+TOOL_VERSION = "v224"
 
 # ─── C++ Numerics Mode ────────────────────────────────────────────────────────
 # When enabled, NDP is computed with pre-normalised float32 scalar loops,
@@ -1898,8 +1898,15 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
     r_arr      = np.array([b[0] for b in candidates], dtype=np.float32)
     r_prev_arr = np.array([b[2] for b in candidates], dtype=np.float32)
     dn_prev_arr= np.array([b[3] for b in candidates], dtype=np.float32)
-    slopes     = (r_arr - r_prev_arr) / np.maximum(1.0, dn_prev_arr)
-    exp_pos    = np.round(r_arr + slopes * dn).astype(np.int32) % sp_T_d  # (n_beams,)
+    # C++ Numerik: slope und exp_pos in float32 (wie TrackStepV2).
+    # np.maximum(1.0, ...) würde auf float64 upcasten → slope wird float64 → exp_pos float64.
+    # Das führt zu anderen Rundungsergebnissen als C++ std::round(float).
+    if _cpp_numerics_enabled:
+        slopes  = (r_arr - r_prev_arr) / np.maximum(np.float32(1.0), dn_prev_arr)
+        exp_pos = np.round((r_arr + slopes * np.float32(dn)).astype(np.float32)).astype(np.int32) % sp_T_d
+    else:
+        slopes  = (r_arr - r_prev_arr) / np.maximum(1.0, dn_prev_arr)
+        exp_pos = np.round(r_arr + slopes * dn).astype(np.int32) % sp_T_d  # (n_beams,)
 
     # Release-Fenster-View (O(1), kein Datenkopie)
     from numpy.lib.stride_tricks import as_strided as _ast
