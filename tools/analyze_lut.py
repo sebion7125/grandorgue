@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v210-cpp-numerics-f32-cumsc"
+TOOL_VERSION = "v221"
 
 # ─── C++ Numerics Mode ────────────────────────────────────────────────────────
 # When enabled, NDP is computed with pre-normalised float32 scalar loops,
