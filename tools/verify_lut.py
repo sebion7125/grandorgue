@@ -815,8 +815,6 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
         rel = _rel_tag(res)
         if st == "OK":
             ok += 1
-            if verbose:
-                emit(f"  OK     {res['label']:50s} {rel:20s} go={res['go_pts']:3d} py={res['py_pts']:3d} pts")
         elif st.startswith("skip"):
             skip += 1
         elif st == "not_found":
