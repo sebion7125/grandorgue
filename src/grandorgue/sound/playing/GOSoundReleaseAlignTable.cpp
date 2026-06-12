@@ -470,12 +470,8 @@ static std::vector<BeamState> FullScanV2(
     if (left_ok && right_ok)
       peaks.push_back(i);
   }
-  // Sort by score descending; tiebreak by position ascending (deterministic).
   std::sort(peaks.begin(), peaks.end(),
-            [&](unsigned a, unsigned b) {
-              if (sc[a] != sc[b]) return sc[a] > sc[b];
-              return a < b;
-            });
+            [&](unsigned a, unsigned b) { return sc[a] > sc[b]; });
 
   const float best_sc   = peaks.empty() ? -2.f : sc[peaks[0]];
   const float sc_cutoff = best_sc - 0.40f; // BRANCH_SCORE_MARGIN
@@ -589,14 +585,10 @@ static TrackResult TrackStepV2(
       {best_r, best_sc, b.r_d, (int)dn, b.cum_score + best_sc, b.beam_id});
   }
 
-  // Sort by cumulative score descending; within V2_BEAM_SORT_EPS tiebreak by
-  // beam_id ascending. This makes the winner selection deterministic even when
-  // BLAS-vs-scalar float32 causes sub-epsilon score differences.
+  // Sort by cumulative score descending.
   std::sort(new_beams.begin(), new_beams.end(),
             [](const BeamState &a, const BeamState &b) {
-              if (std::abs(a.cum_score - b.cum_score) > V2_BEAM_SORT_EPS)
-                return a.cum_score > b.cum_score;
-              return a.beam_id < b.beam_id;
+              return a.cum_score > b.cum_score;
             });
 
   // Spatial deduplication: keep at most top_k beams with min distance.
