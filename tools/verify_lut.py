@@ -724,10 +724,14 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
             results.append(_run(e))
             if progress_cb: progress_cb(i + 1, total)
     else:
+        # Do NOT use "with pool:" — the context manager calls shutdown(wait=True)
+        # on __exit__, blocking until all workers finish even after cancel.
+        # We manage the pool manually so cancel returns immediately.
+        pool = PoolClass(max_workers=n_workers)
         futures_to_idx: dict = {}
         ordered = [None] * total
         completed = 0
-        with PoolClass(max_workers=n_workers) as pool:
+        try:
             for i, e in enumerate(entries):
                 futures_to_idx[pool.submit(_run, e)] = i
             for fut in concurrent.futures.as_completed(futures_to_idx):
@@ -737,6 +741,8 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                 ordered[futures_to_idx[fut]] = fut.result()
                 completed += 1
                 if progress_cb: progress_cb(completed, total)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         results = ordered
 
     def _rel_tag(res):

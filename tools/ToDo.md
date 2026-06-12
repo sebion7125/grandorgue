@@ -3,6 +3,7 @@ This ist my ToDo List for things left to do:
 Release Alignment:
 ==================
 - for T float versions a more precise aproach and bugfix in the analyze_lut.py has been applied. The changes have to be applied to GO as well
+- we have to verify that our approach to have a LUT table for each release is correctly applied when it comes to loops in the wavs: so can a loop be so early, that it changes the samples that can be blended to this release. Maybe this is just a question for malformed sample sets, but I think it is worth noting.
 - [DONE / already optimized] LUTCache period range: ComputeCorrelationLut
   already restricts n_start/n_end from min/max_key_press_ms, and builds
   loop_mono only up to n_end-1.  Nothing to do.
@@ -12,6 +13,8 @@ Release Alignment:
   period_samples (uint32_t) + period_float (double) alongside its points.
   OverrideCorrLutsFromCache restores both fields so GetPositionForCorrelation
   always uses the generation-time grid, even on the skipCorrLut path.
+
+  
 
 - Period Block Optimisation (non-octave stops):
   Currently, every non-octave pipe (aliquot, mixture: HarmonicNumber not a
