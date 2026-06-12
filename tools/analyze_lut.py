@@ -2410,9 +2410,13 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.max_sample = (int(pa.max_key_press_ms * sr / 1000)
                          if pa.max_key_press_ms is not None else None)
 
+        # C++ loads the attack section only up to loop_end (GOSoundAudioSection
+        # length = loop_end + 1).  Truncate here so n_total matches C++ exactly.
+        atk_for_lut = atk_mono[:pa.loop_end + 1]
+
         _lut_fn = compute_lut_v2 if desc.get("use_v2", False) else compute_lut
         pa.lut_points, lut_meta = _lut_fn(
-            attack_mono=atk_mono,
+            attack_mono=atk_for_lut,
             release_mono=rel_mono,
             T_float=pa.T_float,
             T_int=pa.T_int,

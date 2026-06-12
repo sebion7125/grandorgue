@@ -18,7 +18,20 @@ Options:
 Exit code: 0 if no mismatches, 1 otherwise.
 """
 
-import os, sys, re, math, argparse, types
+import os, sys, re, math, argparse, types, json, threading
+import queue as _queue_mod
+
+# ── Real tkinter for GUI (imported BEFORE the mock replaces sys.modules) ─────
+_GUI_AVAILABLE = False
+try:
+    import tkinter as _tk
+    import tkinter.ttk as _ttk
+    import tkinter.filedialog as _tkfd
+    import tkinter.scrolledtext as _tkst
+    import tkinter.messagebox as _tkmb
+    _GUI_AVAILABLE = True
+except ImportError:
+    pass
 
 # ── Mock tkinter BEFORE importing analyze_lut ────────────────────────────────
 # Two requirements:
@@ -160,6 +173,32 @@ def parse_verify_log(path: str) -> list:
 # Cache so the ODF is parsed only once per organ path.
 _organ_cache: dict = {}
 
+# WAV cache: path → (mono_array, sample_rate).  Avoids re-reading the same
+# attack/release file for each of the N release-time variants of a pipe.
+import threading
+_wav_cache: dict = {}
+_smpl_cache: dict = {}
+_wav_cache_lock = threading.Lock()
+
+def _load_wav_cached(path: str):
+    with _wav_cache_lock:
+        if path in _wav_cache:
+            return _wav_cache[path]
+    mono, sr, _, _ = _al.read_wav_mono_float(path)
+    result = (mono, sr)
+    with _wav_cache_lock:
+        _wav_cache[path] = result
+    return result
+
+def _parse_smpl_cached(path: str):
+    with _wav_cache_lock:
+        if path in _smpl_cache:
+            return _smpl_cache[path]
+    smpl = _al.parse_smpl_chunk(path)
+    with _wav_cache_lock:
+        _smpl_cache[path] = smpl
+    return smpl
+
 def _parse_organ_fast(organ_path: str) -> list:
     """Fast ODF parser — no os.path.isfile checks (avoids slow shared-folder I/O).
     Returns same dict structure as analyze_lut.parse_organ_file.
@@ -256,13 +295,17 @@ def _parse_organ_fast(organ_path: str) -> list:
 
 def find_pipes_for_label(organ_path: str, label: str) -> list:
     """Return matching pipe descs for label (rank_name_lower|midi=key)."""
+    return _find_pipes_for_label_cached(organ_path, label,
+                                        _parse_organ_fast(organ_path))
+
+def _find_pipes_for_label_cached(organ_path: str, label: str,
+                                  pipes: list) -> list:
+    """Same as find_pipes_for_label but reuses an already-parsed pipes list."""
     m = re.match(r"^(.+)\|midi=(\d+)$", label)
     if not m:
         return []
     rank_part = m.group(1).strip().lower()
     midi_key  = int(m.group(2))
-
-    pipes = _parse_organ_fast(organ_path)
     return [p for p in pipes
             if p["rank_name"].strip().lower() == rank_part
             and p["midi_note"] == midi_key]
@@ -374,8 +417,9 @@ def prune_cpp_style(pts: list, T_int: int) -> list:
     return [pts[i] for i in range(sz) if active[i]]
 
 
-# Apply global patch now that prune_cpp_style is defined.
-_al._prune_lut_points = lambda pts, T, tol=None: prune_cpp_style(pts, T)
+# prune_cpp_style is kept for reference but NOT applied globally.
+# Python uses its own _prune_lut_points (the authoritative reference).
+# C++ should be fixed to match Python, not the other way around.
 
 
 def go_lut_to_lutpoints(go_lut: dict) -> list:
@@ -400,15 +444,20 @@ def compare_entry(entry: dict, organ_path: str,
     T_float = entry["T_float"]
     T_int   = entry["T_int"]
 
+    min_ms = entry["min_ms"]
+    max_ms = entry["max_ms"]
+
+    def _skip(status):
+        return {"label": label, "min_ms": min_ms, "max_ms": max_ms,
+                "status": status, "lut_diffs": [], "sim_diffs": [], "simsrc_diffs": []}
+
     if T_int < 16:
-        return {"label": label, "status": "skip_short_T",
-                "lut_diffs": [], "sim_diffs": [], "simsrc_diffs": []}
+        return _skip("skip_short_T")
 
     # Find matching releases in ODF
     pipes = find_pipes_for_label(organ_path, label)
     if not pipes:
-        return {"label": label, "status": "not_found",
-                "lut_diffs": [], "sim_diffs": [], "simsrc_diffs": []}
+        return _skip("not_found")
 
     # Pick the pipe desc matching max_ms
     log_max_ms = entry["max_ms"]
@@ -422,16 +471,15 @@ def compare_entry(entry: dict, organ_path: str,
     if pipe_desc is None:
         pipe_desc = pipes[0]
 
-    # Load WAVs
+    # Load WAVs (cached — same file shared by all release-time variants)
     try:
-        atk_mono, sr, _, _ = _al.read_wav_mono_float(pipe_desc["attack_path"])
-        rel_mono, _,  _, _ = _al.read_wav_mono_float(pipe_desc["release_path"])
+        atk_mono, sr = _load_wav_cached(pipe_desc["attack_path"])
+        rel_mono, _  = _load_wav_cached(pipe_desc["release_path"])
     except Exception as e:
-        return {"label": label, "status": f"wav_error:{e}",
-                "lut_diffs": [], "sim_diffs": [], "simsrc_diffs": []}
+        return _skip(f"wav_error:{e}")
 
-    # smpl loop points from attack WAV
-    smpl   = _al.parse_smpl_chunk(pipe_desc["attack_path"])
+    # smpl loop points from attack WAV (cached header read)
+    smpl   = _parse_smpl_cached(pipe_desc["attack_path"])
     loops  = smpl.get("loops", [])
     loop_start, loop_end = (loops[0][0], loops[0][1]) if loops else (0, len(atk_mono) - 1)
 
@@ -448,7 +496,7 @@ def compare_entry(entry: dict, organ_path: str,
     max_sample = int(entry["max_ms"] * log_sr / 1000) if entry["max_ms"] > 0 else None
 
     # Run Python v2 with T_float/T_int from GO log.
-    # _prune_lut_points is already globally patched to prune_cpp_style.
+    # Uses Python's own _prune_lut_points (the reference implementation).
     try:
         py_lut, _ = _al.compute_lut_v2(
             attack_mono=atk_mono,
@@ -463,45 +511,76 @@ def compare_entry(entry: dict, organ_path: str,
             max_sample=max_sample,
         )
     except Exception as e:
-        return {"label": label, "status": f"compute_error:{e}",
-                "lut_diffs": [], "sim_diffs": [], "simsrc_diffs": []}
-
-    go_lut_dict = {p["n"]: p for p in entry["lut"]}
-    py_lut_dict = {p.n: p    for p in py_lut}
+        return _skip(f"compute_error:{e}")
 
     def _fold(r: int) -> int:
         """Fold release offset into [0, T_int) — matches C++ lut_commit folding."""
         return int(r) % T_int if T_int > 0 else int(r)
 
-    # ── LUT comparison ────────────────────────────────────────────────────────
-    # C++ stores best_r folded in [0, T).
-    # Python LutPoint.best_r is unfolded in [0, 2*T) — fold before comparing.
+    # ── LUT comparison ─────────────────────────────────────────────────────────
+    # Match by loop_pos (±T_float/2 tolerance), NOT by n.
+    # Reason: C++ and Python may compute slightly different T_float values from
+    # autocorr, making n = round(loop_pos / T_float) differ by several indices
+    # even though both refer to the same physical crossfade position.
     lut_diffs = []
     if not sim_only:
-        for n in sorted(set(go_lut_dict) | set(py_lut_dict)):
-            go_pt = go_lut_dict.get(n)
-            py_pt = py_lut_dict.get(n)
-            if go_pt is None:
-                lut_diffs.append({"n": n, "issue": "GO_MISSING",
-                                  "go_r": None, "py_r": _fold(py_pt.best_r)})
-            elif py_pt is None:
-                lut_diffs.append({"n": n, "issue": "PY_MISSING",
-                                  "go_r": go_pt["best_r"], "py_r": None})
+        tol = max(1, int(T_float / 2))
+
+        go_pts_sorted = sorted(entry["lut"], key=lambda p: p["loop_pos"])
+        py_pts_sorted = sorted(py_lut,       key=lambda p: p.loop_pos)
+
+        # Greedy nearest-neighbour match (both lists are sorted by loop_pos)
+        matched_py = set()
+        go_matched = {}   # go loop_pos → py LutPoint
+        j = 0
+        for gp in go_pts_sorted:
+            glp = gp["loop_pos"]
+            best_j, best_d = -1, tol + 1
+            k = j
+            while k < len(py_pts_sorted):
+                plp = py_pts_sorted[k].loop_pos
+                if plp > glp + tol:
+                    break
+                d = abs(plp - glp)
+                if plp >= glp - tol and d < best_d and k not in matched_py:
+                    best_d, best_j = d, k
+                k += 1
+            if best_j >= 0:
+                matched_py.add(best_j)
+                go_matched[glp] = (gp, py_pts_sorted[best_j])
+                # advance j to not re-scan already-passed entries
+                while j < best_j and py_pts_sorted[j].loop_pos < glp - tol:
+                    j += 1
             else:
-                py_r_folded = _fold(py_pt.best_r)
-                dist = circ_dist(go_pt["best_r"], py_r_folded, T_int)
-                flags_ok = (go_pt["approach_up"] == py_pt.approach_up
-                            and go_pt["is_jump"]  == py_pt.is_jump)
+                go_matched[glp] = (gp, None)
+
+        unmatched_py = [py_pts_sorted[k] for k in range(len(py_pts_sorted))
+                        if k not in matched_py]
+
+        for glp, (gp, pp) in sorted(go_matched.items()):
+            n_go = gp["n"]
+            if pp is None:
+                lut_diffs.append({"n": n_go, "issue": "PY_MISSING",
+                                  "go_r": gp["best_r"], "py_r": None})
+            else:
+                py_r_folded = _fold(pp.best_r)
+                dist = circ_dist(gp["best_r"], py_r_folded, T_int)
+                flags_ok = (gp["approach_up"] == pp.approach_up
+                            and gp["is_jump"]  == pp.is_jump)
                 if dist > 1 or not flags_ok:
                     lut_diffs.append({
-                        "n": n,
+                        "n": n_go,
                         "issue": ("MISMATCH_r" if dist > 1 else "") +
                                  ("_flags" if not flags_ok else ""),
-                        "go_r":  go_pt["best_r"],  "py_r":  py_r_folded,
+                        "go_r":  gp["best_r"],  "py_r":  py_r_folded,
                         "dist":  dist,
-                        "go_up": go_pt["approach_up"], "py_up": py_pt.approach_up,
-                        "go_jmp":go_pt["is_jump"],     "py_jmp":py_pt.is_jump,
+                        "go_up": gp["approach_up"], "py_up": pp.approach_up,
+                        "go_jmp":gp["is_jump"],     "py_jmp":pp.is_jump,
                     })
+
+        for pp in unmatched_py:
+            lut_diffs.append({"n": pp.n, "issue": "GO_MISSING",
+                              "go_r": None, "py_r": _fold(pp.best_r)})
 
     # ── Simulator comparison ──────────────────────────────────────────────────
     # sim_diffs:    C++ sim (GO LUT)  vs  Python C++-compat sim (Python LUT)
@@ -509,6 +588,8 @@ def compare_entry(entry: dict, organ_path: str,
     #   → simsrc_diffs isolates interpolation-logic differences only
     sim_diffs    = []
     simsrc_diffs = []
+    go_lut_dict  = {p["n"]: p for p in entry["lut"]}
+    py_lut_dict  = {p.n:   p for p in py_lut}
     go_pts_list  = go_lut_to_lutpoints(go_lut_dict)
 
     for s in entry["sim"]:
@@ -529,6 +610,8 @@ def compare_entry(entry: dict, organ_path: str,
     status = "OK" if not lut_diffs and not sim_diffs and not simsrc_diffs else "MISMATCH"
     return {
         "label":       label,
+        "min_ms":      entry["min_ms"],
+        "max_ms":      entry["max_ms"],
         "status":      status,
         "go_pts":      len(go_lut_dict),
         "py_pts":      len(py_lut_dict),
@@ -538,16 +621,344 @@ def compare_entry(entry: dict, organ_path: str,
     }
 
 
+# ── Persistent settings ───────────────────────────────────────────────────────
+
+_SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".verify_lut_settings.json")
+
+def _load_settings() -> dict:
+    try:
+        with open(_SETTINGS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_settings(s: dict):
+    try:
+        with open(_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(s, f, indent=2)
+    except Exception:
+        pass
+
+
+# ── Core analysis (shared by CLI and GUI) ────────────────────────────────────
+
+def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
+                 workers=None, verbose=False, sim_only=False,
+                 line_cb=None, progress_cb=None, cancel_event=None):
+    """Run the full comparison.
+    line_cb(str)          — called for each output line (None → print).
+    progress_cb(done,tot) — optional progress updates.
+    cancel_event          — threading.Event; set it to abort early.
+    Returns (ok, mis, skip, notfound, errs) or None if cancelled.
+    """
+    import concurrent.futures
+
+    if workers is None:
+        workers = os.cpu_count() or 4
+
+    def emit(s):
+        if line_cb:
+            line_cb(s)
+        else:
+            print(s)
+
+    def cancelled():
+        return cancel_event is not None and cancel_event.is_set()
+
+    entries = parse_verify_log(log_path)
+    emit(f"Parsed {len(entries)} pipe-release entries from {log_path}")
+    if cancelled(): return None
+
+    if filter_str:
+        entries = [e for e in entries if filter_str.lower() in e["label"].lower()]
+        emit(f"After filter '{filter_str}': {len(entries)} entries")
+
+    if max_pipes:
+        entries = entries[:max_pipes]
+
+    total = len(entries)
+
+    # Pre-warm WAV cache sequentially (SharedFolder hates concurrent reads)
+    all_pipes = _parse_organ_fast(organ_path)
+    needed_wavs: set = set()
+    for e in entries:
+        for p in _find_pipes_for_label_cached(organ_path, e["label"], all_pipes):
+            needed_wavs.add(p["attack_path"])
+            needed_wavs.add(p["release_path"])
+    emit(f"Preloading {len(needed_wavs)} WAV files...")
+    for path in sorted(needed_wavs):
+        if cancelled(): return None
+        try:
+            _load_wav_cached(path)
+            _parse_smpl_cached(path)
+        except Exception:
+            pass
+    emit("WAV cache ready.")
+
+    ok = mis = skip = notfound = errs = 0
+    n_workers = max(1, workers)
+
+    def _run(entry):
+        return compare_entry(entry, organ_path, sim_only=sim_only, verbose=verbose)
+
+    if n_workers == 1:
+        results = []
+        for i, e in enumerate(entries):
+            if cancelled(): return None
+            results.append(_run(e))
+            if progress_cb: progress_cb(i + 1, total)
+    else:
+        futures_to_idx: dict = {}
+        ordered = [None] * total
+        completed = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+            for i, e in enumerate(entries):
+                futures_to_idx[pool.submit(_run, e)] = i
+            for fut in concurrent.futures.as_completed(futures_to_idx):
+                if cancelled():
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    return None
+                ordered[futures_to_idx[fut]] = fut.result()
+                completed += 1
+                if progress_cb: progress_cb(completed, total)
+        results = ordered
+
+    def _rel_tag(res):
+        """Short release-window tag, e.g. '[≥778ms]' or '[0..256ms]'."""
+        mn, mx = res.get("min_ms", 0), res.get("max_ms", 0)
+        if mn and mx:
+            return f"[{mn}..{mx}ms]"
+        elif mn:
+            return f"[≥{mn}ms]"
+        elif mx:
+            return f"[≤{mx}ms]"
+        return "[always]"
+
+    for res in results:
+        st  = res["status"]
+        rel = _rel_tag(res)
+        if st == "OK":
+            ok += 1
+            if verbose:
+                emit(f"  OK     {res['label']:50s} {rel:20s} go={res['go_pts']:3d} py={res['py_pts']:3d} pts")
+        elif st.startswith("skip"):
+            skip += 1
+        elif st == "not_found":
+            notfound += 1
+            emit(f"  ???    {res['label']}  (not found in ODF)")
+        elif "error" in st.lower():
+            errs += 1
+            emit(f"  ERR    {res['label']} {rel}: {st}")
+        else:
+            mis += 1
+            has_lut  = bool(res["lut_diffs"])
+            has_sim  = bool(res["sim_diffs"])
+            has_ssrc = bool(res["simsrc_diffs"])
+            tags = []
+            if has_lut:  tags.append(f"LUT:{len(res['lut_diffs'])}")
+            if has_ssrc: tags.append(f"SIM_LOGIC:{len(res['simsrc_diffs'])}")
+            if has_sim and not has_ssrc: tags.append(f"SIM_FROM_LUT:{len(res['sim_diffs'])}")
+            emit(f"  DIFF   {res['label']:50s} {rel:20s} go={res.get('go_pts','?'):3} py={res.get('py_pts','?'):3}  [{', '.join(tags)}]")
+            for d in res["lut_diffs"][:10]:
+                if d.get("issue","").startswith("MISMATCH") or d.get("issue","") in ("GO_MISSING","PY_MISSING"):
+                    if d["go_r"] is None or d["py_r"] is None:
+                        emit(f"         LUT n={d['n']:4d}  {d['issue']}  r={d['go_r'] if d['go_r'] is not None else d['py_r']}")
+                    else:
+                        emit(f"         LUT n={d['n']:4d}  Δr={d.get('dist',0):3d}  "
+                             f"go_r={d['go_r']:4d} py_r={d['py_r']:4d}  "
+                             f"up={d.get('go_up')}/{d.get('py_up')}  "
+                             f"jmp={d.get('go_jmp')}/{d.get('py_jmp')}")
+            if len(res["lut_diffs"]) > 10:
+                emit(f"         ... and {len(res['lut_diffs'])-10} more LUT diffs")
+            for s in res["simsrc_diffs"][:5]:
+                emit(f"         SIM_LOGIC lp={s['loop_pos']:7d}  go={s['go_r']:4d} py={s['py_r']:4d}  Δ={s['dist']}")
+            if len(res["simsrc_diffs"]) > 5:
+                emit(f"         ... and {len(res['simsrc_diffs'])-5} more sim-logic diffs")
+
+    emit(f"\nResult: {total} entries — "
+         f"OK={ok}  MISMATCH={mis}  SKIP={skip}  NOT_FOUND={notfound}  ERR={errs}")
+    return ok, mis, skip, notfound, errs
+
+
+# ── GUI ───────────────────────────────────────────────────────────────────────
+
+def run_gui():
+    root = _tk.Tk()
+    root.title("verify_lut — GO vs Python v2")
+    root.minsize(720, 560)
+
+    settings = _load_settings()
+
+    var_log     = _tk.StringVar(value=settings.get("log",     ""))
+    var_organ   = _tk.StringVar(value=settings.get("organ",   ""))
+    var_filter  = _tk.StringVar(value=settings.get("filter",  ""))
+    var_workers = _tk.IntVar(   value=settings.get("workers", os.cpu_count() or 4))
+    var_status  = _tk.StringVar(value="Ready")
+    var_prog    = _tk.DoubleVar(value=0.0)
+
+    # ── File pickers ──────────────────────────────────────────────────────────
+    def browse_log():
+        p = _tkfd.askopenfilename(
+            title="Select go_lut_verify.csv",
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+            initialfile=var_log.get() or None)
+        if p:
+            var_log.set(p)
+
+    def browse_organ():
+        p = _tkfd.askopenfilename(
+            title="Select .organ file",
+            filetypes=[("Organ", "*.organ"), ("All files", "*.*")],
+            initialfile=var_organ.get() or None)
+        if p:
+            var_organ.set(p)
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    pad = {"padx": 6, "pady": 3}
+
+    top = _ttk.Frame(root, padding=8)
+    top.grid(row=0, column=0, sticky="ew")
+    root.columnconfigure(0, weight=1)
+
+    _ttk.Label(top, text="Log CSV:").grid(row=0, column=0, sticky="w", **pad)
+    _ttk.Entry(top, textvariable=var_log, width=62).grid(row=0, column=1, sticky="ew", **pad)
+    _ttk.Button(top, text="Browse…", command=browse_log).grid(row=0, column=2, **pad)
+
+    _ttk.Label(top, text="Organ ODF:").grid(row=1, column=0, sticky="w", **pad)
+    _ttk.Entry(top, textvariable=var_organ, width=62).grid(row=1, column=1, sticky="ew", **pad)
+    _ttk.Button(top, text="Browse…", command=browse_organ).grid(row=1, column=2, **pad)
+
+    _ttk.Label(top, text="Filter:").grid(row=2, column=0, sticky="w", **pad)
+    filter_row = _ttk.Frame(top)
+    filter_row.grid(row=2, column=1, sticky="w")
+    _ttk.Entry(filter_row, textvariable=var_filter, width=30).pack(side="left")
+    _ttk.Label(filter_row, text="  Workers:").pack(side="left")
+    _ttk.Spinbox(filter_row, from_=1, to=64, textvariable=var_workers, width=5).pack(side="left")
+    top.columnconfigure(1, weight=1)
+
+    # Buttons
+    btn_row = _ttk.Frame(root, padding=(8, 0, 8, 4))
+    btn_row.grid(row=1, column=0, sticky="w")
+    cancel_ev = threading.Event()
+    btn_start  = _ttk.Button(btn_row, text="▶ Start")
+    btn_cancel = _ttk.Button(btn_row, text="■ Cancel", state="disabled")
+    btn_start.pack(side="left", padx=4)
+    btn_cancel.pack(side="left")
+
+    # Progress
+    _ttk.Progressbar(root, variable=var_prog, maximum=100).grid(
+        row=2, column=0, sticky="ew", padx=8, pady=(2, 0))
+    _ttk.Label(root, textvariable=var_status, anchor="w").grid(
+        row=3, column=0, sticky="ew", padx=8)
+
+    # Output
+    out = _tkst.ScrolledText(root, font=("Courier New", 9), state="disabled",
+                              wrap="none", height=22)
+    out.grid(row=4, column=0, sticky="nsew", padx=8, pady=(2, 8))
+    root.rowconfigure(4, weight=1)
+
+    # ── Thread → GUI queue ────────────────────────────────────────────────────
+    q = _queue_mod.Queue()
+
+    def append_text(s):
+        out.config(state="normal")
+        out.insert("end", s + "\n")
+        out.see("end")
+        out.config(state="disabled")
+
+    def poll():
+        try:
+            while True:
+                msg = q.get_nowait()
+                kind = msg[0]
+                if kind == "line":
+                    append_text(msg[1])
+                elif kind == "progress":
+                    done, tot = msg[1], msg[2]
+                    var_prog.set(100.0 * done / max(1, tot))
+                    var_status.set(f"{done} / {tot}")
+                elif kind == "done":
+                    result = msg[1]
+                    btn_start.config(state="normal")
+                    btn_cancel.config(state="disabled")
+                    if result:
+                        ok, mis, skip, nf, errs = result
+                        var_status.set(
+                            f"Done — OK={ok}  MISMATCH={mis}  SKIP={skip}  NOT_FOUND={nf}  ERR={errs}")
+                    else:
+                        var_status.set("Cancelled.")
+                    var_prog.set(100.0)
+        except _queue_mod.Empty:
+            pass
+        root.after(100, poll)
+
+    # ── Start / Cancel ────────────────────────────────────────────────────────
+    def start():
+        log_p   = var_log.get().strip()
+        organ_p = var_organ.get().strip()
+        if not os.path.isfile(log_p):
+            _tkmb.showerror("File not found", f"Log CSV not found:\n{log_p}")
+            return
+        if not os.path.isfile(organ_p):
+            _tkmb.showerror("File not found", f"Organ file not found:\n{organ_p}")
+            return
+
+        _save_settings({
+            "log": log_p, "organ": organ_p,
+            "filter": var_filter.get(),
+            "workers": var_workers.get(),
+        })
+
+        out.config(state="normal")
+        out.delete("1.0", "end")
+        out.config(state="disabled")
+        var_prog.set(0.0)
+        var_status.set("Running…")
+        cancel_ev.clear()
+        btn_start.config(state="disabled")
+        btn_cancel.config(state="normal")
+
+        def worker():
+            result = run_analysis(
+                log_p, organ_p,
+                filter_str=var_filter.get(),
+                workers=var_workers.get(),
+                line_cb=lambda s: q.put(("line", s)),
+                progress_cb=lambda d, t: q.put(("progress", d, t)),
+                cancel_event=cancel_ev,
+            )
+            q.put(("done", result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cancel():
+        cancel_ev.set()
+        var_status.set("Cancelling…")
+        btn_cancel.config(state="disabled")
+
+    btn_start.config(command=start)
+    btn_cancel.config(command=cancel)
+
+    root.after(100, poll)
+    root.mainloop()
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    # GUI mode: no arguments → open GUI (if tkinter available)
+    if len(sys.argv) == 1 and _GUI_AVAILABLE:
+        run_gui()
+        return
+
     ap = argparse.ArgumentParser(
         description="Compare GO LUT output vs Python v2 algorithm.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
     ap.add_argument("log",   nargs="?", default="/tmp/go_lut_verify.csv",
                     help="Path to go_lut_verify.csv (default: /tmp/go_lut_verify.csv)")
-    ap.add_argument("organ", help="Path to .organ ODF file")
+    ap.add_argument("organ", nargs="?", default=None,
+                    help="Path to .organ ODF file (omit to launch GUI)")
     ap.add_argument("--filter",    "-f", metavar="PATTERN",
                     help="Only process entries whose label contains PATTERN")
     ap.add_argument("--max-pipes", "-n", type=int, default=0, metavar="N",
@@ -560,6 +971,14 @@ def main():
                     help=f"Parallel worker threads (default: {os.cpu_count() or 4})")
     args = ap.parse_args()
 
+    # If organ still missing after parsing, try GUI
+    if args.organ is None:
+        if _GUI_AVAILABLE:
+            run_gui()
+            return
+        print("Usage: verify_lut.py [csv] organ.organ [options]", file=sys.stderr)
+        sys.exit(1)
+
     if not os.path.isfile(args.log):
         print(f"Log file not found: {args.log}", file=sys.stderr)
         sys.exit(1)
@@ -567,85 +986,17 @@ def main():
         print(f"Organ file not found: {args.organ}", file=sys.stderr)
         sys.exit(1)
 
-    entries = parse_verify_log(args.log)
-    print(f"Parsed {len(entries)} pipe-release entries from {args.log}")
-
-    if args.filter:
-        entries = [e for e in entries if args.filter.lower() in e["label"].lower()]
-        print(f"After filter '{args.filter}': {len(entries)} entries")
-
-    if args.max_pipes:
-        entries = entries[:args.max_pipes]
-
-    import concurrent.futures
-
-    organ_path = args.organ
-    sim_only   = args.sim_only
-    verbose    = args.verbose
-
-    def _run(entry):
-        return compare_entry(entry, organ_path, sim_only=sim_only, verbose=verbose)
-
-    ok = mis = skip = notfound = errs = 0
-    results = []
-
-    n_workers = max(1, args.workers)
-    if n_workers == 1:
-        results = [_run(e) for e in entries]
-    else:
-        futures_to_idx = {}
-        ordered = [None] * len(entries)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
-            for i, e in enumerate(entries):
-                futures_to_idx[pool.submit(_run, e)] = i
-            for fut in concurrent.futures.as_completed(futures_to_idx):
-                ordered[futures_to_idx[fut]] = fut.result()
-        results = ordered
-
-    for res in results:
-        st = res["status"]
-
-        if st == "OK":
-            ok += 1
-            if args.verbose:
-                print(f"  OK     {res['label']:50s} go={res['go_pts']:3d} py={res['py_pts']:3d} pts")
-        elif st.startswith("skip"):
-            skip += 1
-        elif st == "not_found":
-            notfound += 1
-            print(f"  ???    {res['label']}  (not found in ODF)")
-        elif "error" in st.lower():
-            errs += 1
-            print(f"  ERR    {res['label']}: {st}")
-        else:
-            mis += 1
-            has_lut  = bool(res["lut_diffs"])
-            has_sim  = bool(res["sim_diffs"])
-            has_ssrc = bool(res["simsrc_diffs"])
-            tags = []
-            if has_lut:  tags.append(f"LUT:{len(res['lut_diffs'])}")
-            if has_ssrc: tags.append(f"SIM_LOGIC:{len(res['simsrc_diffs'])}")
-            if has_sim and not has_ssrc: tags.append(f"SIM_FROM_LUT:{len(res['sim_diffs'])}")
-            print(f"  DIFF   {res['label']:50s} go={res.get('go_pts','?'):3} py={res.get('py_pts','?'):3}  [{', '.join(tags)}]")
-            for d in res["lut_diffs"][:10]:
-                if d.get("issue","").startswith("MISMATCH") or d.get("issue","") in ("GO_MISSING","PY_MISSING"):
-                    if d["go_r"] is None or d["py_r"] is None:
-                        print(f"         LUT n={d['n']:4d}  {d['issue']}  r={d['go_r'] if d['go_r'] is not None else d['py_r']}")
-                    else:
-                        print(f"         LUT n={d['n']:4d}  Δr={d.get('dist',0):3d}  "
-                              f"go_r={d['go_r']:4d} py_r={d['py_r']:4d}  "
-                              f"up={d.get('go_up')}/{d.get('py_up')}  "
-                              f"jmp={d.get('go_jmp')}/{d.get('py_jmp')}")
-            if len(res["lut_diffs"]) > 10:
-                print(f"         ... and {len(res['lut_diffs'])-10} more LUT diffs")
-            for s in res["simsrc_diffs"][:5]:
-                print(f"         SIM_LOGIC lp={s['loop_pos']:7d}  go={s['go_r']:4d} py={s['py_r']:4d}  Δ={s['dist']}")
-            if len(res["simsrc_diffs"]) > 5:
-                print(f"         ... and {len(res['simsrc_diffs'])-5} more sim-logic diffs")
-
-    total = ok + mis + skip + notfound + errs
-    print(f"\nResult: {total} entries — "
-          f"OK={ok}  MISMATCH={mis}  SKIP={skip}  NOT_FOUND={notfound}  ERR={errs}")
+    result = run_analysis(
+        args.log, args.organ,
+        filter_str=args.filter or "",
+        max_pipes=args.max_pipes,
+        workers=args.workers,
+        verbose=args.verbose,
+        sim_only=args.sim_only,
+    )
+    if result is None:
+        sys.exit(2)
+    ok, mis, skip, notfound, errs = result
     sys.exit(0 if mis == 0 and errs == 0 else 1)
 
 
