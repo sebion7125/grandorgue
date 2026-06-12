@@ -678,28 +678,44 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
 
     total = len(entries)
 
-    # Pre-warm WAV cache sequentially (SharedFolder hates concurrent reads)
-    all_pipes = _parse_organ_fast(organ_path)
-    needed_wavs: set = set()
-    for e in entries:
-        for p in _find_pipes_for_label_cached(organ_path, e["label"], all_pipes):
-            needed_wavs.add(p["attack_path"])
-            needed_wavs.add(p["release_path"])
-    emit(f"Preloading {len(needed_wavs)} WAV files...")
-    for path in sorted(needed_wavs):
-        if cancelled(): return None
-        try:
-            _load_wav_cached(path)
-            _parse_smpl_cached(path)
-        except Exception:
-            pass
-    emit("WAV cache ready.")
+    import platform
+    # ProcessPoolExecutor: each process has its own GIL → true CPU parallelism.
+    # Good on local disk (Windows) where workers re-read WAVs cheaply.
+    # ThreadPoolExecutor: shares memory (WAV cache) → better on slow shared
+    # folders where pre-loading matters.
+    n_workers     = max(1, workers)
+    use_processes = (platform.system() == "Windows" and n_workers > 1)
+
+    # Pre-warm WAV cache sequentially only when using threads (shared memory).
+    # With ProcessPoolExecutor (Windows) each worker reads its own WAVs in
+    # parallel — sequential pre-loading would just waste time.
+    if not use_processes:
+        all_pipes = _parse_organ_fast(organ_path)
+        needed_wavs: set = set()
+        for e in entries:
+            for p in _find_pipes_for_label_cached(organ_path, e["label"], all_pipes):
+                needed_wavs.add(p["attack_path"])
+                needed_wavs.add(p["release_path"])
+        emit(f"Preloading {len(needed_wavs)} WAV files...")
+        for path in sorted(needed_wavs):
+            if cancelled(): return None
+            try:
+                _load_wav_cached(path)
+                _parse_smpl_cached(path)
+            except Exception:
+                pass
+        emit("WAV cache ready.")
+    else:
+        emit("Local disk detected — workers load WAVs in parallel.")
 
     ok = mis = skip = notfound = errs = 0
-    n_workers = max(1, workers)
+    PoolClass = (concurrent.futures.ProcessPoolExecutor if use_processes
+                 else concurrent.futures.ThreadPoolExecutor)
 
-    def _run(entry):
-        return compare_entry(entry, organ_path, sim_only=sim_only, verbose=verbose)
+    # compare_entry is a module-level function → picklable for ProcessPool.
+    import functools
+    _run = functools.partial(compare_entry, organ_path=organ_path,
+                             sim_only=sim_only, verbose=verbose)
 
     if n_workers == 1:
         results = []
@@ -711,7 +727,7 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
         futures_to_idx: dict = {}
         ordered = [None] * total
         completed = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+        with PoolClass(max_workers=n_workers) as pool:
             for i, e in enumerate(entries):
                 futures_to_idx[pool.submit(_run, e)] = i
             for fut in concurrent.futures.as_completed(futures_to_idx):
