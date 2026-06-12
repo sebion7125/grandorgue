@@ -146,17 +146,13 @@ def parse_verify_log(path: str) -> list:
 
             elif line.startswith("lut,") and current is not None:
                 parts = line.split(",")
-                # lut,n,loop_pos,best_r,approach_up,is_jump[,r_raw]
-                # best_r: folded to [0,T)  (used for runtime sim comparison)
-                # r_raw:  unfolded [0,2T) added in v214 (used for 2T LUT comparison)
+                # lut,n,loop_pos,best_r,approach_up,is_jump
+                # best_r: unfolded [0,2T) for v2 (v215+); [0,T) for legacy/exhaustive
                 if len(parts) >= 6:
-                    best_r = int(parts[3])
-                    r_raw  = int(parts[6]) if len(parts) >= 7 else best_r
                     current["lut"].append({
                         "n":           int(parts[1]),
                         "loop_pos":    int(parts[2]),
-                        "best_r":      best_r,   # folded, for sim interpolation
-                        "r_raw":       r_raw,     # unfolded [0,2T), for LUT diff
+                        "best_r":      int(parts[3]),
                         "approach_up": parts[4].strip() != "0",
                         "is_jump":     parts[5].strip() != "0",
                     })
@@ -329,9 +325,9 @@ def get_position_for_correlation_cpp(loop_pos: int, pts: list,
                                      T_int: int, T_float: float) -> int:
     """C++-compatible replica of GetPositionForCorrelation.
 
-    Two differences vs Python's get_position_for_correlation:
-    1. phi = round(loop_pos % T_float) % T  is ADDED to r_interp.
-    2. is_jump → step function (snap to nearest endpoint), not linear interp.
+    v2 LUT points store r in [0,2T) — no fold.  All modular arithmetic uses
+    T2 = 2*T for v2 points, T for legacy points (flags==0).
+    phi is still computed modulo T (loop phase within one period).
     """
     if not pts:
         return 0
@@ -340,33 +336,33 @@ def get_position_for_correlation_cpp(loop_pos: int, pts: list,
     phi = int(round(math.fmod(loop_pos, T_f))) % T
 
     sorted_pts = sorted(pts, key=lambda p: p.loop_pos)
+    # Detect v2 LUT (any point has is_jump attribute set)
+    is_v2 = getattr(sorted_pts[-1], 'is_jump', None) is not None
+    T2 = 2 * T if is_v2 else T
 
     if len(sorted_pts) == 1 or loop_pos <= sorted_pts[0].loop_pos:
-        r_interp = int(sorted_pts[0].best_r) % T
+        r_interp = int(sorted_pts[0].best_r)
     elif loop_pos >= sorted_pts[-1].loop_pos:
-        r_interp = int(sorted_pts[-1].best_r) % T
+        r_interp = int(sorted_pts[-1].best_r)
     else:
-        # Binary search for segment
         idx = 0
         while idx + 1 < len(sorted_pts) and sorted_pts[idx + 1].loop_pos <= loop_pos:
             idx += 1
         p0 = sorted_pts[idx]
         p1 = sorted_pts[idx + 1]
         t = (loop_pos - p0.loop_pos) / max(1, p1.loop_pos - p0.loop_pos)
-        r0, r1 = int(p0.best_r) % T, int(p1.best_r) % T
+        r0, r1 = int(p0.best_r), int(p1.best_r)
 
-        is_valid = getattr(p1, 'is_jump', None) is not None  # v2 flags present
-        if is_valid:
+        if is_v2:
             is_jump = bool(getattr(p1, 'is_jump', False))
             if not is_jump:
                 if getattr(p1, 'approach_up', True):
-                    diff = (r1 - r0 + T) % T
-                    if diff > T // 2: diff -= T
+                    diff = (r1 - r0 + T2) % T2
+                    if diff > T2 // 2: diff -= T2
                 else:
-                    bwd = (r0 - r1 + T) % T
+                    bwd = (r0 - r1 + T2) % T2
                     diff = -bwd
-                    if diff < -(T // 2): diff += T
-            # else diff unused
+                    if diff < -(T2 // 2): diff += T2
         else:
             # Legacy: shortest arc, T/4 jump heuristic
             diff = r1 - r0
@@ -378,9 +374,9 @@ def get_position_for_correlation_cpp(loop_pos: int, pts: list,
             r_interp = r0 if t < 0.5 else r1
         else:
             r_signed = r0 + int(round(t * diff))
-            r_interp = (r_signed % T + T) % T
+            r_interp = (r_signed % T2 + T2) % T2
 
-    return (r_interp + phi) % T
+    return (r_interp + phi) % T2
 
 
 def prune_cpp_style(pts: list, T_int: int) -> list:
@@ -566,15 +562,14 @@ def compare_entry(entry: dict, organ_path: str,
                         if k not in matched_py]
 
         for glp, (gp, pp) in sorted(go_matched.items()):
-            n_go = gp["n"]
-            # go_r_raw: unfolded [0,2T) from new CSV, or folded best_r for old CSV
-            go_r_raw = gp.get("r_raw", gp["best_r"])
+            n_go  = gp["n"]
+            go_r  = gp["best_r"]  # unfolded [0,2T) from v215+ CSV
             if pp is None:
                 lut_diffs.append({"n": n_go, "issue": "PY_MISSING",
-                                  "go_r": go_r_raw, "py_r": None})
+                                  "go_r": go_r, "py_r": None})
             else:
-                py_r_raw = int(pp.best_r)  # [0, 2T) from compute_lut_v2
-                dist = circ_dist(go_r_raw, py_r_raw, r_mod)
+                py_r = int(pp.best_r)  # [0,2T) from compute_lut_v2
+                dist = circ_dist(go_r, py_r, r_mod)
                 flags_ok = (gp["approach_up"] == pp.approach_up
                             and gp["is_jump"]  == pp.is_jump)
                 if dist > 1 or not flags_ok:
@@ -582,7 +577,7 @@ def compare_entry(entry: dict, organ_path: str,
                         "n": n_go,
                         "issue": ("MISMATCH_r" if dist > 1 else "") +
                                  ("_flags" if not flags_ok else ""),
-                        "go_r":  go_r_raw,  "py_r":  py_r_raw,
+                        "go_r":  go_r,  "py_r":  py_r,
                         "dist":  dist,
                         "go_up": gp["approach_up"], "py_up": pp.approach_up,
                         "go_jmp":gp["is_jump"],     "py_jmp":pp.is_jump,
@@ -602,6 +597,7 @@ def compare_entry(entry: dict, organ_path: str,
     py_lut_dict  = {p.n:   p for p in py_lut}
     go_pts_list  = go_lut_to_lutpoints(go_lut_dict)
 
+    sim_r_mod = entry.get("r_max") or (2 * T_int)  # sim outputs in [0,2T) for v2
     for s in entry["sim"]:
         lp   = s["loop_pos"]
         go_r = s["r_interp"]
@@ -610,12 +606,12 @@ def compare_entry(entry: dict, organ_path: str,
         # C++-compatible sim with GO LUT (tests only interpolation, not LUT)
         py_r2 = get_position_for_correlation_cpp(lp, go_pts_list, T_int, T_float)
 
-        if circ_dist(go_r, py_r, T_int) > 1:
+        if circ_dist(go_r, py_r, sim_r_mod) > 1:
             sim_diffs.append({"loop_pos": lp, "go_r": go_r, "py_r": py_r,
-                              "dist": circ_dist(go_r, py_r, T_int)})
-        if circ_dist(go_r, py_r2, T_int) > 1:
+                              "dist": circ_dist(go_r, py_r, sim_r_mod)})
+        if circ_dist(go_r, py_r2, sim_r_mod) > 1:
             simsrc_diffs.append({"loop_pos": lp, "go_r": go_r, "py_r": py_r2,
-                                 "dist": circ_dist(go_r, py_r2, T_int)})
+                                 "dist": circ_dist(go_r, py_r2, sim_r_mod)})
 
     # Compute max circular distance across sim and simsrc diffs.
     # Only large Δr (> T/8) is acoustically relevant.
