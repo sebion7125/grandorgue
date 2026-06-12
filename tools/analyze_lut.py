@@ -1891,7 +1891,8 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
                    max_sample: Optional[int] = None,
                    downsampling: bool = True,
                    _top_k: int = None, _window_half: int = None,
-                   _min_peak_dist: int = None, _rescan_ratio: float = None) -> tuple:
+                   _min_peak_dist: int = None, _rescan_ratio: float = None,
+                   _n_start_override: int = None, _n_end_override: int = None) -> tuple:
     """Rückwärts-Tracking-Ersatz für compute_lut().
 
     Algorithmus:
@@ -1934,6 +1935,13 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     n_end   = n_total if max_sample is None else min(n_total, int(math.ceil(max_sample / T_float)) + 2)
     if n_start >= n_end:
         n_start, n_end = 1, n_total
+
+    # Override n_start/n_end with C++-computed values (from CSV) to eliminate
+    # ±1 discrepancy from floating-point truncation in n_total computation.
+    if _n_start_override is not None:
+        n_start = max(1, min(_n_start_override, n_end - 1))
+    if _n_end_override is not None:
+        n_end = min(n_total, max(_n_end_override, n_start + 1))
 
     loop_needed  = min(int(round((n_end - 1) * T_float)) + window_len, atk_full_len)
     loop_seg     = attack_mono[:loop_needed:ds].astype(np.float32)

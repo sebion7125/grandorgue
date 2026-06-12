@@ -496,7 +496,8 @@ def compare_entry(entry: dict, organ_path: str,
     max_sample = int(entry["max_ms"] * log_sr / 1000) if entry["max_ms"] > 0 else None
 
     # Run Python v2 with T_float/T_int from GO log.
-    # Uses Python's own _prune_lut_points (the reference implementation).
+    # Pass C++ n_start/n_end directly to avoid ±1 off in n_total from
+    # float-truncation, which shifts the sparse tracking grid by one period.
     try:
         py_lut, _ = _al.compute_lut_v2(
             attack_mono=atk_mono,
@@ -509,6 +510,8 @@ def compare_entry(entry: dict, organ_path: str,
             loop_end=loop_end,
             min_sample=min_sample,
             max_sample=max_sample,
+            _n_start_override=entry["n_start"],
+            _n_end_override=entry["n_end"],
         )
     except Exception as e:
         return _skip(f"compute_error:{e}")
