@@ -926,6 +926,10 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   std::vector<ScoredPoint> spoints;
   std::vector<V2TrackPt>   v2_pts;  // filled by v2 algorithm; empty if exhaustive
 
+  // Phase-0 candidates captured for CSV debug logging (beam_id, r, score).
+  std::vector<BeamState> phase0_cands;
+  unsigned               phase0_n_last = 0;
+
   // ── Exhaustive mode: dense scan of [n_start, n_end) ─────────────────────
   // Covers every key-press duration with evenly-spaced support points.
   // For very long loops (n_total > MAX_EXHST) a step is used so the output
@@ -966,6 +970,8 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
       release_mono.data(), release_needed_d,
       cs_last_d, window_len_d, r_max_d, T_d, V2_TOP_K);
     if (vis_cands.empty()) return;
+    phase0_cands = vis_cands;   // capture for CSV logging
+    phase0_n_last = n_last;
 
     // ── Phase 1 ───────────────────────────────────────────────────────────
     using PathMap = std::map<unsigned, std::pair<int, float>>;
@@ -1185,10 +1191,11 @@ lut_commit:
 #if __has_include("GOLogReleaseAlignEnable.h")
   // LUT verify log — written when a pipe label is provided so Python's
   // verify_lut.py can independently recompute and compare results.
-  // Activated by the same GOLogReleaseAlignEnable.h sentinel as the timing log.
   if (label) {
-    static std::mutex s_VerifyLogMutex;
+    static std::mutex        s_VerifyLogMutex;
+    static std::atomic<bool> s_Rotated{false};
     std::lock_guard<std::mutex> vlock(s_VerifyLogMutex);
+
     auto GetVerifyLogPath = []() -> std::string {
 #ifdef _WIN32
       const char *tmp = std::getenv("TEMP");
@@ -1199,6 +1206,29 @@ lut_commit:
       return "/tmp/go_lut_verify.csv";
 #endif
     };
+
+    // One-time rotation per process: rename existing file with timestamp so
+    // each GO session starts with a fresh, unambiguous log.
+    if (!s_Rotated.exchange(true)) {
+      const std::string path = GetVerifyLogPath();
+      if (std::ifstream(path).good()) {
+        std::time_t t = std::time(nullptr);
+        std::tm lt{};
+#ifdef _WIN32
+        localtime_s(&lt, &t);
+#else
+        localtime_r(&t, &lt);
+#endif
+        char ts[32];
+        std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &lt);
+        const std::string dot = path.rfind('.') != std::string::npos
+                                ? path.substr(path.rfind('.')) : "";
+        const std::string stem = (dot.empty()) ? path
+                                : path.substr(0, path.rfind('.'));
+        std::rename(path.c_str(), (stem + "_" + ts + dot).c_str());
+      }
+    }
+
     std::ofstream vf(GetVerifyLogPath(), std::ios::app);
     if (vf.is_open()) {
       const auto &pts = m_CorrLuts.back().points;
@@ -1217,6 +1247,14 @@ lut_commit:
          << " loop_len=" << loop_section.GetLength()
          << " release_len=" << release_section.GetLength()
          << "\n";
+      // Phase-0 candidates: initial NDP peaks that seeded the tracking.
+      // Format: phase0,beam_id,r_samples,score,n_last
+      for (const BeamState &b : phase0_cands)
+        vf << "phase0," << b.beam_id
+           << "," << (b.r_d * (int)ds)
+           << "," << b.score
+           << "," << phase0_n_last
+           << "\n";
       for (const CorrPoint &p : pts) {
         const unsigned n = (unsigned)std::round((double)p.loop_pos / T_f);
         vf << "lut," << n << "," << p.loop_pos << "," << p.best_r
