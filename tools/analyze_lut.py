@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v230i"
+TOOL_VERSION = "v230h"
 
 def _cpp_round(x: float) -> int:
     """C++ std::round() for non-negative x: round half away from zero."""
@@ -1971,8 +1971,7 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
                    T_int_d: int, sp_T_d: int,
                    cs_d: int, candidates: list, dn: int,
                    _top_k: int = None, _window_half: int = None,
-                   _min_peak_dist_d: int = None, _rescan_ratio: float = None,
-                   _allow_period_images: bool = False) -> tuple:
+                   _min_peak_dist_d: int = None, _rescan_ratio: float = None) -> tuple:
     """Einen Rückwärts-Tracking-Schritt durchführen.
 
     candidates: list of (r_d, score, r_d_prev, dn_prev, cumulative_score, beam_id)  – in downsampled units
@@ -2064,21 +2063,6 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
         best_r[eb]  = np.where(better, ext_pos,  best_r[eb])
         best_sc[eb] = np.where(better, sc_ext, best_sc[eb])
 
-    # Periode-Images: nur in Phase 1.5 (wrap-crossing densification).
-    # Wenn exp_pos ≈ T, ist r=0 äquivalent aber nicht in ±1/±2 erreichbar.
-    # Probe exp_pos ± T_int_d (je ±1) und nehme bessten Kandidaten.
-    if _allow_period_images:
-        img_offs = np.array([-T_int_d, T_int_d], dtype=np.int32)
-        img_bases = (exp_pos[:, None] + img_offs[None, :]) % sp_T_d  # (n_beams, 2)
-        img_pos = (img_bases[:, :, None] + offs1[None, None, :]) % sp_T_d  # (n_beams, 2, 3)
-        img_pos_flat = img_pos.reshape(n_beams, 6)                   # (n_beams, 6)
-        img_sc = _batch_score(img_pos_flat)                          # (n_beams, 6)
-        best_img_idx = np.argmax(img_sc, axis=1)
-        best_img_r   = img_pos_flat[np.arange(n_beams), best_img_idx]
-        best_img_sc  = img_sc[np.arange(n_beams), best_img_idx]
-        img_better = best_img_sc > best_sc
-        best_r  = np.where(img_better, best_img_r,  best_r)
-        best_sc = np.where(img_better, best_img_sc, best_sc)
 
     # Neue Kandidaten aufbauen + Rescan prüfen
     new_cands    = []
@@ -2330,8 +2314,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
                 loop_seg, release_ds_a, window_len_d, ds,
                 T_int_d, sp_T_d, _cs_d, _dense_beam, 1,
                 _top_k=1, _window_half=(_window_half if _window_half else TRACKING_WINDOW_HALF),
-                _rescan_ratio=(_rescan_ratio if _rescan_ratio else TRACKING_RESCAN_SCORE_RATIO),
-                _allow_period_images=True)
+                _rescan_ratio=(_rescan_ratio if _rescan_ratio else TRACKING_RESCAN_SCORE_RATIO))
             if _step:
                 _dense_beam = _step
                 _best = _dense_beam[0]
