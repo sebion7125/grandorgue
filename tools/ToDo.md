@@ -1,5 +1,10 @@
 This ist my ToDo List for things left to do:
 
+
+ODF Loadin in GO:
+=================
+- Find out why building ranks takes so different times. Sometimes 1-2 seconds and sometimes 15-20 seconds for the same ODF. 
+
 Release Alignment:
 ==================
 - for T float versions a more precise aproach and bugfix in the analyze_lut.py has been applied. The changes have to be applied to GO as well

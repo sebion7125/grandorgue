@@ -144,9 +144,12 @@ def parse_verify_log(path: str) -> list:
                 # r_max added in v214: unfolded search range for 2T comparison
                 current["r_max"]         = int(kv.get("r_max", "0"))
                 # latest_loop_end/loop_count added in v227
-                current["latest_loop_end"] = int(kv.get("latest_loop_end", "0"))
-                current["loop_count"]      = int(kv.get("loop_count", "0"))
-                current["attack_file"]     = kv.get("attack_file", "")
+                current["latest_loop_end"]  = int(kv.get("latest_loop_end", "0"))
+                current["loop_count"]       = int(kv.get("loop_count", "0"))
+                current["attack_file"]      = kv.get("attack_file", "")
+                # v230j diagnostics
+                current["align_version"]    = kv.get("align_version", "")
+                current["ndp_silent_score"] = kv.get("ndp_silent_score", "?")
 
             elif line.startswith("lut,") and current is not None:
                 parts = line.split(",")
@@ -193,12 +196,22 @@ def parse_verify_log(path: str) -> list:
 
             elif line.startswith("pre_prune,") and current is not None:
                 parts = line.split(",")
-                # pre_prune,n,r,is_jump,approach_up
-                if len(parts) >= 5:
+                # old: pre_prune,n,r,is_jump,approach_up (5 fields)
+                # new: pre_prune,n,r,score,is_jump,approach_up (6 fields)
+                if len(parts) >= 6:
                     current.setdefault("pre_prune", []).append({
-                        "n":          int(parts[1]),
-                        "r":          int(parts[2]),
-                        "is_jump":    parts[3].strip() != "0",
+                        "n":           int(parts[1]),
+                        "r":           int(parts[2]),
+                        "score":       float(parts[3]),
+                        "is_jump":     parts[4].strip() != "0",
+                        "approach_up": parts[5].strip() != "0",
+                    })
+                elif len(parts) >= 5:
+                    current.setdefault("pre_prune", []).append({
+                        "n":           int(parts[1]),
+                        "r":           int(parts[2]),
+                        "score":       float("nan"),
+                        "is_jump":     parts[3].strip() != "0",
                         "approach_up": parts[4].strip() != "0",
                     })
 
@@ -211,6 +224,27 @@ def parse_verify_log(path: str) -> list:
                         "r":          int(parts[2]),
                         "is_jump":    parts[3].strip() != "0",
                         "approach_up": parts[4].strip() != "0",
+                    })
+
+            elif line.startswith("phase15_iv,") and current is not None:
+                parts = line.split(",")
+                # phase15_iv,na,nb,ra,rb,raw_dist,circ_dist,sp_T_raw,triggered
+                if len(parts) >= 9:
+                    current.setdefault("phase15_ivs", []).append({
+                        "na": int(parts[1]), "nb": int(parts[2]),
+                        "ra": int(parts[3]), "rb": int(parts[4]),
+                        "raw_dist": int(parts[5]), "circ_dist": int(parts[6]),
+                        "sp_T_raw": int(parts[7]), "triggered": parts[8].strip() != "0",
+                    })
+
+            elif line.startswith("phase15_step,") and current is not None:
+                parts = line.split(",")
+                # phase15_step,nd,cs_d,exp_pos,best_r,best_score,inserted
+                if len(parts) >= 7:
+                    current.setdefault("phase15_steps", []).append({
+                        "nd": int(parts[1]), "cs_d": int(parts[2]),
+                        "exp_pos": int(parts[3]), "best_r": int(parts[4]),
+                        "best_sc": float(parts[5]), "inserted": parts[6].strip() != "0",
                     })
 
     if current:
@@ -782,6 +816,12 @@ def compare_entry(entry: dict, organ_path: str,
         "py_pre_prune":    py_meta.get("pre_prune_points",  []),
         "go_post_prune":   entry.get("post_prune", []),
         "py_post_prune":   py_meta.get("post_prune_points", []),
+        "go_phase15_ivs":  entry.get("phase15_ivs",   []),
+        "go_phase15_steps":entry.get("phase15_steps",  []),
+        "py_phase15_ivs":  py_meta.get("phase15_ivs",   []),
+        "py_phase15_steps":py_meta.get("phase15_steps",  []),
+        "go_ndp_silent":   entry.get("ndp_silent_score", "?"),
+        "go_align_ver":    entry.get("align_version", ""),
         "diag_atk_len": _diag_atk_len,
         "diag_rel_len": _diag_rel_len,
         "diag_log_atk": _diag_log_atk,
@@ -938,18 +978,72 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
             mark = ">>>" if i == idx else "   "
             if i < n_go and go_raw:
                 gp = go_raw[i]
-                go_str = (f"n={gp['n']:5d} r={gp['r']:5d} "
+                sc = gp.get("score", float("nan"))
+                sc_str = f" sc={sc:+.4f}" if not (sc != sc) else ""  # nan check
+                go_str = (f"n={gp['n']:5d} r={gp['r']:5d}{sc_str} "
                           f"jmp={int(gp['is_jump'])} up={int(gp['approach_up'])}")
             else:
                 go_str = "---"
             if i < n_py and py_raw:
                 t = py_raw[i]
-                py_jmp = f" jmp={t[2]}" if len(t) > 2 else ""
-                py_str = f"n={t[0]:5d} r={t[1]:5d}{py_jmp}"
+                # t is (n, r, score, is_jump) or (n, r, is_jump) — handle both
+                if len(t) >= 4:
+                    py_sc_str = f" sc={t[2]:+.4f}"
+                    py_jmp = f" jmp={t[3]}"
+                elif len(t) == 3:
+                    py_sc_str = ""
+                    py_jmp = f" jmp={t[2]}"
+                else:
+                    py_sc_str = ""
+                    py_jmp = ""
+                py_str = f"n={t[0]:5d} r={t[1]:5d}{py_sc_str}{py_jmp}"
             else:
                 py_str = "---"
             emit(f"           {mark} [{i:3d}] GO: {go_str}")
             emit(f"                      PY: {py_str}")
+
+    def _show_phase15_diag(go_ivs, py_ivs, go_steps, py_steps):
+        """Show Phase 1.5 intervals and steps where GO and Python diverge."""
+        if not go_ivs and not py_ivs:
+            return
+        # Find triggered intervals in GO
+        go_trig = [(d["na"], d["nb"]) for d in go_ivs if d.get("triggered")]
+        py_trig = {(d[0], d[1]) for d in py_ivs if d[7]}  # (na,nb) triggered in PY
+        if not go_trig:
+            return
+        emit(f"         phase15 triggered intervals:")
+        for na, nb in go_trig[:5]:
+            go_iv = next((d for d in go_ivs if d["na"]==na and d["nb"]==nb), None)
+            py_iv = next((d for d in py_ivs if d[0]==na  and d[1]==nb), None)
+            in_py = (na, nb) in py_trig
+            go_str = (f"na={na} nb={nb} ra={go_iv['ra']} rb={go_iv['rb']} "
+                      f"raw={go_iv['raw_dist']} circ={go_iv['circ_dist']} "
+                      f"sp_T_raw={go_iv['sp_T_raw']}")
+            if py_iv:
+                py_str = (f"circ={py_iv[5]} sp_T={py_iv[6]} "
+                          f"trig={'YES' if py_iv[7] else 'NO'}")
+            else:
+                py_str = "NOT IN PY IVLIST"
+            emit(f"           GO iv: {go_str}")
+            emit(f"           PY iv: {py_str}")
+        # Show first few steps for first triggered interval
+        first_iv = go_trig[0]
+        go_st = [s for s in go_steps
+                 if s.get("inserted") is not None
+                 and any(iv["na"]==first_iv[0] and iv["nb"]==first_iv[1]
+                         for iv in go_ivs if iv["triggered"])]
+        # Simpler: show phase15_steps where nd in (na+1..nb-1)
+        na0, nb0 = first_iv
+        go_st2 = [s for s in go_steps if na0 < s["nd"] < nb0][:6]
+        py_st2 = [s for s in py_steps if na0 < s[2] < nb0][:6]
+        if go_st2 or py_st2:
+            emit(f"         phase15 steps for iv [{na0},{nb0}]:")
+            for s in go_st2:
+                emit(f"           GO step n={s['nd']} exp={s['exp_pos']} "
+                     f"r={s['best_r']} sc={s['best_sc']:+.4f} ins={int(s['inserted'])}")
+            for s in py_st2:
+                emit(f"           PY step n={s[2]} exp={s[4]} "
+                     f"r={s[5]} sc={s[6]:+.4f} ins={s[7]}")
 
     def _rel_tag(res):
         """Short release-window tag, e.g. '[≥778ms]' or '[0..256ms]'."""
@@ -1011,10 +1105,11 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                              f"jmp={d.get('go_jmp')}/{d.get('py_jmp')}")
             if len(res["lut_diffs"]) > 10:
                 emit(f"         ... and {len(res['lut_diffs'])-10} more LUT diffs")
-            # Phase-0 comparison: show for major diffs that have LUT divergences
+            # Phase-0 comparison: show for major diffs
             go_p0 = res.get("go_phase0", [])
             py_p0 = res.get("py_phase0", [])
-            if sev == "major" and (go_p0 or py_p0) and res["lut_diffs"]:
+            _show_p0 = (sev == "major" and res["lut_diffs"])
+            if _show_p0 and (go_p0 or py_p0):
                 n_last = res.get("phase0_n_last", "?")
                 def _fmt_p0(cands, n=4):
                     return "  ".join(f"r={r:5d} sc={sc:.6f}" for r, sc in cands[:n])
@@ -1096,8 +1191,39 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                         first_diff_idx = next(
                             (i for i, (a, b) in enumerate(zip(go_pre_pts, py_pre_pts)) if a != b),
                             min(n_go_pre, n_py_pre))
+                        res["pre_prune_div_idx"] = first_diff_idx
                         emit(f"           → pre_prune DIVERGED at idx={first_diff_idx}")
                         _show_prune_ctx(go_pre, py_pre, n_go_pre, n_py_pre, first_diff_idx)
+                        # Phase-0 comparison when tracking diverges from the very first step
+                        if first_diff_idx == 0 and (go_p0 or py_p0):
+                            n_last = res.get("phase0_n_last", "?")
+                            def _fmt_p0(cands, n=4):
+                                return "  ".join(f"r={r:5d} sc={sc:.6f}" for r, sc in cands[:n])
+                            go_top = [(c["r"], c["score"]) for c in go_p0[:4]]
+                            py_top = py_p0[:4]
+                            emit(f"         Phase0 n_last={n_last}:")
+                            emit(f"           GO: {_fmt_p0(go_top)}")
+                            emit(f"           PY: {_fmt_p0(py_top)}")
+                            if go_top and py_top:
+                                score_gap = abs(go_top[0][1] - py_top[0][1])
+                                r_gap = abs(go_top[0][0] - py_top[0][0])
+                                if r_gap > 1:
+                                    if score_gap < 5e-4:
+                                        emit(f"           → NEAR-TIE: top score gap={score_gap:.2e}  r_gap={r_gap}")
+                                    else:
+                                        emit(f"           → DIVERGED: score_gap={score_gap:.4f}  r_gap={r_gap}")
+                        # Show GO binary marker and Phase 1.5 diagnostic.
+                        go_av  = res.get("go_align_ver",  "")
+                        go_nss = res.get("go_ndp_silent", "?")
+                        if go_av or go_nss != "?":
+                            emit(f"         GO build: align_version={go_av}  ndp_silent_score={go_nss}")
+                        cnt_diff = n_go_pre - n_py_pre
+                        if 0 < cnt_diff <= 10:
+                            go_ivs   = res.get("go_phase15_ivs",   [])
+                            py_ivs   = res.get("py_phase15_ivs",   [])
+                            go_steps = res.get("go_phase15_steps",  [])
+                            py_steps = res.get("py_phase15_steps",  [])
+                            _show_phase15_diag(go_ivs, py_ivs, go_steps, py_steps)
             for s in res["simsrc_diffs"][:5]:
                 emit(f"         SIM_LOGIC lp={s['loop_pos']:7d}  go={s['go_r']:4d} py={s['py_r']:4d}  Δ={s['dist']}")
             if len(res["simsrc_diffs"]) > 5:

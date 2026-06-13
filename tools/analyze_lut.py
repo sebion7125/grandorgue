@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v230h"
+TOOL_VERSION = "v230r"
 
 def _cpp_round(x: float) -> int:
     """C++ std::round() for non-negative x: round half away from zero."""
@@ -68,7 +68,7 @@ try:
                 num += lw_n[i] * v
                 er  += v * v
             denom = np.sqrt(er)
-            scores[r] = num / denom if denom > np.float32(1e-12) else np.float32(0.0)
+            scores[r] = num / denom if denom > np.float32(1e-12) else np.float32(-2.0)
         return scores
 
     @_numba.njit(cache=True, fastmath=False, nogil=True)
@@ -93,7 +93,7 @@ try:
                 num += lw_n[i] * v
                 er  += v * v
             denom = np.sqrt(er)
-            scores[r] = num / denom if denom > np.float32(1e-12) else np.float32(0.0)
+            scores[r] = num / denom if denom > np.float32(1e-12) else np.float32(-2.0)
         return scores
 
     @_numba.njit(cache=True, fastmath=False, nogil=True)
@@ -115,7 +115,7 @@ try:
                 num += lw_n[i] * v
                 er  += v * v
             denom = np.sqrt(er)
-            scores[k] = num / denom if denom > np.float32(1e-12) else np.float32(0.0)
+            scores[k] = num / denom if denom > np.float32(1e-12) else np.float32(-2.0)
         return scores
 
     @_numba.njit(cache=True, fastmath=False, nogil=True)
@@ -140,7 +140,13 @@ try:
 
     _CPP_NUMERICS_BACKEND = "numba"
 except Exception:
-    pass  # numba not available → einsum fallback
+    import warnings as _warnings
+    _warnings.warn(
+        "numba not available — NDP computation falls back to numpy BLAS (float64). "
+        "Results may differ from C++ scalar float32 at NDP near-ties. "
+        "Install numba for byte-identical results.",
+        stacklevel=1,
+    )
 
 # v115: Exhaustive DP debug disabled by default; it was useful for diagnosis
 # but is too expensive for full-set scans.
@@ -327,10 +333,6 @@ TRACKING_DN_SPARSE         = 6    # Schrittweite sonst (= DENSE_STEP)
 TRACKING_WINDOW_HALF       = 2    # ±2 Samples um Erwartungsposition
 TRACKING_RESCAN_SCORE_RATIO = 0.90 # Rescan wenn Score < 90% des Vorgängers
 TRACKING_RESCAN_DRIFT      = 8.0  # Rescan wenn Drift > 8 Samples
-# Epsilon for deterministic beam tiebreaking: matches C++ V2_BEAM_SORT_EPS.
-# Beams within this cumulative-score distance are sorted by beam_id (lower = better
-# Phase-0 peak). Absorbs BLAS-vs-scalar float32 drift (~4e-3 over 400 steps).
-V2_BEAM_SORT_EPS           = 0.02
 BRANCH_PHASE_SEPARATION_FACTOR = 1.0 / 16.0  # v142: 1'/high aliquots can expose ~16 branches per 2T
 BRANCH_FIT_WIN           = 8      # letzte Punkte fuer lokale lineare Vorhersage
 BRANCH_STABLE_RESID_FACTOR = 1.0
@@ -798,7 +800,7 @@ def _compute_corr_scores(lw: np.ndarray, release_mono: np.ndarray,
             # lw-Normierung UND Scan in einem skalaren numba-Loop —
             # byte-identisch zu C++ FullScanV2 (kein SIMD-Accumulation-Unterschied)
             scores = _ndp_scan_with_norm_numba(lw_f32, rel_f32, r_max, window_len)
-            if r_max == 0 or (scores == 0).all():
+            if r_max == 0:
                 return None, 0
         else:
             # einsum mit optimize=False → umgeht BLAS SGEMV (näherungsweise C++)
@@ -819,7 +821,16 @@ def _compute_corr_scores(lw: np.ndarray, release_mono: np.ndarray,
                               np.float32(0.0)).astype(np.float32)
         return scores, r_max
 
-    # ── Standard: Python BLAS (numpy) ──────────────────────────────────────
+    # ── Standard: scalar float32 (numba) wenn verfügbar — byte-identical zu C++ FullScanV2.
+    # numpy BLAS (float64) weicht bei NDP-Near-Ties von C++ scalar float32 ab.
+    if _CPP_NUMERICS_BACKEND == "numba":
+        lw_f32  = lw.astype(np.float32)
+        rel_f32 = release_mono[:r_max + window_len].astype(np.float32)
+        scores  = _ndp_scan_with_norm_numba(lw_f32, rel_f32, r_max, window_len)
+        if r_max == 0:
+            return None, 0
+        return scores, r_max
+    # Fallback: numpy BLAS (nur wenn numba nicht installiert)
     na = np.linalg.norm(lw)
     if na < 1e-12:
         return None, 0
@@ -1996,10 +2007,17 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
             return candidates, False
         lw_n = (lw_f32 * (np.float32(1.0) / np.sqrt(e_lw))).astype(np.float32)
     else:
-        na = np.linalg.norm(lw)
-        if na < 1e-12:
-            return candidates, False
-        lw_n = (lw / na).astype(np.float32)
+        if _CPP_NUMERICS_BACKEND == "numba":
+            # scalar float32 — byte-identical zu C++ TrackStepV2 lw normalization
+            lw_f32 = lw.astype(np.float32)
+            lw_n = _normalize_lw_f32_numba(lw_f32)
+            if not np.any(lw_n):
+                return candidates, False
+        else:
+            na = np.linalg.norm(lw)
+            if na < 1e-12:
+                return candidates, False
+            lw_n = (lw / na).astype(np.float32)
 
     n_beams = len(candidates)
     _ratio  = _rescan_ratio if _rescan_ratio is not None else TRACKING_RESCAN_SCORE_RATIO
@@ -2010,10 +2028,10 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
     dn_prev_arr= np.array([b[3] for b in candidates], dtype=np.float32)
     # C++ Numerik: slope und exp_pos in float32 (wie TrackStepV2).
     # np.maximum(1.0, ...) würde auf float64 upcasten → slope wird float64 → exp_pos float64.
-    # Das führt zu anderen Rundungsergebnissen als C++ std::round(float).
+    # v230m: C++ verwendet jetzt RoundHalfEven (Banker's Rounding) = np.round → kein Unterschied mehr.
     if _cpp_numerics_enabled:
         slopes  = (r_arr - r_prev_arr) / np.maximum(np.float32(1.0), dn_prev_arr)
-        exp_pos = np.floor((r_arr + slopes * np.float32(dn)).astype(np.float32) + np.float32(0.5)).astype(np.int32) % sp_T_d
+        exp_pos = np.round((r_arr + slopes * np.float32(dn)).astype(np.float32)).astype(np.int32) % sp_T_d
     else:
         slopes  = (r_arr - r_prev_arr) / np.maximum(1.0, dn_prev_arr)
         exp_pos = np.round(r_arr + slopes * dn).astype(np.int32) % sp_T_d  # (n_beams,)
@@ -2026,8 +2044,9 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
     def _batch_score(pos2d):
         """pos2d: (n, k) int32 → scores (n, k)."""
         pf = pos2d.ravel()
-        if _cpp_numerics_enabled and _CPP_NUMERICS_BACKEND == "numba":
-            # Scalar float32 path — byte-identical to C++ TrackStepV2 ndp_at().
+        if _CPP_NUMERICS_BACKEND == "numba":
+            # Scalar float32 — byte-identical zu C++ TrackStepV2 ndp_at().
+            # Auch im Referenzpfad: numpy BLAS (float64) weicht bei Near-Ties von C++ ab.
             sc = _ndp_positions_numba(lw_n, release_ds, pf.astype(np.int32), window_len_d)
         else:
             ok   = (pf >= 0) & (pf + window_len_d <= len(release_ds))
@@ -2260,7 +2279,11 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
                         if bid in used_ids:
                             continue
                         used_ids.add(bid)
-                        refreshed.append((fr_r_d, fr_sc, fr_r_d, 1, nearest[4] + fr_sc, bid))
+                        if _cpp_numerics_enabled:
+                            new_cum = float(np.float32(nearest[4]) + np.float32(fr_sc))
+                        else:
+                            new_cum = nearest[4] + fr_sc
+                        refreshed.append((fr_r_d, fr_sc, fr_r_d, 1, new_cum, bid))
                     if refreshed:
                         vis_candidates = refreshed
 
@@ -2293,23 +2316,32 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     # ── Phase 1.5: Dichtes Resampling an verdächtigen Sprungstellen ──────────
     # Intervalle mit abs. Abstand > 20 Samples und dn > 2 werden mit dn=1 nachgemessen.
     JUMP_DENSE_ABS = 20
+    _sp_T_for_iv = sp_T_d * ds          # wrap-around period for interval check
+    _phase15_ivs   = []                  # (na,nb,ra,rb,raw_dist,circ_dist,sp_T,triggered)
+    _phase15_steps = []                  # (na,nb,nd,cs_d,exp_pos,best_r,best_sc,inserted)
     _pn_sorted = sorted(primary_by_n.keys())
     for _na, _nb in zip(_pn_sorted, _pn_sorted[1:]):
         _dn_interval = _nb - _na
-        if _dn_interval <= 2:
-            continue
         _ra, _sca = primary_by_n[_na]
         _rb, _scb = primary_by_n[_nb]
-        _dist = abs(_rb - _ra)
-        _dist = min(_dist, sp_T_d * ds - _dist)
-        if _dist < JUMP_DENSE_ABS:
+        _raw_dist  = abs(_rb - _ra)
+        _circ_dist = min(_raw_dist, _sp_T_for_iv - _raw_dist)
+        _triggered = (_dn_interval > 2 and _circ_dist >= JUMP_DENSE_ABS)
+        _phase15_ivs.append((_na, _nb, _ra, _rb, _raw_dist, _circ_dist,
+                             _sp_T_for_iv, int(_triggered)))
+        if not _triggered:
             continue
         # Dichtes Tracking: dn=1 von _nb rückwärts bis _na
         _dense_beam = [(_rb // ds, _scb, _rb // ds, 1, _scb, best_id)]
         for _n_dense in range(_nb - 1, _na, -1):
             _cs_d = _cpp_round(_n_dense * T_float) // ds
             if _cs_d + window_len_d > len(loop_seg):
+                _phase15_steps.append((_na, _nb, _n_dense, _cs_d, -1, -1, -99.0, 0))
                 continue
+            # Compute exp_pos for logging (before the track step updates the beam).
+            _b0 = _dense_beam[0]
+            _slope_log = (_b0[0] - _b0[2]) / max(1, _b0[3])
+            _exp_pos_log = int(round(_b0[0] + _slope_log * 1)) % sp_T_d
             _step, _ = _track_step_v2(
                 loop_seg, release_ds_a, window_len_d, ds,
                 T_int_d, sp_T_d, _cs_d, _dense_beam, 1,
@@ -2318,8 +2350,17 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
             if _step:
                 _dense_beam = _step
                 _best = _dense_beam[0]
+                _inserted = True
                 primary_by_n[_n_dense]  = (int(_best[0] * ds), float(_best[1]))
                 all_cands_by_n[_n_dense] = [(int(_best[0] * ds), float(_best[1]))]
+            else:
+                _best = _dense_beam[0]
+                _inserted = False
+            _phase15_steps.append((_na, _nb, _n_dense, _cs_d,
+                                   _exp_pos_log * ds, int(_best[0] * ds),
+                                   float(_best[1]), int(_inserted)))
+    meta["phase15_ivs"]   = _phase15_ivs
+    meta["phase15_steps"] = _phase15_steps
 
     # ── Phase 2: LUT-Punkte + Pruning ─────────────────────────────────────────
     chosen_r_by_n   = {}
@@ -2355,8 +2396,9 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         _jb.is_jump = dist / dn > _jump_rate_t
 
     pruned_before = len(points)
-    # Capture pre-prune for diagnostic comparison. (n, r, is_jump) tuples — lightweight.
-    meta["pre_prune_points"] = [(p.n, int(p.best_r), int(getattr(p, 'is_jump', False))) for p in points]
+    # Capture pre-prune for diagnostic comparison. (n, r, score, is_jump) tuples.
+    meta["pre_prune_points"] = [(p.n, int(p.best_r), float(p.best_score),
+                                 int(getattr(p, 'is_jump', False))) for p in points]
     if len(points) > 2:
         points = _prune_lut_points(points, T_int)
     meta["post_prune_points"] = [(p.n, int(p.best_r), int(getattr(p, 'is_jump', False))) for p in points]
