@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v230a"
+TOOL_VERSION = "v230"
 
 def _cpp_round(x: float) -> int:
     """C++ std::round() for non-negative x: round half away from zero."""
@@ -1101,22 +1101,22 @@ def estimate_period_by_autocorr(samples: np.ndarray,
 
 
 def _prune_lut_points(pts: list, T_int: int, min_interp_err: float = None) -> list:
-    """Douglas-Peucker Pruning — C++-kompatible Iteration (v203).
+    """Douglas-Peucker Pruning — C++-kompatible float32-Arithmetik (v230b).
 
-    Bugfix gegenüber vorheriger Version: Löschungen werden pro Pass nur
-    markiert; der aktive Index wird erst am Ende des Passes neu aufgebaut
-    (wie C++ PruneV2). Das verhindert den alten Fehler, bei dem sofortige
-    left-to-right-Löschungen den linken Gap progressiv über MAX_PRUNE_GAP_N
-    anwachsen ließen und Punkte dauerhaft unerreichbar machten.
+    Alle Zwischenwerte in float32 wie C++ PruneV2, damit Grenzfälle nahe der
+    Toleranz identisch entschieden werden (float64 vs float32 kann ±1 Sample
+    Abweichung erzeugen).
 
-    Weitere Angleichungen an C++:
-    - Gap-Guard: Gesamtspan (next.n - prev.n) > MAX_PRUNE_GAP_N statt per-Seite.
-    - Score-Guard entfernt: schlechter Score verhindert kein Pruning mehr.
+    Bugfix v203: Löschungen pro Pass nur markieren; Index erst am Passende
+    neu aufbauen (wie C++ PruneV2 — verhindert progressives Gap-Anwachsen).
     """
     if len(pts) <= 2:
         return pts
+    # C++: tol = std::max(2.0f, (float)T_int / V2_PRUNE_TOL_FACTOR)  (V2_PRUNE_TOL_FACTOR=32)
     if min_interp_err is None:
-        min_interp_err = max(2.0, T_int / 32.0)
+        tol = np.maximum(np.float32(2.0), np.float32(T_int) / np.float32(32.0))
+    else:
+        tol = np.float32(min_interp_err)
     track_rs = [float(getattr(p, "track_r", p.best_r)) for p in pts]
     ns       = [p.n for p in pts]
     sz       = len(pts)
@@ -1135,14 +1135,26 @@ def _prune_lut_points(pts: list, T_int: int, min_interp_err: float = None) -> li
             if getattr(pts[nxt], 'is_jump', False):               continue
             if getattr(pts[cur], 'phase', '') == "curve":         continue
             if ns[nxt] - ns[prev]          > MAX_PRUNE_GAP_N:     continue
+            # C++: std::abs(pts[cur].r - pts[prev].r) > (int)(T_int_f / 4.0f)
+            # Both sides are integer r-values; int truncation of T/4 matches.
             if abs(track_rs[cur]  - track_rs[prev]) > T_int / 4.0: continue
             if abs(track_rs[nxt]  - track_rs[cur])  > T_int / 4.0: continue
 
-            n0, r0 = ns[prev], track_rs[prev]
-            n1, r1 = ns[nxt],  track_rs[nxt]
-            dn = max(1, n1 - n0)
-            if all(abs(track_rs[j] - (r0 + (ns[j] - n0) / dn * (r1 - r0))) <= min_interp_err
-                   for j in range(prev + 1, nxt)):
+            # C++ float32 arithmetic — must match PruneV2 exactly.
+            n0 = np.float32(ns[prev]);   r0 = np.float32(track_rs[prev])
+            n1 = np.float32(ns[nxt]);    r1 = np.float32(track_rs[nxt])
+            dn_f = np.maximum(np.float32(1.0), n1 - n0)
+            can_del = True
+            for j in range(prev + 1, nxt):
+                # C++: t = (float)(pts[j].n - pts[prev].n) / dn
+                t  = np.float32(ns[j] - ns[prev]) / dn_f
+                # C++: er = r0 + t * (r1 - r0)
+                er = r0 + t * (r1 - r0)
+                # C++: if (std::abs((float)pts[j].r - er) > tol) { can_del = false; break; }
+                if abs(np.float32(track_rs[j]) - er) > tol:
+                    can_del = False
+                    break
+            if can_del:
                 active[cur] = False
                 changed     = True
 
