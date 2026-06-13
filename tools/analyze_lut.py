@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v230f"
+TOOL_VERSION = "v230g"
 
 def _cpp_round(x: float) -> int:
     """C++ std::round() for non-negative x: round half away from zero."""
@@ -647,9 +647,16 @@ def _parse_wav_chunks(path: str) -> dict:
     return result
 
 
-def read_wav_mono_float(path: str, max_samples: int = None) -> tuple:
+def read_wav_mono_float(path: str, max_samples: int = None,
+                        _cpp_int_scale: bool = False) -> tuple:
     """Liest WAV, gibt (mono_float32_array, sample_rate, n_frames, n_channels) zurück.
-    Toleriert fmt_size != 16 (z.B. 18 oder 20 bei manchen 24-bit WAVs)."""
+    Toleriert fmt_size != 16 (z.B. 18 oder 20 bei manchen 24-bit WAVs).
+
+    _cpp_int_scale: wenn True, werden die Samples NICHT durch 'norm' dividiert,
+    sondern als rohe Integer-Float32-Werte zurückgegeben (exakt wie C++
+    GOSoundReleaseAlignTable::ComputeCorrelationLut: '(float)GetSample()').
+    Nur für --cpp-numerics-Numba-Vergleich relevant; normaler Vergleich läuft
+    immer mit normierten Samples."""
     r   = _parse_wav_chunks(path)
     nch = r["nch"]
     sr  = r["sr"]
@@ -694,8 +701,20 @@ def read_wav_mono_float(path: str, max_samples: int = None) -> tuple:
         raise ValueError(f"Unbekannte Sample-Breite {sw*8} bit: {path}")
 
     # Mono-Mix aller Kanäle
-    s    = s.reshape(-1, nch)
-    mono = s.mean(axis=1) / norm
+    s = s.reshape(-1, nch)
+    if _cpp_int_scale:
+        # Match C++ exactly: float32-Kanal-Summe dann / nch.
+        # C++: float s=0; for(c) s += (float)GetSample(...); mono = s / nch;
+        # Kein '/ norm' — bleibt im Integer-Bereich (z.B. ±8388607 für 24-bit).
+        if nch == 1:
+            mono = s[:, 0].copy()                          # bereits float32
+        else:
+            acc = s[:, 0].copy()                           # float32
+            for c in range(1, nch):
+                acc += s[:, c]                             # float32 + float32
+            mono = acc * np.float32(1.0 / nch)            # /nch exakt für 2^k
+    else:
+        mono = s.mean(axis=1).astype(np.float32) / np.float32(norm)
     return mono, sr, nf, nch
 
 

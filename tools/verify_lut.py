@@ -227,6 +227,7 @@ _organ_cache: dict = {}
 # attack/release file for each of the N release-time variants of a pipe.
 import threading
 _wav_cache: dict = {}
+_wav_cpp_cache: dict = {}  # integer-scale cache for --cpp-numerics numba path
 _smpl_cache: dict = {}
 _wav_cache_lock = threading.Lock()
 
@@ -238,6 +239,18 @@ def _load_wav_cached(path: str):
     result = (mono, sr)
     with _wav_cache_lock:
         _wav_cache[path] = result
+    return result
+
+def _load_wav_cpp_cached(path: str):
+    """Like _load_wav_cached but returns C++ integer-scale samples (no norm division).
+    Used when --cpp-numerics + numba to match C++ float32 NDP arithmetic exactly."""
+    with _wav_cache_lock:
+        if path in _wav_cpp_cache:
+            return _wav_cpp_cache[path]
+    mono, sr, _, _ = _al.read_wav_mono_float(path, _cpp_int_scale=True)
+    result = (mono, sr)
+    with _wav_cache_lock:
+        _wav_cpp_cache[path] = result
     return result
 
 def _parse_smpl_cached(path: str):
@@ -563,10 +576,16 @@ def compare_entry(entry: dict, organ_path: str,
             if best_ap is not None:
                 chosen_attack_path = best_ap
 
-    # Load WAVs (cached — same file shared by all release-time variants)
+    # Load WAVs (cached — same file shared by all release-time variants).
+    # When --cpp-numerics + numba: use integer-scale samples to match C++
+    # float32 NDP arithmetic exactly (C++ keeps raw integer values, Python
+    # normally divides by 2^(bit_depth-1) → different float32 rounding).
+    _use_cpp_scale = (_al.get_cpp_numerics()
+                      and _al._CPP_NUMERICS_BACKEND == "numba")
+    _load_fn = _load_wav_cpp_cached if _use_cpp_scale else _load_wav_cached
     try:
-        atk_mono, sr = _load_wav_cached(chosen_attack_path)
-        rel_mono, _  = _load_wav_cached(pipe_desc["release_path"])
+        atk_mono, sr = _load_fn(chosen_attack_path)
+        rel_mono, _  = _load_fn(pipe_desc["release_path"])
     except Exception as e:
         return _skip(f"wav_error:{e}")
 
