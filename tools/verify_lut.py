@@ -146,6 +146,7 @@ def parse_verify_log(path: str) -> list:
                 # latest_loop_end/loop_count added in v227
                 current["latest_loop_end"] = int(kv.get("latest_loop_end", "0"))
                 current["loop_count"]      = int(kv.get("loop_count", "0"))
+                current["attack_file"]     = kv.get("attack_file", "")
 
             elif line.startswith("lut,") and current is not None:
                 parts = line.split(",")
@@ -167,6 +168,17 @@ def parse_verify_log(path: str) -> list:
                     current["sim"].append({
                         "loop_pos": int(parts[1]),
                         "r_interp": int(parts[2]),
+                    })
+
+            elif line.startswith("phase0,") and current is not None:
+                parts = line.split(",")
+                # phase0,beam_id,r_samples,score,n_last
+                if len(parts) >= 5:
+                    current.setdefault("phase0", []).append({
+                        "beam_id": int(parts[1]),
+                        "r":       int(parts[2]),
+                        "score":   float(parts[3]),
+                        "n_last":  int(parts[4]),
                     })
 
     if current:
@@ -255,6 +267,12 @@ def _parse_organ_fast(organ_path: str) -> list:
             midi_note = first_key + pi - 1
             harmonic  = int(sec.get(f"{pk}HarmonicNumber", str(global_hn)))
 
+            # Collect all attack variants (main + PipeXXXAttackNNN extras)
+            all_attacks = [resolve(atk_rel)]
+            for k, v in sec.items():
+                if re.match(rf"^{pk}Attack\d+$", k):
+                    all_attacks.append(resolve(v))
+
             # Collect releases
             releases = {}
             for k, v in sec.items():
@@ -282,6 +300,7 @@ def _parse_organ_fast(organ_path: str) -> list:
                     "rank_name":        rank_name,
                     "midi_note":        midi_note,
                     "attack_path":      resolve(atk_rel),
+                    "attack_paths":     all_attacks,
                     "release_path":     resolve(rel_path),
                     "harmonic_number":  harmonic,
                     "crossfade_len_ms": int(sec.get(
@@ -477,24 +496,68 @@ def compare_entry(entry: dict, organ_path: str,
     if pipe_desc is None:
         pipe_desc = pipes[0]
 
+    # Select the correct attack variant by exact filename match (requires GO
+    # rebuild that logs attack_file= in the CSV header), falling back to the
+    # loop_len+loop_count heuristic for older CSV files without attack_file=.
+    log_attack_file = entry.get("attack_file", "")
+    chosen_attack_path = pipe_desc["attack_path"]
+    if pipe_desc.get("attack_paths") and len(pipe_desc["attack_paths"]) > 1:
+        if log_attack_file:
+            # Exact basename match — deterministic, no collision risk.
+            for ap in pipe_desc["attack_paths"]:
+                if os.path.basename(ap) == log_attack_file:
+                    chosen_attack_path = ap
+                    break
+        else:
+            # Fallback heuristic for CSV files predating attack_file= logging.
+            log_loop_len   = entry["loop_len"]
+            log_loop_count = entry.get("loop_count", 0)
+            best_ap = None
+            for ap in pipe_desc["attack_paths"]:
+                try:
+                    smpl_ap  = _parse_smpl_cached(ap)
+                    loops_ap = smpl_ap.get("loops", [])
+                    if not loops_ap:
+                        continue
+                    le_ap = max(l[1] for l in loops_ap) + 1
+                    lc_ap = len(loops_ap)
+                    if le_ap == log_loop_len:
+                        if lc_ap == log_loop_count or best_ap is None:
+                            best_ap = ap
+                        if lc_ap == log_loop_count:
+                            break
+                except Exception:
+                    pass
+            if best_ap is not None:
+                chosen_attack_path = best_ap
+
     # Load WAVs (cached — same file shared by all release-time variants)
     try:
-        atk_mono, sr = _load_wav_cached(pipe_desc["attack_path"])
+        atk_mono, sr = _load_wav_cached(chosen_attack_path)
         rel_mono, _  = _load_wav_cached(pipe_desc["release_path"])
     except Exception as e:
         return _skip(f"wav_error:{e}")
+
+    # Diagnostic: log WAV lengths vs what C++ used.
+    # Stored so compare_entry result can include them for diff output.
+    _diag_atk_len = len(atk_mono)
+    _diag_rel_len = len(rel_mono)
+    _diag_log_atk = entry["loop_len"]
+    _diag_log_rel = entry.get("release_len", 0)
 
     # smpl loop points from attack WAV (cached header read)
     smpl   = _parse_smpl_cached(pipe_desc["attack_path"])
     loops  = smpl.get("loops", [])
     loop_start, loop_end = (loops[0][0], loops[0][1]) if loops else (0, len(atk_mono) - 1)
 
-    # C++ uses loop_section.GetLength() as the attack buffer length.
-    # This matches loop_end - loop_start + 1 (or the full WAV if no smpl loops).
-    # Truncate Python's array to the same length so n_total agrees.
+    # C++ uses loop_section.GetLength() = latest_loop_end + 1 as the attack buffer length.
+    # Truncate Python's array to the same length so guards in compute_lut_v2 agree.
     log_loop_len = entry["loop_len"]
     if log_loop_len > 0 and len(atk_mono) != log_loop_len:
         atk_mono = atk_mono[:log_loop_len]
+    # After truncation the relevant span is always [0, len-1] regardless of SMPL loop_start.
+    loop_start = 0
+    loop_end   = len(atk_mono) - 1
 
     # Time-window constraints
     log_sr     = entry["sample_rate"]
@@ -510,7 +573,7 @@ def compare_entry(entry: dict, organ_path: str,
         if latest_loop_end == 0 and loops:
             latest_loop_end = max(l[1] for l in loops)
 
-        py_lut, _ = _al.compute_lut_v2(
+        py_lut, py_meta = _al.compute_lut_v2(
             attack_mono=atk_mono,
             release_mono=rel_mono,
             T_float=T_float,
@@ -527,6 +590,10 @@ def compare_entry(entry: dict, organ_path: str,
         )
     except Exception as e:
         return _skip(f"compute_error:{e}")
+
+    # ── Phase-0 candidate comparison (diagnostic) ─────────────────────────────
+    go_phase0 = entry.get("phase0", [])  # list of {beam_id, r, score, n_last}
+    py_phase0 = py_meta.get("phase0_candidates", [])  # list of (r_samples, score)
 
     # ── LUT comparison ─────────────────────────────────────────────────────────
     # Compare in [0, 2T) space so cross-period divergences are detected correctly.
@@ -655,6 +722,17 @@ def compare_entry(entry: dict, organ_path: str,
         "lut_diffs":   lut_diffs,
         "sim_diffs":   sim_diffs,
         "simsrc_diffs":simsrc_diffs,
+        "go_phase0":   go_phase0,
+        "py_phase0":   py_phase0,
+        "phase0_n_last": py_meta.get("phase0_n_last"),
+        "diag_atk_len": _diag_atk_len,
+        "diag_rel_len": _diag_rel_len,
+        "diag_log_atk": _diag_log_atk,
+        "diag_log_rel": _diag_log_rel,
+        "diag_atk_path": chosen_attack_path,
+        "diag_rel_path": pipe_desc["release_path"],
+        "diag_py_loop_end": max((l[1] for l in loops), default=0) if loops else 0,
+        "diag_go_loop_end": entry.get("latest_loop_end", 0),
     }
 
 
@@ -855,6 +933,39 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                              f"jmp={d.get('go_jmp')}/{d.get('py_jmp')}")
             if len(res["lut_diffs"]) > 10:
                 emit(f"         ... and {len(res['lut_diffs'])-10} more LUT diffs")
+            # Phase-0 comparison: show for major diffs that have LUT divergences
+            go_p0 = res.get("go_phase0", [])
+            py_p0 = res.get("py_phase0", [])
+            if sev == "major" and (go_p0 or py_p0) and res["lut_diffs"]:
+                n_last = res.get("phase0_n_last", "?")
+                def _fmt_p0(cands, n=4):
+                    return "  ".join(f"r={r:5d} sc={sc:.6f}" for r, sc in cands[:n])
+                go_top = [(c["r"], c["score"]) for c in go_p0[:4]]
+                py_top = py_p0[:4]
+                emit(f"         Phase0 n_last={n_last}:")
+                emit(f"           GO: {_fmt_p0(go_top)}")
+                emit(f"           PY: {_fmt_p0(py_top)}")
+                # Flag near-tie: top GO and top PY score differ by < 5e-4
+                if go_top and py_top:
+                    score_gap = abs(go_top[0][1] - py_top[0][1])
+                    r_gap = abs(go_top[0][0] - py_top[0][0])
+                    if r_gap > 1:
+                        if score_gap < 5e-4:
+                            emit(f"           → NEAR-TIE: top score gap={score_gap:.2e}  r_gap={r_gap}")
+                        else:
+                            emit(f"           → DIVERGED: score_gap={score_gap:.4f}  r_gap={r_gap}")
+                            # Show WAV lengths and paths to diagnose wrong file
+                            da, dl_a = res.get("diag_atk_len",0), res.get("diag_log_atk",0)
+                            dr, dl_r = res.get("diag_rel_len",0), res.get("diag_log_rel",0)
+                            atk_ok = dl_a == 0 or da >= dl_a
+                            rel_ok = dl_r == 0 or dr >= dl_r
+                            emit(f"           WAV: atk={da}(GO={dl_a}){'✓' if atk_ok else '⚠MISMATCH'}  rel={dr}(GO={dl_r}){'✓' if rel_ok else '⚠MISMATCH'}")
+                            py_le = res.get("diag_py_loop_end", 0)
+                            go_le = res.get("diag_go_loop_end", 0)
+                            le_match = "✓" if py_le == go_le else f"⚠PY={py_le} GO={go_le}"
+                            emit(f"           latest_loop_end: {le_match}")
+                            ap = res.get("diag_atk_path","?")
+                            emit(f"           atk_path: ...{ap[-60:]}" if len(ap)>60 else f"           atk_path: {ap}")
             for s in res["simsrc_diffs"][:5]:
                 emit(f"         SIM_LOGIC lp={s['loop_pos']:7d}  go={s['go_r']:4d} py={s['py_r']:4d}  Δ={s['dist']}")
             if len(res["simsrc_diffs"]) > 5:
