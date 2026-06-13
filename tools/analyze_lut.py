@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v230"
+TOOL_VERSION = "v230c"
 
 def _cpp_round(x: float) -> int:
     """C++ std::round() for non-negative x: round half away from zero."""
@@ -2035,8 +2035,16 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
             new_cum = cum_sc + bsc
         new_cands.append((br, bsc, r_d, dn, new_cum, beam_id))
 
-    # Kandidaten nach Score sortieren, dann räumlich zu nahe liegende entfernen
-    new_cands.sort(key=lambda x: x[4], reverse=True)
+    # Kandidaten nach Near-Tie-Policy sortieren (matches C++ TrackStepV2):
+    # Beams innerhalb V2_BEAM_SORT_EPS vom Maximum bilden Near-Tie-Gruppe →
+    # dort beam_id aufsteigend (=Phase-0-NDP-Rang). Restliche: score absteigend.
+    _max_cum = max(b[4] for b in new_cands)
+    def _beam_sort_key(b):
+        near = (_max_cum - b[4]) <= V2_BEAM_SORT_EPS
+        if near:
+            return (0, b[5], b[0])   # near-tie: (group=0, beam_id asc, r_d asc)
+        return (1, -b[4], b[5])      # non-near:  (group=1, -score, beam_id asc)
+    new_cands.sort(key=_beam_sort_key)
     filtered = []
     min_dist_d = (_min_peak_dist_d if _min_peak_dist_d is not None
                   else max(1, T_int_d // 32))

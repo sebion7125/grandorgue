@@ -647,11 +647,28 @@ static TrackResult TrackStepV2(
       {best_r, best_sc, b.r_d, (int)dn, b.cum_score + best_sc, b.beam_id});
   }
 
-  // Sort by cumulative score descending.
-  std::sort(new_beams.begin(), new_beams.end(),
-            [](const BeamState &a, const BeamState &b) {
-              return a.cum_score > b.cum_score;
-            });
+  // Sort by cumulative score descending; beams within V2_BEAM_SORT_EPS of the
+  // maximum are treated as a near-tie group and sorted by beam_id ascending
+  // (lower beam_id = higher Phase-0 NDP peak).  Absorbs float32 score
+  // collisions that make std::sort order undefined for equal-score beams.
+  {
+    float max_cum = -std::numeric_limits<float>::infinity();
+    for (const auto &b : new_beams)
+      max_cum = std::max(max_cum, b.cum_score);
+    std::sort(new_beams.begin(), new_beams.end(),
+              [max_cum](const BeamState &a, const BeamState &b) {
+                const bool a_near = (max_cum - a.cum_score) <= V2_BEAM_SORT_EPS;
+                const bool b_near = (max_cum - b.cum_score) <= V2_BEAM_SORT_EPS;
+                if (a_near != b_near) return (int)a_near > (int)b_near;
+                if (a_near) {
+                  if (a.beam_id != b.beam_id) return a.beam_id < b.beam_id;
+                  return a.r_d < b.r_d;
+                }
+                if (a.cum_score != b.cum_score) return a.cum_score > b.cum_score;
+                if (a.beam_id != b.beam_id)     return a.beam_id < b.beam_id;
+                return a.r_d < b.r_d;
+              });
+  }
 
   // Spatial deduplication: keep at most top_k beams with min distance.
   std::vector<BeamState> filtered;
