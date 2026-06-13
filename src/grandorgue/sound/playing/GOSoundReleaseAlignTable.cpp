@@ -309,21 +309,55 @@ static float NormalizedDotProduct(
 }
 
 // Float32 NDP with pre-normalized loop window (||lw_n|| = 1).
+// Banker's rounding (round-half-to-even) — matches Python's np.round / round().
+// C++ std::round rounds half away from zero, which diverges from Python's reference
+// at x == N.5 and causes exp_pos to differ by 1 downsampled unit (= ds original samples).
+static int RoundHalfEven(float x) {
+  float f = std::floor(x);
+  float frac = x - f;
+  if (frac < 0.5f) return (int)f;
+  if (frac > 0.5f) return (int)f + 1;
+  int i = (int)f;
+  return (i & 1) ? i + 1 : i;
+}
+
 // Matches Python: dot(rel_window, lw_n) / norm(rel_window)
+// Silent release window (denom < 1e-12) → -2.f, matching Python's np.where(ok, ..., -2.0).
 // Used in FullScanV2 / TrackStepV2 to align with Python's float32 computation.
+//
+// In verify/logging builds (GOLogReleaseAlignEnable.h present): auto-vectorization and
+// FMA contraction are disabled so the float32 reduction is byte-identical to Numba's
+// sequential scalar loop (the Python reference).  Production builds use full -O3.
+#if __has_include("GOLogReleaseAlignEnable.h")
+#  if defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC push_options
+#    pragma GCC optimize("no-tree-vectorize,fp-contract=off")
+#  endif
+#endif
 static float NDP_f32(
   const float *lw_n,
   const float *rel,
   unsigned r,
   unsigned W) {
+#if __has_include("GOLogReleaseAlignEnable.h") && defined(__clang__)
+#  pragma clang fp contract(off)
+#endif
   float num = 0.f, er = 0.f;
+#if __has_include("GOLogReleaseAlignEnable.h") && defined(__clang__)
+#  pragma clang loop vectorize(disable) interleave(disable)
+#endif
   for (unsigned i = 0; i < W; i++) {
     num += lw_n[i] * rel[r + i];
     er  += rel[r + i] * rel[r + i];
   }
   float denom = std::sqrt(er);
-  return (denom < 1e-12f) ? 0.f : num / denom;
+  return (denom < 1e-12f) ? -2.f : num / denom;
 }
+#if __has_include("GOLogReleaseAlignEnable.h")
+#  if defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC pop_options
+#  endif
+#endif
 
 // Estimates the true fundamental period via autocorrelation on a stable
 // Parabolic sub-sample refinement of an NDP peak.
@@ -479,9 +513,6 @@ static constexpr unsigned V2_DN_SPARSE        = 6;
 static constexpr float    V2_RESCAN_RATIO     = 0.90f;
 static constexpr float    V2_RESCAN_DRIFT     = 8.0f;  // original samples
 // Epsilon for deterministic beam tiebreaking: if two beams differ in cumulative
-// score by less than this value, prefer the one with the lower beam_id (= higher
-// Phase-0 NDP peak). Absorbs BLAS-vs-scalar float32 drift (~4e-3 over 400 steps).
-static constexpr float    V2_BEAM_SORT_EPS    = 0.02f;
 static constexpr unsigned V2_JUMP_RATE_FACTOR = 16;    // T/16 per period
 static constexpr unsigned V2_MAX_PRUNE_GAP_N  = 50;
 static constexpr float    V2_PRUNE_TOL_FACTOR = 32.0f; // T/32 Douglas-Peucker
@@ -532,8 +563,8 @@ static std::vector<BeamState> FullScanV2(
     if (left_ok && right_ok)
       peaks.push_back(i);
   }
-  std::sort(peaks.begin(), peaks.end(),
-            [&](unsigned a, unsigned b) { return sc[a] > sc[b]; });
+  std::stable_sort(peaks.begin(), peaks.end(),
+                   [&](unsigned a, unsigned b) { return sc[a] > sc[b]; });
 
   const float best_sc   = peaks.empty() ? -2.f : sc[peaks[0]];
   const float sc_cutoff = best_sc - 0.40f; // BRANCH_SCORE_MARGIN
@@ -615,7 +646,7 @@ static TrackResult TrackStepV2(
     float slope   = (b.dn_prev > 0)
                     ? (float)(b.r_d - b.r_d_prev) / (float)b.dn_prev
                     : 0.f;
-    int exp_pos   = (int)std::round((float)b.r_d + slope * (float)dn);
+    int exp_pos   = RoundHalfEven((float)b.r_d + slope * (float)dn);
     exp_pos       = ((exp_pos % sT) + sT) % sT;
 
     // Round 1: offsets -1, 0, +1
@@ -955,7 +986,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   const unsigned loop_needed = std::min(
     loop_len,
     (unsigned)std::round((n_end - 1) * T_f) + window_len);
-  const unsigned loop_needed_d = loop_needed / ds + 1;
+  const unsigned loop_needed_d = (loop_needed + ds - 1) / ds; // ceil(loop_needed/ds) = len(attack[:loop_needed:ds])
   GOSoundCompressionCache loop_cache;
   loop_cache.Init();
   std::vector<float> loop_mono(loop_needed_d, 0.f);
@@ -1062,6 +1093,11 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   // Diagnostic: final beam states (end of Phase 1) and pre/post-prune points.
   std::vector<BeamState>  final_beam_states;
   std::vector<V2TrackPt>  pre_prune_v2pts;
+  // Phase 1.5 diagnostic: interval trigger + per-step log.
+  struct Phase15Iv  { unsigned na,nb; int ra,rb,raw_dist,circ_dist; unsigned sp_T_raw; bool triggered; };
+  struct Phase15Step{ int nd; unsigned cs_d; int exp_pos,best_r; float best_sc; bool inserted; };
+  std::vector<Phase15Iv>   phase15_ivs;
+  std::vector<Phase15Step> phase15_steps;
 
   // ── Exhaustive mode: dense scan of [n_start, n_end) ─────────────────────
   // Covers every key-press duration with evenly-spaced support points.
@@ -1194,7 +1230,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
 
     // ── Phase 1.5: dense re-tracking at jump intervals ────────────────────
     {
-      const unsigned sp_T_raw  = 2u * m_CorrPeriodSamples;
+      const unsigned sp_T_raw  = sp_T_d * ds; // match Python: 2*(T_int//ds)*ds, not 2*T_int
       const float jump_thresh = (float)m_CorrPeriodSamples
                                 / (float)V2_JUMP_RATE_FACTOR;
 
@@ -1205,11 +1241,15 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
       for (auto it = primary_path.begin(); it != primary_path.end(); ) {
         auto nxt = std::next(it);
         if (nxt == primary_path.end()) break;
-        int dist = std::abs(nxt->second.first - it->second.first);
-        if ((unsigned)dist > sp_T_raw / 2u) dist = (int)sp_T_raw - dist;
+        int raw_dist = std::abs(nxt->second.first - it->second.first);
+        int circ_dist = raw_dist;
+        if ((unsigned)circ_dist > sp_T_raw / 2u) circ_dist = (int)sp_T_raw - circ_dist;
         const unsigned dn_ab = nxt->first - it->first;
-        if (dn_ab > 2u && (unsigned)dist >= JUMP_DENSE_ABS)
-          jump_ivs.push_back({it->first, nxt->first});
+        const bool trig = (dn_ab > 2u && (unsigned)circ_dist >= JUMP_DENSE_ABS);
+        phase15_ivs.push_back({it->first, nxt->first,
+                               it->second.first, nxt->second.first,
+                               raw_dist, circ_dist, sp_T_raw, trig});
+        if (trig) jump_ivs.push_back({it->first, nxt->first});
         it = nxt;
       }
 
@@ -1224,7 +1264,17 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
         for (int nd = (int)iv.second - 1; nd > (int)iv.first; nd--) {
           if (nd < (int)n_start) break;
           const unsigned cs_d = (unsigned)std::round((double)nd * T_f) / ds;
-          if (cs_d + window_len_d > loop_needed_d) continue;
+          if (cs_d + window_len_d > loop_needed_d) {
+            phase15_steps.push_back({nd, cs_d, -1, -1, -99.f, false});
+            continue;
+          }
+          // Compute exp_pos from current dense_beam for logging.
+          const BeamState &cb = dense_beam[0];
+          float slope_log = (cb.dn_prev > 0)
+            ? (float)(cb.r_d - cb.r_d_prev) / (float)cb.dn_prev : 0.f;
+          int exp_pos_log = RoundHalfEven((float)cb.r_d + slope_log) % (int)sp_T_d;
+          if (exp_pos_log < 0) exp_pos_log += (int)sp_T_d;
+
           TrackResult step = TrackStepV2(
             loop_mono.data(), loop_needed_d,
             release_mono.data(), release_needed_d,
@@ -1232,10 +1282,18 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
             dense_beam, 1u,
             V2_RESCAN_RATIO, V2_RESCAN_DRIFT, ds, 1u);
           // Python continues with last good beam on failed step; match that.
-          if (step.beams.empty()) continue;
+          if (step.beams.empty()) {
+            phase15_steps.push_back({nd, cs_d, exp_pos_log * (int)ds,
+                                     dense_beam[0].r_d * (int)ds,
+                                     dense_beam[0].score, false});
+            continue;
+          }
           dense_beam = step.beams;
           primary_path[(unsigned)nd] =
             {dense_beam[0].r_d * (int)ds, dense_beam[0].score};
+          phase15_steps.push_back({nd, cs_d, exp_pos_log * (int)ds,
+                                   dense_beam[0].r_d * (int)ds,
+                                   dense_beam[0].score, true});
         }
       }
     }
@@ -1283,8 +1341,19 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     if (v2_pts.size() > 2)
       v2_pts = PruneV2(std::move(v2_pts), (float)m_CorrPeriodSamples);
 
-    // Recompute flags after pruning (neighbours may have changed).
-    mark_flags(v2_pts);
+    // After pruning: refresh only approach_up — is_jump must not change.
+    // PruneV2 protects jump points and their predecessors, so jumps are never
+    // added or removed.  Recomputing is_jump here would diverge from Python
+    // (reference) which also leaves is_jump unchanged after pruning.
+    if (!v2_pts.empty()) {
+      v2_pts[0].approach_up = true;
+      for (unsigned i = 1; i < (unsigned)v2_pts.size(); i++) {
+        const int fwd =
+          ((v2_pts[i].r - v2_pts[i - 1].r) % (int)sp_T_full + (int)sp_T_full)
+          % (int)sp_T_full;
+        v2_pts[i].approach_up = ((unsigned)fwd <= sp_T_full / 2u);
+      }
+    }
   }
 
 lut_commit:
@@ -1371,8 +1440,13 @@ lut_commit:
     std::ofstream vf(GetVerifyLogPath(), std::ios::app);
     if (vf.is_open()) {
       const auto &pts = m_CorrLuts.back().points;
+      // NDP_SILENT_SCORE: what NDP_f32 returns when denom < 1e-12.
+      // Before fix: 0.f  After fix: -2.f  Used to verify which binary is running.
+      static constexpr float NDP_SILENT_SCORE = -2.f;
       vf << std::setprecision(17)
          << "pipe=" << label
+         << " align_version=v230r"
+         << " ndp_silent_score=" << NDP_SILENT_SCORE
          << " T_float=" << m_CorrPeriodFloat
          << " T_int=" << m_CorrPeriodSamples
          << " crossfade_len=" << crossfade_len
@@ -1411,13 +1485,27 @@ lut_commit:
            << "," << std::setprecision(9) << b.cum_score
            << "\n";
       // Pre-prune points (after mark_flags, before PruneV2).
-      // Format: pre_prune,n,r,is_jump,approach_up
+      // Format: pre_prune,n,r,score,is_jump,approach_up
       for (const V2TrackPt &p : pre_prune_v2pts)
         vf << "pre_prune," << p.n
            << "," << p.r
+           << "," << std::setprecision(6) << p.score
            << "," << (p.is_jump ? 1 : 0)
            << "," << (p.approach_up ? 1 : 0)
            << "\n";
+      // Phase 1.5 diagnostics.
+      // interval: phase15_iv,na,nb,ra,rb,raw_dist,circ_dist,sp_T_raw,triggered
+      for (const Phase15Iv &iv : phase15_ivs)
+        vf << "phase15_iv," << iv.na << "," << iv.nb
+           << "," << iv.ra << "," << iv.rb
+           << "," << iv.raw_dist << "," << iv.circ_dist
+           << "," << iv.sp_T_raw << "," << (iv.triggered ? 1 : 0) << "\n";
+      // step: phase15_step,nd,cs_d,exp_pos,best_r,best_score,inserted
+      for (const Phase15Step &st : phase15_steps)
+        vf << "phase15_step," << st.nd << "," << st.cs_d
+           << "," << st.exp_pos << "," << st.best_r
+           << "," << std::setprecision(6) << st.best_sc
+           << "," << (st.inserted ? 1 : 0) << "\n";
       // Post-prune points (after PruneV2 + recomputed mark_flags).
       // Format: post_prune,n,r,is_jump,approach_up
       for (const V2TrackPt &p : v2_pts)
