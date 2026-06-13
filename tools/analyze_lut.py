@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v229"
+TOOL_VERSION = "v230a"
 
 def _cpp_round(x: float) -> int:
     """C++ std::round() for non-negative x: round half away from zero."""
@@ -2205,6 +2205,10 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         n_cur = n_next
 
     # Gewinner-Beam nach kumuliertem Score (vis_candidates[0] am Ende des Loops)
+    # Capture final beam states for diagnostic comparison in verify_lut.
+    # Format: list of (r_samples, cum_score, beam_id)
+    meta["final_beams"] = [(int(b[0] * ds), float(b[4]), int(b[5]))
+                           for b in vis_candidates]
     best_id = vis_candidates[0][5]
     primary_by_n = beam_paths.get(best_id, {})
     if not primary_by_n:
@@ -2289,8 +2293,11 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         _jb.is_jump = dist / dn > _jump_rate_t
 
     pruned_before = len(points)
+    # Capture pre-prune for diagnostic comparison. (n, r) tuples only — lightweight.
+    meta["pre_prune_points"] = [(p.n, int(p.best_r)) for p in points]
     if len(points) > 2:
         points = _prune_lut_points(points, T_int)
+    meta["post_prune_points"] = [(p.n, int(p.best_r)) for p in points]
 
     # approach_up im gefalteten [0, sp_T)-Raum bestimmen — kurzer Kreisbogen gibt Richtung
     sp_T = search_periods * T_int

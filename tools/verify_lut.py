@@ -181,6 +181,38 @@ def parse_verify_log(path: str) -> list:
                         "n_last":  int(parts[4]),
                     })
 
+            elif line.startswith("final_beam,") and current is not None:
+                parts = line.split(",")
+                # final_beam,beam_id,r_samples,cum_score
+                if len(parts) >= 4:
+                    current.setdefault("final_beams", []).append({
+                        "beam_id":   int(parts[1]),
+                        "r":         int(parts[2]),
+                        "cum_score": float(parts[3]),
+                    })
+
+            elif line.startswith("pre_prune,") and current is not None:
+                parts = line.split(",")
+                # pre_prune,n,r,is_jump,approach_up
+                if len(parts) >= 5:
+                    current.setdefault("pre_prune", []).append({
+                        "n":          int(parts[1]),
+                        "r":          int(parts[2]),
+                        "is_jump":    parts[3].strip() != "0",
+                        "approach_up": parts[4].strip() != "0",
+                    })
+
+            elif line.startswith("post_prune,") and current is not None:
+                parts = line.split(",")
+                # post_prune,n,r,is_jump,approach_up
+                if len(parts) >= 5:
+                    current.setdefault("post_prune", []).append({
+                        "n":          int(parts[1]),
+                        "r":          int(parts[2]),
+                        "is_jump":    parts[3].strip() != "0",
+                        "approach_up": parts[4].strip() != "0",
+                    })
+
     if current:
         entries.append(current)
     return entries
@@ -725,6 +757,12 @@ def compare_entry(entry: dict, organ_path: str,
         "go_phase0":   go_phase0,
         "py_phase0":   py_phase0,
         "phase0_n_last": py_meta.get("phase0_n_last"),
+        "go_final_beams":  entry.get("final_beams", []),
+        "py_final_beams":  py_meta.get("final_beams", []),
+        "go_pre_prune":    entry.get("pre_prune",  []),
+        "py_pre_prune":    py_meta.get("pre_prune_points",  []),
+        "go_post_prune":   entry.get("post_prune", []),
+        "py_post_prune":   py_meta.get("post_prune_points", []),
         "diag_atk_len": _diag_atk_len,
         "diag_rel_len": _diag_rel_len,
         "diag_log_atk": _diag_log_atk,
@@ -966,6 +1004,41 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                             emit(f"           latest_loop_end: {le_match}")
                             ap = res.get("diag_atk_path","?")
                             emit(f"           atk_path: ...{ap[-60:]}" if len(ap)>60 else f"           atk_path: {ap}")
+            # Pre/post-prune and final-beam diagnostics (major diffs only)
+            if sev == "major" and res["lut_diffs"]:
+                go_fb  = res.get("go_final_beams", [])
+                py_fb  = res.get("py_final_beams", [])
+                go_pre = res.get("go_pre_prune",  [])
+                py_pre = res.get("py_pre_prune",  [])
+                go_post = res.get("go_post_prune", [])
+                py_post = res.get("py_post_prune", [])
+                if go_fb or py_fb:
+                    def _fmt_fb(lst, n=4):
+                        return "  ".join(
+                            f"[{b['beam_id']}]r={b['r']} c={b['cum_score']:.4f}"
+                            for b in lst[:n])
+                    def _fmt_py_fb(lst, n=4):
+                        return "  ".join(
+                            f"[{r_c_b[2]}]r={r_c_b[0]} c={r_c_b[1]:.4f}"
+                            for r_c_b in lst[:n])
+                    emit(f"         final_beams GO: {_fmt_fb(go_fb)}")
+                    emit(f"         final_beams PY: {_fmt_py_fb(py_fb)}")
+                if go_pre is not None or py_pre is not None:
+                    n_go_pre  = len(go_pre)  if go_pre  else 0
+                    n_py_pre  = len(py_pre)  if py_pre  else 0
+                    n_go_post = len(go_post) if go_post else 0
+                    n_py_post = len(py_post) if py_post else 0
+                    pre_match = (n_go_pre == n_py_pre and
+                                 [(p["n"], p["r"]) for p in go_pre] ==
+                                 list(py_pre))
+                    emit(f"         pre_prune:  GO={n_go_pre}pts  PY={n_py_pre}pts  "
+                         f"{'SAME' if pre_match else 'DIFFER'}")
+                    emit(f"         post_prune: GO={n_go_post}pts  PY={n_py_post}pts")
+                    if pre_match:
+                        emit(f"           → Tracking OK; PruneV2 diverges "
+                             f"(GO removed {n_go_pre-n_go_post}, PY removed {n_py_pre-n_py_post})")
+                    else:
+                        emit(f"           → pre_prune DIVERGED — Tracking/Beam-Sort is the root cause")
             for s in res["simsrc_diffs"][:5]:
                 emit(f"         SIM_LOGIC lp={s['loop_pos']:7d}  go={s['go_r']:4d} py={s['py_r']:4d}  Δ={s['dist']}")
             if len(res["simsrc_diffs"]) > 5:

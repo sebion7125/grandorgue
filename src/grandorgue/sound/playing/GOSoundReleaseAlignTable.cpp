@@ -1052,6 +1052,9 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   // Phase-0 candidates captured for CSV debug logging (beam_id, r, score).
   std::vector<BeamState> phase0_cands;
   unsigned               phase0_n_last = 0;
+  // Diagnostic: final beam states (end of Phase 1) and pre/post-prune points.
+  std::vector<BeamState>  final_beam_states;
+  std::vector<V2TrackPt>  pre_prune_v2pts;
 
   // ── Exhaustive mode: dense scan of [n_start, n_end) ─────────────────────
   // Covers every key-press duration with evenly-spaced support points.
@@ -1172,6 +1175,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     }
 
     // Winner beam = vis_cands[0] (sorted by cumulative score descending).
+    final_beam_states = vis_cands; // capture for CSV diagnostics (beam state after Phase 1)
     const int   best_id = vis_cands.empty() ? 0 : vis_cands[0].beam_id;
     const auto &primary = ((unsigned)best_id < V2_TOP_K)
                           ? beam_paths[(unsigned)best_id]
@@ -1268,6 +1272,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     mark_flags(v2_pts);
 
     // Douglas-Peucker pruning.
+    pre_prune_v2pts = v2_pts; // capture for CSV diagnostics (before PruneV2)
     if (v2_pts.size() > 2)
       v2_pts = PruneV2(std::move(v2_pts), (float)m_CorrPeriodSamples);
 
@@ -1390,6 +1395,29 @@ lut_commit:
            << "," << (b.r_d * (int)ds)
            << "," << b.score
            << "," << phase0_n_last
+           << "\n";
+      // Final beam states after Phase 1 tracking (before winner selection).
+      // Format: final_beam,beam_id,r_samples,cum_score
+      for (const BeamState &b : final_beam_states)
+        vf << "final_beam," << b.beam_id
+           << "," << (b.r_d * (int)ds)
+           << "," << std::setprecision(9) << b.cum_score
+           << "\n";
+      // Pre-prune points (after mark_flags, before PruneV2).
+      // Format: pre_prune,n,r,is_jump,approach_up
+      for (const V2TrackPt &p : pre_prune_v2pts)
+        vf << "pre_prune," << p.n
+           << "," << p.r
+           << "," << (p.is_jump ? 1 : 0)
+           << "," << (p.approach_up ? 1 : 0)
+           << "\n";
+      // Post-prune points (after PruneV2 + recomputed mark_flags).
+      // Format: post_prune,n,r,is_jump,approach_up
+      for (const V2TrackPt &p : v2_pts)
+        vf << "post_prune," << p.n
+           << "," << p.r
+           << "," << (p.is_jump ? 1 : 0)
+           << "," << (p.approach_up ? 1 : 0)
            << "\n";
       for (const CorrPoint &p : pts) {
         const unsigned n = (unsigned)std::round((double)p.loop_pos / T_f);
