@@ -739,6 +739,64 @@ static std::vector<V2TrackPt> PruneV2(
   return out;
 }
 
+// Core interpolation shared by GetPositionForCorrelation and the CSV logger.
+// Takes pts directly so the logger can use m_CorrLuts.back() instead of FindLut(nullptr).
+static unsigned GetPositionForCorrImpl(
+  unsigned loop_pos,
+  const std::vector<GOSoundReleaseAlignTable::CorrPoint> &pts,
+  double   T_float,
+  unsigned T_int)
+{
+  using CP = GOSoundReleaseAlignTable::CorrPoint;
+  if (pts.empty() || T_int == 0)
+    return 0;
+  const double T_f = (T_float > 0.0) ? T_float : (double)T_int;
+  unsigned phi = (unsigned)std::round(std::fmod((double)loop_pos, T_f)) % T_int;
+  unsigned r_interp;
+
+  if (pts.size() == 1 || loop_pos <= pts.front().loop_pos) {
+    r_interp = pts.front().best_r;
+  } else if (loop_pos >= pts.back().loop_pos) {
+    r_interp = pts.back().best_r;
+  } else {
+    unsigned idx = 0;
+    while (idx + 1 < pts.size() && pts[idx + 1].loop_pos <= loop_pos)
+      idx++;
+    const CP &p0 = pts[idx];
+    const CP &p1 = pts[idx + 1];
+    const double t  = (double)(loop_pos - p0.loop_pos) / (double)(p1.loop_pos - p0.loop_pos);
+    const int    T  = (int)T_int;
+    const int    T2 = p1.IsValid() ? 2 * T : T;
+    bool is_jump; int diff;
+    if (p1.IsValid()) {
+      is_jump = p1.IsJump();
+      if (!is_jump) {
+        if (p1.IsApproachUp()) {
+          diff = ((int)p1.best_r - (int)p0.best_r + T2) % T2;
+          if (diff > T2 / 2) diff -= T2;
+        } else {
+          const int bwd = ((int)p0.best_r - (int)p1.best_r + T2) % T2;
+          diff = -bwd;
+          if (diff < -T2 / 2) diff += T2;
+        }
+      } else { diff = 0; }
+    } else {
+      diff = (int)p1.best_r - (int)p0.best_r;
+      if (diff >  T / 2) diff -= T;
+      if (diff < -T / 2) diff += T;
+      is_jump = (std::abs(diff) > T / 4);
+    }
+    if (is_jump) {
+      r_interp = (t < 0.5) ? p0.best_r : p1.best_r;
+    } else {
+      int rs = (int)p0.best_r + (int)std::round(t * diff);
+      r_interp = (unsigned)((rs % T2 + T2) % T2);
+    }
+  }
+  const unsigned T_mod = (!pts.empty() && pts.back().IsValid()) ? 2u * T_int : T_int;
+  return (r_interp + phi) % T_mod;
+}
+
 void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   const GOSoundAudioSection &loop_section,
   const GOSoundAudioSection &release_section,
@@ -1323,6 +1381,7 @@ lut_commit:
                 if (loop_section.GetEndSegment(i).next_start_segment_index >= 0) c++;
               return c;
             }()
+         << " attack_file=" << loop_section.GetLoaderBasename()
          << "\n";
       // Phase-0 candidates: initial NDP peaks that seeded the tracking.
       // Format: phase0,beam_id,r_samples,score,n_last
@@ -1346,12 +1405,12 @@ lut_commit:
       unsigned last_lp = (unsigned)-1;
       for (unsigned n = n_start; n < n_end; n += sim_step) {
         const unsigned lp = (unsigned)std::round(n * T_f);
-        vf << "sim," << lp << "," << GetPositionForCorrelation(lp) << "\n";
+        vf << "sim," << lp << "," << GetPositionForCorrImpl(lp, pts, m_CorrPeriodFloat, m_CorrPeriodSamples) << "\n";
         last_lp = lp;
       }
       const unsigned end_lp = (unsigned)std::round((n_end - 1) * T_f);
       if (end_lp != last_lp)
-        vf << "sim," << end_lp << "," << GetPositionForCorrelation(end_lp) << "\n";
+        vf << "sim," << end_lp << "," << GetPositionForCorrImpl(end_lp, pts, m_CorrPeriodFloat, m_CorrPeriodSamples) << "\n";
     }
   }
 #endif

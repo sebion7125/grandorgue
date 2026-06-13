@@ -122,6 +122,10 @@ private:
   int m_MaxAbsDerivative;
   unsigned m_ReleaseCrossfadeLength; // in ms
 
+  // Basename of the source file (set in Setup, used for CSV logging).
+  // Fixed-size to avoid pulling <string> into this header.
+  char m_loaderBasename[256];
+
   void ClearData();
 
   template <typename T>
@@ -206,6 +210,9 @@ public:
   }
 
   inline unsigned GetLength() const { return m_SampleCount; }
+
+  // Returns the basename of the source WAV file (empty string if not set).
+  const char *GetLoaderBasename() const { return m_loaderBasename; }
 
   // Returns the sample offset of the first sustain loop, or 0 if no loop.
   inline unsigned GetLoopStart() const {

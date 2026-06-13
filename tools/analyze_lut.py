@@ -31,7 +31,11 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v228"
+TOOL_VERSION = "v229"
+
+def _cpp_round(x: float) -> int:
+    """C++ std::round() for non-negative x: round half away from zero."""
+    return int(math.floor(float(x) + 0.5))
 
 # ─── C++ Numerics Mode ────────────────────────────────────────────────────────
 # When enabled, NDP is computed with pre-normalised float32 scalar loops,
@@ -65,6 +69,53 @@ try:
                 er  += v * v
             denom = np.sqrt(er)
             scores[r] = num / denom if denom > np.float32(1e-12) else np.float32(0.0)
+        return scores
+
+    @_numba.njit(cache=True, fastmath=False, nogil=True)
+    def _ndp_scan_with_norm_numba(lw_f32: np.ndarray, rel_f32: np.ndarray,
+                                   r_max: int, W: int) -> np.ndarray:
+        """Scalar float32 NDP scan including lw normalization — byte-identical to C++ FullScanV2."""
+        e_lw = np.float32(0.0)
+        for i in range(W):
+            e_lw += lw_f32[i] * lw_f32[i]
+        if e_lw < np.float32(1e-24):
+            return np.zeros(r_max, dtype=np.float32)
+        inv_lw = np.float32(1.0) / np.sqrt(e_lw)
+        lw_n = np.empty(W, dtype=np.float32)
+        for i in range(W):
+            lw_n[i] = lw_f32[i] * inv_lw
+        scores = np.empty(r_max, dtype=np.float32)
+        for r in range(r_max):
+            num = np.float32(0.0)
+            er  = np.float32(0.0)
+            for i in range(W):
+                v = rel_f32[r + i]
+                num += lw_n[i] * v
+                er  += v * v
+            denom = np.sqrt(er)
+            scores[r] = num / denom if denom > np.float32(1e-12) else np.float32(0.0)
+        return scores
+
+    @_numba.njit(cache=True, fastmath=False, nogil=True)
+    def _ndp_positions_numba(lw_n: np.ndarray, rel_f32: np.ndarray,
+                              positions: np.ndarray, W: int) -> np.ndarray:
+        """Scalar float32 NDP at explicit positions — byte-identical to C++ TrackStepV2 ndp_at()."""
+        n = len(positions)
+        scores = np.empty(n, dtype=np.float32)
+        rel_len = len(rel_f32)
+        for k in range(n):
+            r = positions[k]
+            if r < 0 or r + W > rel_len:
+                scores[k] = np.float32(-2.0)
+                continue
+            num = np.float32(0.0)
+            er  = np.float32(0.0)
+            for i in range(W):
+                v = rel_f32[r + i]
+                num += lw_n[i] * v
+                er  += v * v
+            denom = np.sqrt(er)
+            scores[k] = num / denom if denom > np.float32(1e-12) else np.float32(0.0)
         return scores
 
     _CPP_NUMERICS_BACKEND = "numba"
@@ -703,16 +754,19 @@ def _compute_corr_scores(lw: np.ndarray, release_mono: np.ndarray,
         # ── C++ Numerik: pre-normiertes float32, skalare Schleife ──────────
         # Entspricht C++ FullScanV2 / NDP_f32 in GOSoundReleaseAlignTable.cpp
         lw_f32 = lw.astype(np.float32)
-        # Norm in float32 (wie C++: e_lw = sum(lw[i]^2), inv_lw = 1/sqrt(e_lw))
-        e_lw = np.einsum('i,i->', lw_f32, lw_f32, optimize=False).astype(np.float32)
-        if e_lw < np.float32(1e-24):
-            return None, 0
-        lw_n = (lw_f32 * (np.float32(1.0) / np.sqrt(e_lw))).astype(np.float32)
         rel_f32 = release_mono[:r_max + window_len].astype(np.float32)
         if _CPP_NUMERICS_BACKEND == "numba":
-            scores = _ndp_scan_numba(lw_n, rel_f32, r_max, window_len)
+            # lw-Normierung UND Scan in einem skalaren numba-Loop —
+            # byte-identisch zu C++ FullScanV2 (kein SIMD-Accumulation-Unterschied)
+            scores = _ndp_scan_with_norm_numba(lw_f32, rel_f32, r_max, window_len)
+            if r_max == 0 or (scores == 0).all():
+                return None, 0
         else:
             # einsum mit optimize=False → umgeht BLAS SGEMV (näherungsweise C++)
+            e_lw = np.einsum('i,i->', lw_f32, lw_f32, optimize=False).astype(np.float32)
+            if e_lw < np.float32(1e-24):
+                return None, 0
+            lw_n = (lw_f32 * (np.float32(1.0) / np.sqrt(e_lw))).astype(np.float32)
             from numpy.lib.stride_tricks import as_strided
             s = rel_f32.strides[0]
             wins = as_strided(rel_f32, shape=(r_max, window_len), strides=(s, s))
@@ -1901,7 +1955,7 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
     # Das führt zu anderen Rundungsergebnissen als C++ std::round(float).
     if _cpp_numerics_enabled:
         slopes  = (r_arr - r_prev_arr) / np.maximum(np.float32(1.0), dn_prev_arr)
-        exp_pos = np.round((r_arr + slopes * np.float32(dn)).astype(np.float32)).astype(np.int32) % sp_T_d
+        exp_pos = np.floor((r_arr + slopes * np.float32(dn)).astype(np.float32) + np.float32(0.5)).astype(np.int32) % sp_T_d
     else:
         slopes  = (r_arr - r_prev_arr) / np.maximum(1.0, dn_prev_arr)
         exp_pos = np.round(r_arr + slopes * dn).astype(np.int32) % sp_T_d  # (n_beams,)
@@ -1912,23 +1966,23 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
     rel_mat = _ast(release_ds, shape=(sp_T_d, window_len_d), strides=(_s, _s))
 
     def _batch_score(pos2d):
-        """pos2d: (n, k) int32 → scores (n, k), alle Fensterpositionen auf einmal."""
-        pf   = pos2d.ravel()
-        ok   = (pf >= 0) & (pf + window_len_d <= len(release_ds))
-        wins = rel_mat[np.where(ok, pf, 0)].astype(np.float32)   # (n*k, wl)
-        if _cpp_numerics_enabled:
-            # C++ scalar float32: einsum statt BLAS, float32-Norm
-            nrm = np.sqrt(np.einsum('rw,rw->r', wins, wins,
-                                    optimize=False).astype(np.float32))
-            ok &= nrm > np.float32(1e-12)
-            num = np.einsum('rw,w->r', wins, lw_n,
-                            optimize=False).astype(np.float32)
-            sc  = np.where(ok, num / np.where(ok, nrm, np.float32(1.0)),
-                           np.float32(-2.0))
+        """pos2d: (n, k) int32 → scores (n, k)."""
+        pf = pos2d.ravel()
+        if _cpp_numerics_enabled and _CPP_NUMERICS_BACKEND == "numba":
+            # Scalar float32 path — byte-identical to C++ TrackStepV2 ndp_at().
+            sc = _ndp_positions_numba(lw_n, release_ds, pf.astype(np.int32), window_len_d)
         else:
-            nrm = np.linalg.norm(wins, axis=1)
-            ok &= nrm > 1e-12
-            sc  = np.where(ok, wins @ lw_n / np.where(ok, nrm, 1.0), -2.0)
+            ok   = (pf >= 0) & (pf + window_len_d <= len(release_ds))
+            wins = rel_mat[np.where(ok, pf, 0)].astype(np.float32)
+            if _cpp_numerics_enabled:
+                nrm = np.sqrt(np.einsum('rw,rw->r', wins, wins, optimize=False).astype(np.float32))
+                ok &= nrm > np.float32(1e-12)
+                num = np.einsum('rw,w->r', wins, lw_n, optimize=False).astype(np.float32)
+                sc  = np.where(ok, num / np.where(ok, nrm, np.float32(1.0)), np.float32(-2.0))
+            else:
+                nrm = np.linalg.norm(wins, axis=1)
+                ok &= nrm > 1e-12
+                sc  = np.where(ok, wins @ lw_n / np.where(ok, nrm, 1.0), -2.0)
         return sc.reshape(pos2d.shape)
 
     # Runde 1: ±1 (3 Punkte pro Beam)
@@ -2058,7 +2112,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     if _n_end_override is not None:
         n_end = min(n_total, max(_n_end_override, n_start + 1))
 
-    loop_needed  = min(int(round((n_end - 1) * T_float)) + window_len, atk_full_len)
+    loop_needed  = min(_cpp_round((n_end - 1) * T_float) + window_len, atk_full_len)
     loop_seg     = attack_mono[:loop_needed:ds].astype(np.float32)
     release_ds_a = release_mono[:r_max + window_len + 1 : ds].astype(np.float32)
     window_len_d = max(4, window_len // ds)
@@ -2086,10 +2140,16 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
 
     # ── Phase 0: Voller Scan bei n_end → Primärstrahl initialisieren ─────────
     n_last    = n_end - 1
-    cs_last_d = int(round(n_last * T_float)) // ds
+    cs_last_d = _cpp_round(n_last * T_float) // ds
     init_cands = _full_scan(cs_last_d)
     if not init_cands:
         return [], meta
+
+    # Capture Phase 0 for diagnostic comparison in verify_lut.
+    meta["phase0_n_last"]    = n_last
+    meta["phase0_cs_last_d"] = cs_last_d
+    meta["phase0_candidates"] = [(int(r_d * ds), float(sc))
+                                  for r_d, sc, _, _, _, _ in init_cands]
 
     # Multi-Beam: alle Kandidaten parallel mit stabiler Beam-ID
     vis_candidates = list(init_cands)
@@ -2101,7 +2161,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     n_cur = n_last
 
     while n_cur >= n_start:
-        cs_cur_d = int(round(n_cur * T_float)) // ds
+        cs_cur_d = _cpp_round(n_cur * T_float) // ds
         if cs_cur_d + window_len_d <= len(loop_seg):
             all_cands_by_n[n_cur] = [(int(r_d * ds), float(sc))
                                       for r_d, sc, _, _, _, _ in vis_candidates]
@@ -2116,7 +2176,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         if n_next == n_cur:
             break
         dn_actual = n_cur - n_next
-        cs_next_d = int(round(n_next * T_float)) // ds
+        cs_next_d = _cpp_round(n_next * T_float) // ds
 
         vis_new, needs_rescan = _track_step_v2(
             loop_seg, release_ds_a, window_len_d, ds,
@@ -2181,7 +2241,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         # Dichtes Tracking: dn=1 von _nb rückwärts bis _na
         _dense_beam = [(_rb // ds, _scb, _rb // ds, 1, _scb, best_id)]
         for _n_dense in range(_nb - 1, _na, -1):
-            _cs_d = int(round(_n_dense * T_float)) // ds
+            _cs_d = _cpp_round(_n_dense * T_float) // ds
             if _cs_d + window_len_d > len(loop_seg):
                 continue
             _step, _ = _track_step_v2(
@@ -2204,7 +2264,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         chosen_r_by_n[n] = best_r
         cands_full = all_cands_by_n.get(n, [(best_r, best_sc)])
 
-        cs = int(round(n * T_float))
+        cs = _cpp_round(n * T_float)
         pt = LutPoint(n=n, loop_pos=cs, best_r=int(best_r),
                       best_score=float(best_sc), phase="dense",
                       raw_r=int(best_r), raw_score=float(best_sc),

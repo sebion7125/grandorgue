@@ -7,6 +7,7 @@
 
 #include "GOSoundAudioSection.h"
 
+#include <wx/filename.h>
 #include <wx/intl.h>
 #include <wx/log.h>
 
@@ -45,6 +46,7 @@ GOSoundAudioSection::GOSoundAudioSection(GOMemoryPool &pool)
 }
 
 void GOSoundAudioSection::ClearData() {
+  m_loaderBasename[0] = '\0';
   m_AllocSize = 0;
   m_SampleCount = 0;
   m_SampleRate = 0;
@@ -353,6 +355,18 @@ void GOSoundAudioSection::Setup(
   m_channels = pcm_data_channels;
   m_BitsPerSample = wave_bits_per_sample(pcm_data_format);
   compress = (compress) && (m_BitsPerSample > 8);
+
+  // Store the source basename for attack-variant identification in CSV logging.
+  m_loaderBasename[0] = '\0';
+  if (pLoaderFilename) {
+    wxFileName fn(pLoaderFilename->GetPath());
+    fn.SetPath(wxEmptyString);  // keep only name+ext
+    strncpy(
+      m_loaderBasename,
+      fn.GetFullName().utf8_str(),
+      sizeof(m_loaderBasename) - 1);
+    m_loaderBasename[sizeof(m_loaderBasename) - 1] = '\0';
+  }
 
   unsigned fade_len = loopCrossfadeLength * pcm_data_sample_rate / 1000;
 
