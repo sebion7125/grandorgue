@@ -930,6 +930,27 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
             pool.shutdown(wait=False, cancel_futures=True)
         results = ordered
 
+    def _show_prune_ctx(go_raw, py_raw, n_go, n_py, idx):
+        """Emit ±2 context lines around pre/post-prune divergence index."""
+        ctx_lo = max(0, idx - 2)
+        ctx_hi = min(max(n_go, n_py) - 1, idx + 2)
+        for i in range(ctx_lo, ctx_hi + 1):
+            mark = ">>>" if i == idx else "   "
+            if i < n_go and go_raw:
+                gp = go_raw[i]
+                go_str = (f"n={gp['n']:5d} r={gp['r']:5d} "
+                          f"jmp={int(gp['is_jump'])} up={int(gp['approach_up'])}")
+            else:
+                go_str = "---"
+            if i < n_py and py_raw:
+                t = py_raw[i]
+                py_jmp = f" jmp={t[2]}" if len(t) > 2 else ""
+                py_str = f"n={t[0]:5d} r={t[1]:5d}{py_jmp}"
+            else:
+                py_str = "---"
+            emit(f"           {mark} [{i:3d}] GO: {go_str}")
+            emit(f"                      PY: {py_str}")
+
     def _rel_tag(res):
         """Short release-window tag, e.g. '[≥778ms]' or '[0..256ms]'."""
         mn, mx = res.get("min_ms", 0), res.get("max_ms", 0)
@@ -1049,29 +1070,34 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                     n_go_post = len(go_post) if go_post else 0
                     n_py_post = len(py_post) if py_post else 0
                     go_pre_pts = [(p["n"], p["r"]) for p in go_pre]
-                    py_pre_pts = list(py_pre)
+                    # py_pre may be (n,r) or (n,r,is_jump) — compare on (n,r) only
+                    py_pre_pts = [(t[0], t[1]) for t in py_pre] if py_pre else []
                     pre_match = (go_pre_pts == py_pre_pts)
                     emit(f"         pre_prune:  GO={n_go_pre}pts  PY={n_py_pre}pts  "
                          f"{'SAME' if pre_match else 'DIFFER'}")
-                    emit(f"         post_prune: GO={n_go_post}pts  PY={n_py_post}pts")
                     if pre_match:
-                        emit(f"           → Tracking OK; PruneV2 diverges "
-                             f"(GO pruned {n_go_pre-n_go_post}, PY pruned {n_py_pre-n_py_post})")
+                        go_post_pts = [(p["n"], p["r"]) for p in go_post] if go_post else []
+                        py_post_pts = [(t[0], t[1]) for t in py_post] if py_post else []
+                        post_match  = (go_post_pts == py_post_pts)
+                        emit(f"         post_prune: GO={n_go_post}pts  PY={n_py_post}pts  "
+                             f"{'SAME' if post_match else 'DIFFER'}")
+                        if post_match:
+                            emit(f"           → Tracking+Pruning OK (unexpected LUT diff)")
+                        else:
+                            emit(f"           → Tracking OK; PruneV2 diverges "
+                                 f"(GO pruned {n_go_pre-n_go_post}, PY pruned {n_py_pre-n_py_post})")
+                            first_post_idx = next(
+                                (i for i, (a, b) in enumerate(zip(go_post_pts, py_post_pts)) if a != b),
+                                min(n_go_post, n_py_post))
+                            emit(f"           → post_prune DIVERGED at idx={first_post_idx}")
+                            _show_prune_ctx(go_post, py_post, n_go_post, n_py_post, first_post_idx)
                     else:
-                        # Find and show the first differing pre_prune point
+                        emit(f"         post_prune: GO={n_go_post}pts  PY={n_py_post}pts")
                         first_diff_idx = next(
                             (i for i, (a, b) in enumerate(zip(go_pre_pts, py_pre_pts)) if a != b),
                             min(n_go_pre, n_py_pre))
                         emit(f"           → pre_prune DIVERGED at idx={first_diff_idx}")
-                        if first_diff_idx < n_go_pre and first_diff_idx < n_py_pre:
-                            gp = go_pre[first_diff_idx]
-                            pp_n, pp_r = py_pre_pts[first_diff_idx]
-                            emit(f"              GO: n={gp['n']:5d} r={gp['r']:5d} "
-                                 f"jmp={int(gp['is_jump'])} up={int(gp['approach_up'])}")
-                            emit(f"              PY: n={pp_n:5d} r={pp_r:5d}")
-                        elif n_go_pre != n_py_pre:
-                            emit(f"              (GO={n_go_pre} pts vs PY={n_py_pre} pts — "
-                                 f"{'GO shorter' if n_go_pre < n_py_pre else 'PY shorter'})")
+                        _show_prune_ctx(go_pre, py_pre, n_go_pre, n_py_pre, first_diff_idx)
             for s in res["simsrc_diffs"][:5]:
                 emit(f"         SIM_LOGIC lp={s['loop_pos']:7d}  go={s['go_r']:4d} py={s['py_r']:4d}  Δ={s['dist']}")
             if len(res["simsrc_diffs"]) > 5:
