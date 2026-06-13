@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v230d"
+TOOL_VERSION = "v230f"
 
 def _cpp_round(x: float) -> int:
     """C++ std::round() for non-negative x: round half away from zero."""
@@ -117,6 +117,26 @@ try:
             denom = np.sqrt(er)
             scores[k] = num / denom if denom > np.float32(1e-12) else np.float32(0.0)
         return scores
+
+    @_numba.njit(cache=True, fastmath=False, nogil=True)
+    def _normalize_lw_f32_numba(lw_f32: np.ndarray) -> np.ndarray:
+        """Scalar float32 lw normalization — byte-identical to C++ TrackStepV2 lw_n loop.
+
+        Returns zero array when ||lw||^2 < 1e-24 (silent window guard).
+        """
+        W = len(lw_f32)
+        e_lw = np.float32(0.0)
+        for i in range(W):
+            e_lw += lw_f32[i] * lw_f32[i]
+        lw_n = np.empty(W, dtype=np.float32)
+        if e_lw < np.float32(1e-24):
+            for i in range(W):
+                lw_n[i] = np.float32(0.0)
+            return lw_n
+        inv_lw = np.float32(1.0) / np.sqrt(e_lw)
+        for i in range(W):
+            lw_n[i] = lw_f32[i] * inv_lw
+        return lw_n
 
     _CPP_NUMERICS_BACKEND = "numba"
 except Exception:
@@ -1943,7 +1963,14 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
     lw = loop_seg[cs_d : cs_d + window_len_d]
 
     # Normierung: C++ Numerik-Modus = float32 scalar (wie NDP_f32 in C++)
-    if _cpp_numerics_enabled:
+    if _cpp_numerics_enabled and _CPP_NUMERICS_BACKEND == "numba":
+        # Scalar float32 sequential loop — byte-identical to C++ TrackStepV2.
+        # einsum may use BLAS pairwise summation → different e_lw → different lw_n.
+        lw_f32 = lw.astype(np.float32)
+        lw_n = _normalize_lw_f32_numba(lw_f32)
+        if not np.any(lw_n):  # e_lw < 1e-24 → silent window
+            return candidates, False
+    elif _cpp_numerics_enabled:
         lw_f32 = lw.astype(np.float32)
         e_lw = np.einsum('i,i->', lw_f32, lw_f32, optimize=False).astype(np.float32)
         if e_lw < np.float32(1e-24):
