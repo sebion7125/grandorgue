@@ -1004,8 +1004,9 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                             emit(f"           latest_loop_end: {le_match}")
                             ap = res.get("diag_atk_path","?")
                             emit(f"           atk_path: ...{ap[-60:]}" if len(ap)>60 else f"           atk_path: {ap}")
-            # Pre/post-prune and final-beam diagnostics (major diffs only)
-            if sev == "major" and res["lut_diffs"]:
+            # Pre/post-prune and final-beam diagnostics.
+            # Major diffs always; minor diffs in verbose mode.
+            if (sev == "major" or verbose) and res["lut_diffs"]:
                 go_fb  = res.get("go_final_beams", [])
                 py_fb  = res.get("py_final_beams", [])
                 go_pre = res.get("go_pre_prune",  [])
@@ -1028,17 +1029,30 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                     n_py_pre  = len(py_pre)  if py_pre  else 0
                     n_go_post = len(go_post) if go_post else 0
                     n_py_post = len(py_post) if py_post else 0
-                    pre_match = (n_go_pre == n_py_pre and
-                                 [(p["n"], p["r"]) for p in go_pre] ==
-                                 list(py_pre))
+                    go_pre_pts = [(p["n"], p["r"]) for p in go_pre]
+                    py_pre_pts = list(py_pre)
+                    pre_match = (go_pre_pts == py_pre_pts)
                     emit(f"         pre_prune:  GO={n_go_pre}pts  PY={n_py_pre}pts  "
                          f"{'SAME' if pre_match else 'DIFFER'}")
                     emit(f"         post_prune: GO={n_go_post}pts  PY={n_py_post}pts")
                     if pre_match:
                         emit(f"           → Tracking OK; PruneV2 diverges "
-                             f"(GO removed {n_go_pre-n_go_post}, PY removed {n_py_pre-n_py_post})")
+                             f"(GO pruned {n_go_pre-n_go_post}, PY pruned {n_py_pre-n_py_post})")
                     else:
-                        emit(f"           → pre_prune DIVERGED — Tracking/Beam-Sort is the root cause")
+                        # Find and show the first differing pre_prune point
+                        first_diff_idx = next(
+                            (i for i, (a, b) in enumerate(zip(go_pre_pts, py_pre_pts)) if a != b),
+                            min(n_go_pre, n_py_pre))
+                        emit(f"           → pre_prune DIVERGED at idx={first_diff_idx}")
+                        if first_diff_idx < n_go_pre and first_diff_idx < n_py_pre:
+                            gp = go_pre[first_diff_idx]
+                            pp_n, pp_r = py_pre_pts[first_diff_idx]
+                            emit(f"              GO: n={gp['n']:5d} r={gp['r']:5d} "
+                                 f"jmp={int(gp['is_jump'])} up={int(gp['approach_up'])}")
+                            emit(f"              PY: n={pp_n:5d} r={pp_r:5d}")
+                        elif n_go_pre != n_py_pre:
+                            emit(f"              (GO={n_go_pre} pts vs PY={n_py_pre} pts — "
+                                 f"{'GO shorter' if n_go_pre < n_py_pre else 'PY shorter'})")
             for s in res["simsrc_diffs"][:5]:
                 emit(f"         SIM_LOGIC lp={s['loop_pos']:7d}  go={s['go_r']:4d} py={s['py_r']:4d}  Δ={s['dist']}")
             if len(res["simsrc_diffs"]) > 5:
