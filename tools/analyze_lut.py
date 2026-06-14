@@ -2199,7 +2199,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     release_ds_a = release_mono[:r_max + window_len + 1 : ds].astype(np.float32)
     window_len_d = max(4, window_len // ds)
     r_max_d      = max(1, r_max // ds)
-    T_int_d      = max(1, T_int // ds)
+    T_int_d      = max(1, T_int // ds)   # intentionally integer-based; see C++ comment at T_d
     sp_T_d       = search_periods * T_int_d
 
     def _full_scan(cs_d_scan):

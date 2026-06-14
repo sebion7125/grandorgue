@@ -1058,6 +1058,14 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     : 1u;
   const unsigned window_len_d = std::max(4u, window_len / ds);
   const unsigned r_max_d      = std::max(1u, r_max / ds);
+  // T_d is intentionally integer-based (T_int / ds, not round(T_float / ds)).
+  // The tracker operates on a discrete downsampled grid; using a float-derived
+  // period would shift sp_T_d by ±1 and flip near-tie beam decisions, breaking
+  // parity with Python.  Attack positions (cs_d = round(n*T_float)/ds) are
+  // correctly float-derived and unaffected by this choice.
+  // A fully float-based tracker (sp_T_d, exp_pos, min_dist_d, circ_dist all
+  // derived from T_float/ds) would be more precise but requires a coordinated
+  // rework of both C++ and Python — left as a future experiment.
   const unsigned T_d          = std::max(1u, m_CorrPeriodSamples / ds);
 
   // Build downsampled loop mono up to n_end-1 (saves memory vs. n_total-1).
@@ -1310,7 +1318,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
 
     // ── Phase 1.5: dense re-tracking at jump intervals ────────────────────
     {
-      const unsigned sp_T_raw  = sp_T_d * ds; // match Python: 2*(T_int//ds)*ds, not 2*T_int
+      const unsigned sp_T_raw  = sp_T_d * ds; // = 2*(T_int//ds)*ds; Python uses _sp_T_for_iv = sp_T_d*ds (same), not _sp_T_raw = 2*T_int (different variable, pre-Phase-1.5 only)
       const float jump_thresh = (float)m_CorrPeriodSamples
                                 / (float)V2_JUMP_RATE_FACTOR;
 
