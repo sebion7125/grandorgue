@@ -429,9 +429,9 @@ class PipeAnalysis:
     perspective:   str
     release_type:  str
     attack_path:   str
-    attack_label:  str = "main"   # "main" for primary attack, ODF key suffix for extras
     release_path:  str
     harmonic_number: int = 8
+    attack_label:  str = "main"   # "main" for primary attack, ODF key suffix for extras
 
     # Ergebnisse
     T_float:       float = 0.0
