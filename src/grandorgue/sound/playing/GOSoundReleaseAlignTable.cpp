@@ -1058,7 +1058,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     : 1u;
   const unsigned window_len_d = std::max(4u, window_len / ds);
   const unsigned r_max_d      = std::max(1u, r_max / ds);
-  const unsigned T_d          = std::max(1u, (unsigned)std::round(T_f / (double)ds));
+  const unsigned T_d          = std::max(1u, m_CorrPeriodSamples / ds);
 
   // Build downsampled loop mono up to n_end-1 (saves memory vs. n_total-1).
   const unsigned loop_needed = std::min(
@@ -1396,7 +1396,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     if (v2_pts.empty()) return;
 
     // Compute is_jump and approach_up on a sorted V2TrackPt list.
-    const unsigned sp_T_full = (unsigned)std::round(2.0 * T_f);
+    const unsigned sp_T_full = 2u * m_CorrPeriodSamples;
     const float jump_rate    =
       (float)m_CorrPeriodSamples / (float)V2_JUMP_RATE_FACTOR;
     auto mark_flags = [&](std::vector<V2TrackPt> &pts) {

@@ -2199,7 +2199,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     release_ds_a = release_mono[:r_max + window_len + 1 : ds].astype(np.float32)
     window_len_d = max(4, window_len // ds)
     r_max_d      = max(1, r_max // ds)
-    T_int_d      = max(1, int(round(T_float / ds)))
+    T_int_d      = max(1, T_int // ds)
     sp_T_d       = search_periods * T_int_d
 
     def _full_scan(cs_d_scan):
@@ -2303,7 +2303,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     # → Phase 1.5 kann Sprünge nicht durch Interpolation maskieren
     _raw_ns = sorted(primary_by_n.keys())
     _raw_jump_intervals = set()
-    _sp_T_raw = int(round(search_periods * T_float))
+    _sp_T_raw = search_periods * T_int
     for _rna, _rnb in zip(_raw_ns, _raw_ns[1:]):
         _rra, _ = primary_by_n[_rna]
         _rrb, _ = primary_by_n[_rnb]
@@ -2384,7 +2384,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     points = [p for p in points if p.best_score > -1.5 and p.n is not None]
 
     # Sprung-Markierung: dist/dn > T/16 (normiert auf Periode, skaliert mit T)
-    _sp_T_jump  = int(round(search_periods * T_float))
+    _sp_T_jump  = search_periods * T_int
     _jump_rate_t = T_int / 16.0
     _pts_jump = sorted(points, key=lambda p: p.n)
     for _ja, _jb in zip(_pts_jump, _pts_jump[1:]):
@@ -2404,7 +2404,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     meta["post_prune_points"] = [(p.n, int(p.best_r), int(getattr(p, 'is_jump', False))) for p in points]
 
     # approach_up im gefalteten [0, sp_T)-Raum bestimmen — kurzer Kreisbogen gibt Richtung
-    sp_T = int(round(search_periods * T_float))
+    sp_T = search_periods * T_int
     pts_s = sorted(points, key=lambda p: p.n)
     if pts_s:
         pts_s[0].approach_up = True
@@ -2449,7 +2449,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     meta["corr_at_data"]        = None
     meta["folded"]              = False            # v2: r in [0,2T), kein T-Fold
     meta["fold_reason"]         = "v2-unfolded"
-    meta["wrap_period"]         = int(round(search_periods * T_float))
+    meta["wrap_period"]         = search_periods * T_int
 
     return points, meta
 
