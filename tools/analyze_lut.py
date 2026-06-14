@@ -429,6 +429,7 @@ class PipeAnalysis:
     perspective:   str
     release_type:  str
     attack_path:   str
+    attack_label:  str = "main"   # "main" for primary attack, ODF key suffix for extras
     release_path:  str
     harmonic_number: int = 8
 
@@ -2533,6 +2534,16 @@ def parse_organ_file(organ_path: str) -> list:
                     perspective = p
                     break
 
+            # Collect all attack variants: main attack + PipeXXXAttackNNN extras
+            attack_variants = [("main", atk_path)]
+            for k, v in sec_data.items():
+                if re.match(rf"^{pipe_key}Attack\d+$", k):
+                    extra_path = resolve(v)
+                    if extra_path:
+                        # Use ODF key suffix as label (e.g. "Attack001")
+                        label = k[len(pipe_key):]
+                        attack_variants.append((label, extra_path))
+
             release_infos = []
             for rel_idx, rel_path in releases.items():
                 rel_full = resolve(rel_path)
@@ -2559,33 +2570,36 @@ def parse_organ_file(organ_path: str) -> list:
 
             release_infos.sort(key=lambda info: info["max_key_ms"]
                                if info["max_key_ms"] is not None else float("inf"))
-            prev_max_ms = 0
-            for rel_idx_loop, info in enumerate(release_infos):
-                rel_full = info["rel_path"]
-                rel_parent = info["rel_type"]
-                max_key_ms = info["max_key_ms"]
-                min_key_ms = prev_max_ms
-                if max_key_ms is not None:
-                    prev_max_ms = max_key_ms
 
-                pipes.append({
-                    "rank_name":   rank_name,
-                    "midi_note":   midi_note,
-                    "perspective": perspective,
-                    "release_type": rel_parent,
-                    "attack_path": atk_path,
-                    "release_path": rel_full,
-                    "harmonic_number": harmonic,
-                    "crossfade_len_ms": int(sec_data.get(
-                        f"{pipe_key}ReleaseCrossfadeLength",
-                        str(xfade_ms))),
-                    "min_key_press_ms": min_key_ms,
-                    "max_key_press_ms": max_key_ms,
-                    "is_shortest_release": rel_idx_loop == 0,
-                    "organ_base":  organ_dir,
-                })
-                if max_key_ms is None:
-                    break
+            for atk_label, atk_path_v in attack_variants:
+                prev_max_ms = 0
+                for rel_idx_loop, info in enumerate(release_infos):
+                    rel_full = info["rel_path"]
+                    rel_parent = info["rel_type"]
+                    max_key_ms = info["max_key_ms"]
+                    min_key_ms = prev_max_ms
+                    if max_key_ms is not None:
+                        prev_max_ms = max_key_ms
+
+                    pipes.append({
+                        "rank_name":   rank_name,
+                        "midi_note":   midi_note,
+                        "perspective": perspective,
+                        "release_type": rel_parent,
+                        "attack_path": atk_path_v,
+                        "attack_label": atk_label,
+                        "release_path": rel_full,
+                        "harmonic_number": harmonic,
+                        "crossfade_len_ms": int(sec_data.get(
+                            f"{pipe_key}ReleaseCrossfadeLength",
+                            str(xfade_ms))),
+                        "min_key_press_ms": min_key_ms,
+                        "max_key_press_ms": max_key_ms,
+                        "is_shortest_release": rel_idx_loop == 0,
+                        "organ_base":  organ_dir,
+                    })
+                    if max_key_ms is None:
+                        break
 
     return pipes
 
@@ -2600,6 +2614,7 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         perspective=desc["perspective"],
         release_type=desc["release_type"],
         attack_path=desc["attack_path"],
+        attack_label=desc.get("attack_label", "main"),
         release_path=desc["release_path"],
         harmonic_number=desc["harmonic_number"],
     )
@@ -5323,14 +5338,19 @@ class LUTAnalyzerApp(tk.Tk):
                 "Keine Pfeifen gefunden. Bitte prüfe den Organ-Dateipfad.")
             return
 
-        # Baum: Register → MIDI-Note → Perspektive/Release
+        # Baum: Register → MIDI-Note → Perspektive/Release[/Attack]
         ranks = {}
         for d in self._pipe_descs:
             r = d["rank_name"]
             n = d["midi_note"]
-            p = d["perspective"]
-            t = d["release_type"]
             ranks.setdefault(r, {}).setdefault(n, []).append(d)
+
+        # Pre-compute which (rank, midi, perspective, release_type) combos have >1 attack
+        _multi_attack: set = set()
+        for d in self._pipe_descs:
+            if d.get("attack_label", "main") != "main":
+                _multi_attack.add((d["rank_name"], d["midi_note"],
+                                   d["perspective"], d["release_type"]))
 
         for rank_name in sorted(ranks):
             rank_id = self._tree.insert("", tk.END,
@@ -5344,8 +5364,11 @@ class LUTAnalyzerApp(tk.Tk):
                                              values=("–",), tags=("note",))
                 self._tree.tag_configure("note", foreground=C_NOTE)
                 for d in ranks[rank_name][midi]:
-                    key = f"{rank_name}|{midi}|{d['perspective']}|{d['release_type']}"
-                    label = f"    {d['perspective']} / {d['release_type']}"
+                    atk_label = d.get("attack_label", "main")
+                    key = f"{rank_name}|{midi}|{d['perspective']}|{d['release_type']}|{atk_label}"
+                    show_atk = (rank_name, midi, d["perspective"], d["release_type"]) in _multi_attack
+                    atk_suffix = f" [{atk_label}]" if show_atk else ""
+                    label = f"    {d['perspective']} / {d['release_type']}{atk_suffix}"
                     item_id = self._tree.insert(note_id, tk.END,
                                                  text=label,
                                                  values=("⬜ ausstehend",),
@@ -5470,7 +5493,7 @@ class LUTAnalyzerApp(tk.Tk):
                 pa: PipeAnalysis = self._result_queue.get_nowait()
             except queue.Empty:
                 break
-            key = f"{pa.rank_name}|{pa.midi_note}|{pa.perspective}|{pa.release_type}"
+            key = f"{pa.rank_name}|{pa.midi_note}|{pa.perspective}|{pa.release_type}|{pa.attack_label}"
             self._analyses[key] = pa
             self._done_work += 1
             self._update_tree_item(key, pa)
@@ -5518,7 +5541,7 @@ class LUTAnalyzerApp(tk.Tk):
         if hasattr(self, '_pipe_descs'):
             for d in self._pipe_descs:
                 key = (f"{d['rank_name']}|{d['midi_note']}|"
-                       f"{d['perspective']}|{d['release_type']}")
+                       f"{d['perspective']}|{d['release_type']}|{d.get('attack_label','main')}")
                 self._analyses[key] = d
         if hasattr(self, '_progress_label'):
             self._progress_label.config(
@@ -5960,7 +5983,7 @@ class LUTAnalyzerApp(tk.Tk):
         pas.sort(key=sort_key)
 
         for pa in pas:
-            key = f"{pa.rank_name}|{pa.midi_note}|{pa.perspective}|{pa.release_type}"
+            key = f"{pa.rank_name}|{pa.midi_note}|{pa.perspective}|{pa.release_type}|{pa.attack_label}"
             sr_ = pa.sample_rate or 48000
             self._report_table.insert("", tk.END,
                 values=(
