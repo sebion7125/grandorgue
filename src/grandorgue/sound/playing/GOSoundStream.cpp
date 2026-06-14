@@ -550,9 +550,10 @@ void GOSoundStream::InitAlignedStream(
     LogReleaseAlign(
       loop_pos, releaseAligner->GetPeriodSamples(), legacy_result, corr_result);
 #ifdef GO_LOG_RELEASE_ALIGN_VERBOSE
-    LogReleaseAlignVerbose(
-      loop_pos, releaseAligner->GetPeriodSamples(), legacy_result, corr_result,
-      existing_stream->audio_section, pSection, releaseAligner, debugLabel);
+    if (releaseAligner->HasCorrLut())
+      LogReleaseAlignVerbose(
+        loop_pos, releaseAligner->GetPeriodSamples(), legacy_result, corr_result,
+        existing_stream->audio_section, pSection, releaseAligner, debugLabel);
 #endif
     startIndex = useCorr ? corr_result : legacy_result;
 #else

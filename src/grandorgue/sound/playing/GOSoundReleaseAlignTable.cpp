@@ -321,6 +321,23 @@ static int RoundHalfEven(float x) {
   return (i & 1) ? i + 1 : i;
 }
 
+// In logging builds, prevent inlining of scalar float32 helpers so the
+// #pragma GCC optimize / #pragma clang loop directives are always honoured.
+// Without noinline, GCC may inline NDP_f32 / CalcLwN_f32 into their callers
+// and re-optimise the inner loops under the caller's -O3 settings
+// (vectorisation, FMA), causing 1-ULP differences vs Numba's scalar output.
+#if __has_include("GOLogReleaseAlignEnable.h")
+#  if defined(_MSC_VER)
+#    define LOG_NOINLINE __declspec(noinline)
+#  elif defined(__GNUC__)
+#    define LOG_NOINLINE __attribute__((noinline))
+#  else
+#    define LOG_NOINLINE
+#  endif
+#else
+#  define LOG_NOINLINE
+#endif
+
 // Matches Python: dot(rel_window, lw_n) / norm(rel_window)
 // Silent release window (denom < 1e-12) → -2.f, matching Python's np.where(ok, ..., -2.0).
 // Used in FullScanV2 / TrackStepV2 to align with Python's float32 computation.
@@ -329,32 +346,107 @@ static int RoundHalfEven(float x) {
 // FMA contraction are disabled so the float32 reduction is byte-identical to Numba's
 // sequential scalar loop (the Python reference).  Production builds use full -O3.
 #if __has_include("GOLogReleaseAlignEnable.h")
-#  if defined(__GNUC__) && !defined(__clang__)
+#  if defined(_MSC_VER)
+#    pragma float_control(push)
+#    pragma float_control(precise, on)
+#  elif defined(__GNUC__) && !defined(__clang__)
 #    pragma GCC push_options
-#    pragma GCC optimize("no-tree-vectorize,fp-contract=off")
+#    pragma GCC optimize("no-fast-math,no-tree-vectorize,fp-contract=off")
 #  endif
 #endif
-static float NDP_f32(
+static LOG_NOINLINE float NDP_f32(
   const float *lw_n,
   const float *rel,
   unsigned r,
   unsigned W) {
-#if __has_include("GOLogReleaseAlignEnable.h") && defined(__clang__)
-#  pragma clang fp contract(off)
-#endif
+#if __has_include("GOLogReleaseAlignEnable.h")
+  // volatile on both the accumulator AND the product prevents FMA:
+  // GCC can fuse "acc = acc + a*b" into a single VFMADD even with volatile acc.
+  // Making the product volatile forces a float32 store+reload before the add,
+  // so mul and add are always separate rounded operations — identical to Numba.
+  volatile float num = 0.f, er = 0.f;
+  for (unsigned i = 0; i < W; i++) {
+    volatile float t_n = lw_n[i] * rel[r + i];
+    volatile float t_e = rel[r + i] * rel[r + i];
+    num = num + (float)t_n;
+    er  = er  + (float)t_e;
+  }
+  float denom = std::sqrt((float)er);
+  return ((float)denom < 1e-12f) ? -2.f : (float)num / denom;
+#else
+#  if defined(__clang__)
+#    pragma clang fp contract(off)
+#  endif
   float num = 0.f, er = 0.f;
-#if __has_include("GOLogReleaseAlignEnable.h") && defined(__clang__)
-#  pragma clang loop vectorize(disable) interleave(disable)
-#endif
+#  if defined(__clang__)
+#    pragma clang loop vectorize(disable) interleave(disable)
+#  endif
   for (unsigned i = 0; i < W; i++) {
     num += lw_n[i] * rel[r + i];
     er  += rel[r + i] * rel[r + i];
   }
   float denom = std::sqrt(er);
   return (denom < 1e-12f) ? -2.f : num / denom;
+#endif
 }
 #if __has_include("GOLogReleaseAlignEnable.h")
-#  if defined(__GNUC__) && !defined(__clang__)
+#  if defined(_MSC_VER)
+#    pragma float_control(pop)
+#  elif defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC pop_options
+#  endif
+#endif
+
+// Compute normalized loop window in float32. Must carry the same pragma as
+// NDP_f32: GCC -O3 vectorizes the e_lw dot-product with a different
+// summation tree than Numba's scalar loop, giving a different inv_lw, which
+// then propagates into every NDP score at that tracking step.
+// Matches Python _normalize_lw_f32_numba (scalar, fastmath=False).
+// Returns false when ||lw||^2 < 1e-24 (silent window).
+#if __has_include("GOLogReleaseAlignEnable.h")
+#  if defined(_MSC_VER)
+#    pragma float_control(push)
+#    pragma float_control(precise, on)
+#  elif defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC push_options
+#    pragma GCC optimize("no-fast-math,no-tree-vectorize,fp-contract=off")
+#  endif
+#endif
+static LOG_NOINLINE bool CalcLwN_f32(
+  const float *lw, unsigned W, float *lw_n) {
+#if __has_include("GOLogReleaseAlignEnable.h")
+  // volatile on both accumulator and product prevents GCC FMA (see NDP_f32).
+  volatile float e_lw = 0.f;
+  for (unsigned i = 0; i < W; i++) {
+    volatile float sq = lw[i] * lw[i];
+    e_lw = e_lw + (float)sq;
+  }
+  if ((float)e_lw < 1e-24f) return false;
+  const float inv_lw = 1.f / std::sqrt((float)e_lw);
+  for (unsigned i = 0; i < W; i++) lw_n[i] = lw[i] * inv_lw;
+  return true;
+#else
+#  if defined(__clang__)
+#    pragma clang fp contract(off)
+#  endif
+  float e_lw = 0.f;
+#  if defined(__clang__)
+#    pragma clang loop vectorize(disable) interleave(disable)
+#  endif
+  for (unsigned i = 0; i < W; i++) e_lw += lw[i] * lw[i];
+  if (e_lw < 1e-24f) return false;
+  const float inv_lw = 1.f / std::sqrt(e_lw);
+#  if defined(__clang__)
+#    pragma clang loop vectorize(disable) interleave(disable)
+#  endif
+  for (unsigned i = 0; i < W; i++) lw_n[i] = lw[i] * inv_lw;
+  return true;
+#endif
+}
+#if __has_include("GOLogReleaseAlignEnable.h")
+#  if defined(_MSC_VER)
+#    pragma float_control(pop)
+#  elif defined(__GNUC__) && !defined(__clang__)
 #    pragma GCC pop_options
 #  endif
 #endif
@@ -537,14 +629,11 @@ static std::vector<BeamState> FullScanV2(
   if (cs_d + window_d > loop_d_len || r_max_d == 0)
     return {};
   const float *lw = loop_d + cs_d;
-  // Pre-normalize loop window (float32, matches Python: lw_n = (lw/norm(lw)).astype(float32))
-  float e_lw = 0.f;
-  for (unsigned i = 0; i < window_d; i++) e_lw += lw[i] * lw[i];
-  if (e_lw < 1e-24f)
-    return {};
-  const float inv_lw = 1.f / std::sqrt(e_lw);
+  // Pre-normalize loop window — use CalcLwN_f32 (pragma-protected) so the
+  // e_lw dot-product is scalar float32, matching Python _normalize_lw_f32_numba.
   std::vector<float> lw_n(window_d);
-  for (unsigned i = 0; i < window_d; i++) lw_n[i] = lw[i] * inv_lw;
+  if (!CalcLwN_f32(lw, window_d, lw_n.data()))
+    return {};
 
   // Score for each candidate position (float32, matches Python _compute_corr_scores).
   const unsigned n = std::min(r_max_d, rel_d_len > window_d ? rel_d_len - window_d : 0u);
@@ -620,14 +709,11 @@ static TrackResult TrackStepV2(
   if (cs_d + window_d > loop_d_len || cands.empty())
     return {cands, false};
   const float *lw = loop_d + cs_d;
-  // Pre-normalize loop window (float32, matches Python _track_step_v2: lw_n = (lw/na).astype(float32))
-  float e_lw = 0.f;
-  for (unsigned i = 0; i < window_d; i++) e_lw += lw[i] * lw[i];
-  if (e_lw < 1e-24f)
-    return {cands, false};
-  const float inv_lw = 1.f / std::sqrt(e_lw);
+  // Pre-normalize loop window — use CalcLwN_f32 (pragma-protected) so the
+  // e_lw dot-product is scalar float32, matching Python _normalize_lw_f32_numba.
   std::vector<float> lw_n(window_d);
-  for (unsigned i = 0; i < window_d; i++) lw_n[i] = lw[i] * inv_lw;
+  if (!CalcLwN_f32(lw, window_d, lw_n.data()))
+    return {cands, false};
 
   const unsigned min_dist_d = std::max(1u, T_int_d / 32u);
   const int      sT         = (int)sp_T_d;
@@ -777,62 +863,54 @@ static std::vector<V2TrackPt> PruneV2(
   return out;
 }
 
-// Core interpolation shared by GetPositionForCorrelation and the CSV logger.
-// Takes pts directly so the logger can use m_CorrLuts.back() instead of FindLut(nullptr).
+// Kanonische LUT-Rohinterpolation in [0, round(2*T_f)).
+// Nur v2-Logik: direkter linearer Weg, kein Wrap.
+// Entspricht Python interp_lut_segment_raw(lut_folded=False).
+static unsigned InterpolateCorrPointRaw(
+  int loop_pos,
+  const std::vector<GOSoundReleaseAlignTable::CorrPoint> &pts,
+  double T_f)
+{
+  if (pts.empty()) return 0;
+  const int W = (int)std::round(2.0 * T_f);
+
+  if (loop_pos <= (int)pts.front().loop_pos) return (unsigned)(pts.front().best_r % W);
+  if (loop_pos >= (int)pts.back().loop_pos)  return (unsigned)(pts.back().best_r  % W);
+
+  size_t idx = 0;
+  while (idx + 1 < pts.size() && (int)pts[idx + 1].loop_pos <= loop_pos)
+    ++idx;
+  const GOSoundReleaseAlignTable::CorrPoint &p0 = pts[idx];
+  const GOSoundReleaseAlignTable::CorrPoint &p1 = pts[idx + 1];
+  const double t = (loop_pos - (int)p0.loop_pos)
+                 / (double)std::max(1, (int)(p1.loop_pos - p0.loop_pos));
+
+  if (p1.IsJump())
+    return (t < 0.5) ? (unsigned)(p0.best_r % W) : (unsigned)(p1.best_r % W);
+
+  const int r0 = (int)p0.best_r % W;
+  const int r1 = (int)p1.best_r % W;
+  int r_result = (int)std::round(r0 + t * (r1 - r0));
+  r_result = std::max(0, std::min(W - 1, r_result));
+  return (unsigned)r_result;
+}
+
+// Vollständige Interpolation für CSV-Logger und GetPositionForCorrelation:
+// InterpolateCorrPointRaw() → r_lut, dann phi addieren und final wrappen.
 static unsigned GetPositionForCorrImpl(
   unsigned loop_pos,
   const std::vector<GOSoundReleaseAlignTable::CorrPoint> &pts,
   double   T_float,
   unsigned T_int)
 {
-  using CP = GOSoundReleaseAlignTable::CorrPoint;
   if (pts.empty() || T_int == 0)
     return 0;
-  const double T_f = (T_float > 0.0) ? T_float : (double)T_int;
-  unsigned phi = (unsigned)std::round(std::fmod((double)loop_pos, T_f)) % T_int;
-  unsigned r_interp;
-
-  if (pts.size() == 1 || loop_pos <= pts.front().loop_pos) {
-    r_interp = pts.front().best_r;
-  } else if (loop_pos >= pts.back().loop_pos) {
-    r_interp = pts.back().best_r;
-  } else {
-    unsigned idx = 0;
-    while (idx + 1 < pts.size() && pts[idx + 1].loop_pos <= loop_pos)
-      idx++;
-    const CP &p0 = pts[idx];
-    const CP &p1 = pts[idx + 1];
-    const double t  = (double)(loop_pos - p0.loop_pos) / (double)(p1.loop_pos - p0.loop_pos);
-    const int    T  = (int)T_int;
-    const int    T2 = p1.IsValid() ? 2 * T : T;
-    bool is_jump; int diff;
-    if (p1.IsValid()) {
-      is_jump = p1.IsJump();
-      if (!is_jump) {
-        if (p1.IsApproachUp()) {
-          diff = ((int)p1.best_r - (int)p0.best_r + T2) % T2;
-          if (diff > T2 / 2) diff -= T2;
-        } else {
-          const int bwd = ((int)p0.best_r - (int)p1.best_r + T2) % T2;
-          diff = -bwd;
-          if (diff < -T2 / 2) diff += T2;
-        }
-      } else { diff = 0; }
-    } else {
-      diff = (int)p1.best_r - (int)p0.best_r;
-      if (diff >  T / 2) diff -= T;
-      if (diff < -T / 2) diff += T;
-      is_jump = (std::abs(diff) > T / 4);
-    }
-    if (is_jump) {
-      r_interp = (t < 0.5) ? p0.best_r : p1.best_r;
-    } else {
-      int rs = (int)p0.best_r + (int)std::round(t * diff);
-      r_interp = (unsigned)((rs % T2 + T2) % T2);
-    }
-  }
-  const unsigned T_mod = (!pts.empty() && pts.back().IsValid()) ? 2u * T_int : T_int;
-  return (r_interp + phi) % T_mod;
+  const double T_f   = (T_float > 0.0) ? T_float : (double)T_int;
+  const unsigned phi = (unsigned)std::round(std::fmod((double)loop_pos, T_f)) % T_int;
+  const unsigned r_lut = InterpolateCorrPointRaw((int)loop_pos, pts, T_f);
+  const bool is_v2 = pts.back().IsValid();
+  return (unsigned)std::round(
+    std::fmod((double)(r_lut + phi), is_v2 ? 2.0 * T_f : T_f));
 }
 
 void GOSoundReleaseAlignTable::ComputeCorrelationLut(
@@ -980,7 +1058,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     : 1u;
   const unsigned window_len_d = std::max(4u, window_len / ds);
   const unsigned r_max_d      = std::max(1u, r_max / ds);
-  const unsigned T_d          = std::max(1u, m_CorrPeriodSamples / ds);
+  const unsigned T_d          = std::max(1u, (unsigned)std::round(T_f / (double)ds));
 
   // Build downsampled loop mono up to n_end-1 (saves memory vs. n_total-1).
   const unsigned loop_needed = std::min(
@@ -1098,6 +1176,8 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   struct Phase15Step{ int nd; unsigned cs_d; int exp_pos,best_r; float best_sc; bool inserted; };
   std::vector<Phase15Iv>   phase15_ivs;
   std::vector<Phase15Step> phase15_steps;
+#if __has_include("GOLogReleaseAlignEnable.h")
+#endif
 
   // ── Exhaustive mode: dense scan of [n_start, n_end) ─────────────────────
   // Covers every key-press duration with evenly-spaced support points.
@@ -1316,7 +1396,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     if (v2_pts.empty()) return;
 
     // Compute is_jump and approach_up on a sorted V2TrackPt list.
-    const unsigned sp_T_full = 2u * m_CorrPeriodSamples;
+    const unsigned sp_T_full = (unsigned)std::round(2.0 * T_f);
     const float jump_rate    =
       (float)m_CorrPeriodSamples / (float)V2_JUMP_RATE_FACTOR;
     auto mark_flags = [&](std::vector<V2TrackPt> &pts) {
@@ -1445,7 +1525,7 @@ lut_commit:
       static constexpr float NDP_SILENT_SCORE = -2.f;
       vf << std::setprecision(17)
          << "pipe=" << label
-         << " align_version=v230r"
+         << " align_version=v231a"
          << " ndp_silent_score=" << NDP_SILENT_SCORE
          << " T_float=" << m_CorrPeriodFloat
          << " T_int=" << m_CorrPeriodSamples
@@ -1470,18 +1550,20 @@ lut_commit:
          << " attack_file=" << loop_section.GetLoaderBasename()
          << "\n";
       // Phase-0 candidates: initial NDP peaks that seeded the tracking.
-      // Format: phase0,beam_id,r_samples,score,n_last
+      // Format: phase0,beam_id,r_samples,score_hex,n_last
       for (const BeamState &b : phase0_cands)
         vf << "phase0," << b.beam_id
            << "," << (b.r_d * (int)ds)
-           << "," << b.score
+           << "," << std::hexfloat << b.score << std::defaultfloat
            << "," << phase0_n_last
            << "\n";
       // Final beam states after Phase 1 tracking (before winner selection).
-      // Format: final_beam,beam_id,r_samples,cum_score
+      // Format: final_beam,beam_id,r_samples,cum_score_hex,cum_score_dec
+      // cum_score_hex: std::hexfloat for exact float32 round-trip (no decimal precision loss).
       for (const BeamState &b : final_beam_states)
         vf << "final_beam," << b.beam_id
            << "," << (b.r_d * (int)ds)
+           << "," << std::hexfloat << b.cum_score << std::defaultfloat
            << "," << std::setprecision(9) << b.cum_score
            << "\n";
       // Pre-prune points (after mark_flags, before PruneV2).
@@ -1561,78 +1643,16 @@ unsigned GOSoundReleaseAlignTable::GetPositionForCorrelation(
   const std::vector<CorrPoint> *pts = FindLut(p_Attack);
   if (!pts || pts->empty() || m_CorrPeriodSamples == 0)
     return 0;
-
-  const std::vector<CorrPoint> &m_CorrPoints = *pts;
   // Use float period for accurate phase — avoids drift from integer rounding.
   const double T_f = (m_CorrPeriodFloat > 0.0) ? m_CorrPeriodFloat
                                                 : (double)m_CorrPeriodSamples;
   // Guard: round() can produce exactly T_int when fmod result is just below T_f.
-  unsigned phi = (unsigned)std::round(std::fmod((double)loop_pos, T_f))
-                 % m_CorrPeriodSamples;
-  unsigned r_interp;
-
-  if (m_CorrPoints.size() == 1 || loop_pos <= m_CorrPoints.front().loop_pos) {
-    r_interp = m_CorrPoints.front().best_r;
-
-  } else if (loop_pos >= m_CorrPoints.back().loop_pos) {
-    r_interp = m_CorrPoints.back().best_r;
-
-  } else {
-    unsigned idx = 0;
-    while (idx + 1 < m_CorrPoints.size()
-           && m_CorrPoints[idx + 1].loop_pos <= loop_pos)
-      idx++;
-
-    const CorrPoint &p0 = m_CorrPoints[idx];
-    const CorrPoint &p1 = m_CorrPoints[idx + 1];
-
-    const double t = (double)(loop_pos - p0.loop_pos)
-                   / (double)(p1.loop_pos - p0.loop_pos);
-    const int    T  = (int)m_CorrPeriodSamples;
-    // v2 LUT points store r in [0,2T); legacy points in [0,T).
-    const int    T2 = p1.IsValid() ? 2 * T : T;
-
-    // v2 LUT points carry explicit is_jump and approach_up flags.
-    // Legacy points (flags==0) fall back to shortest-arc + T/4 heuristic.
-    bool is_jump;
-    int  diff;
-    if (p1.IsValid()) {
-      // v2 path: directed interpolation in [0, 2T)
-      is_jump = p1.IsJump();
-      if (!is_jump) {
-        if (p1.IsApproachUp()) {
-          diff = ((int)p1.best_r - (int)p0.best_r + T2) % T2;
-          if (diff > T2 / 2) diff -= T2;
-        } else {
-          const int bwd = ((int)p0.best_r - (int)p1.best_r + T2) % T2;
-          diff = -bwd;
-          if (diff < -T2 / 2) diff += T2;
-        }
-      } else {
-        diff = 0;
-      }
-    } else {
-      // Legacy path: shortest arc; branch-jump heuristic via T/4
-      diff   = (int)p1.best_r - (int)p0.best_r;
-      if (diff >  T / 2) diff -= T;
-      if (diff < -T / 2) diff += T;
-      is_jump = (std::abs(diff) > T / 4);
-    }
-
-    // Step function for branch jumps; linear interpolation otherwise.
-    if (is_jump) {
-      r_interp = (t < 0.5) ? p0.best_r : p1.best_r;
-    } else {
-      int r_signed = (int)p0.best_r + (int)std::round(t * diff);
-      r_interp = (unsigned)((r_signed % T2 + T2) % T2);
-    }
-  }
-
-  // For v2 points: r_interp in [0,2T), sum with phi in [0,3T), fold to [0,2T).
-  // For legacy:    r_interp in [0,T),  sum with phi in [0,2T), fold to [0,T).
-  const bool v2_lut = !m_CorrPoints.empty() && m_CorrPoints.back().IsValid();
-  const unsigned T_mod = v2_lut ? 2u * m_CorrPeriodSamples : m_CorrPeriodSamples;
-  return (r_interp + phi) % T_mod;
+  const unsigned phi = (unsigned)std::round(std::fmod((double)loop_pos, T_f))
+                       % m_CorrPeriodSamples;
+  const unsigned r_lut  = InterpolateCorrPointRaw((int)loop_pos, *pts, T_f);
+  const bool     v2_lut = pts->back().IsValid();
+  return (unsigned)std::round(
+    std::fmod((double)(r_lut + phi), v2_lut ? 2.0 * T_f : T_f));
 }
 
 unsigned GOSoundReleaseAlignTable::GetPositionFor(

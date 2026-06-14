@@ -18,7 +18,8 @@ Options:
 Exit code: 0 if no mismatches, 1 otherwise.
 """
 
-import os, sys, re, math, argparse, types, json, threading
+import os, sys, re, math, argparse, types, json, threading, struct
+import numpy as _np
 import queue as _queue_mod
 
 # ── Real tkinter for GUI (imported BEFORE the mock replaces sys.modules) ─────
@@ -96,6 +97,8 @@ try:
 except Exception as e:
     print(f"ERROR: cannot import analyze_lut: {e}", file=sys.stderr)
     sys.exit(2)
+
+get_position_for_correlation_cpp = _al.get_position_for_correlation_runtime
 
 # Patch analyze_lut's pruning globally with C++ style (once, before any threads).
 # Will be applied after prune_cpp_style is defined below.
@@ -175,23 +178,33 @@ def parse_verify_log(path: str) -> list:
 
             elif line.startswith("phase0,") and current is not None:
                 parts = line.split(",")
-                # phase0,beam_id,r_samples,score,n_last
+                # phase0,beam_id,r_samples,score_hex,n_last
                 if len(parts) >= 5:
+                    sc_raw = parts[3]
+                    sc = float.fromhex(sc_raw) if sc_raw.startswith("0x") or sc_raw.startswith("-0x") else float(sc_raw)
                     current.setdefault("phase0", []).append({
                         "beam_id": int(parts[1]),
                         "r":       int(parts[2]),
-                        "score":   float(parts[3]),
+                        "score":   sc,
                         "n_last":  int(parts[4]),
                     })
 
             elif line.startswith("final_beam,") and current is not None:
                 parts = line.split(",")
-                # final_beam,beam_id,r_samples,cum_score
+                # Format v230t+: final_beam,beam_id,r_samples,cum_score_hex,cum_score_dec
+                # Format older:  final_beam,beam_id,r_samples,cum_score_dec
                 if len(parts) >= 4:
+                    if len(parts) >= 5:
+                        # hex field present → exact float32 round-trip
+                        import struct as _struct
+                        cum = float.fromhex(parts[3])  # parse hexfloat as float64
+                        cum_f32 = _np.float32(cum)
+                    else:
+                        cum_f32 = _np.float32(float(parts[3]))
                     current.setdefault("final_beams", []).append({
                         "beam_id":   int(parts[1]),
                         "r":         int(parts[2]),
-                        "cum_score": float(parts[3]),
+                        "cum_score": float(cum_f32),  # store as exact float32 value
                     })
 
             elif line.startswith("pre_prune,") and current is not None:
@@ -246,6 +259,7 @@ def parse_verify_log(path: str) -> list:
                         "exp_pos": int(parts[3]), "best_r": int(parts[4]),
                         "best_sc": float(parts[5]), "inserted": parts[6].strip() != "0",
                     })
+
 
     if current:
         entries.append(current)
@@ -422,62 +436,6 @@ def circ_dist(a: int, b: int, T: int) -> int:
     return min(d, max(1, T) - d)
 
 
-def get_position_for_correlation_cpp(loop_pos: int, pts: list,
-                                     T_int: int, T_float: float) -> int:
-    """C++-compatible replica of GetPositionForCorrelation.
-
-    v2 LUT points store r in [0,2T) — no fold.  All modular arithmetic uses
-    T2 = 2*T for v2 points, T for legacy points (flags==0).
-    phi is still computed modulo T (loop phase within one period).
-    """
-    if not pts:
-        return 0
-    T = max(1, T_int)
-    T_f = T_float if T_float > 0.0 else float(T)
-    phi = int(round(math.fmod(loop_pos, T_f))) % T
-
-    sorted_pts = sorted(pts, key=lambda p: p.loop_pos)
-    # Detect v2 LUT (any point has is_jump attribute set)
-    is_v2 = getattr(sorted_pts[-1], 'is_jump', None) is not None
-    T2 = 2 * T if is_v2 else T
-
-    if len(sorted_pts) == 1 or loop_pos <= sorted_pts[0].loop_pos:
-        r_interp = int(sorted_pts[0].best_r)
-    elif loop_pos >= sorted_pts[-1].loop_pos:
-        r_interp = int(sorted_pts[-1].best_r)
-    else:
-        idx = 0
-        while idx + 1 < len(sorted_pts) and sorted_pts[idx + 1].loop_pos <= loop_pos:
-            idx += 1
-        p0 = sorted_pts[idx]
-        p1 = sorted_pts[idx + 1]
-        t = (loop_pos - p0.loop_pos) / max(1, p1.loop_pos - p0.loop_pos)
-        r0, r1 = int(p0.best_r), int(p1.best_r)
-
-        if is_v2:
-            is_jump = bool(getattr(p1, 'is_jump', False))
-            if not is_jump:
-                if getattr(p1, 'approach_up', True):
-                    diff = (r1 - r0 + T2) % T2
-                    if diff > T2 // 2: diff -= T2
-                else:
-                    bwd = (r0 - r1 + T2) % T2
-                    diff = -bwd
-                    if diff < -(T2 // 2): diff += T2
-        else:
-            # Legacy: shortest arc, T/4 jump heuristic
-            diff = r1 - r0
-            if diff >  T // 2: diff -= T
-            if diff < -(T // 2): diff += T
-            is_jump = abs(diff) > T // 4
-
-        if is_jump:
-            r_interp = r0 if t < 0.5 else r1
-        else:
-            r_signed = r0 + int(round(t * diff))
-            r_interp = (r_signed % T2 + T2) % T2
-
-    return (r_interp + phi) % T2
 
 
 def prune_cpp_style(pts: list, T_int: int) -> list:
@@ -762,10 +720,11 @@ def compare_entry(entry: dict, organ_path: str,
     for s in entry["sim"]:
         lp   = s["loop_pos"]
         go_r = s["r_interp"]
+        W = int(round(2.0 * T_float))
         # C++-compatible sim with Python LUT
-        py_r  = get_position_for_correlation_cpp(lp, py_lut,     T_int, T_float)
+        py_r  = get_position_for_correlation_cpp(lp, py_lut,      T_float, W, False)
         # C++-compatible sim with GO LUT (tests only interpolation, not LUT)
-        py_r2 = get_position_for_correlation_cpp(lp, go_pts_list, T_int, T_float)
+        py_r2 = get_position_for_correlation_cpp(lp, go_pts_list, T_float, W, False)
 
         if circ_dist(go_r, py_r, sim_r_mod) > 1:
             sim_diffs.append({"loop_pos": lp, "go_r": go_r, "py_r": py_r,
@@ -1149,13 +1108,16 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                 go_post = res.get("go_post_prune", [])
                 py_post = res.get("py_post_prune", [])
                 if go_fb or py_fb:
+                    def _f32hex(v):
+                        f32 = _np.float32(v)
+                        return struct.pack('f', float(f32)).hex()
                     def _fmt_fb(lst, n=4):
                         return "  ".join(
-                            f"[{b['beam_id']}]r={b['r']} c={b['cum_score']:.4f}"
+                            f"[{b['beam_id']}]r={b['r']} c={_np.float32(b['cum_score']):.10f}({_f32hex(b['cum_score'])})"
                             for b in lst[:n])
                     def _fmt_py_fb(lst, n=4):
                         return "  ".join(
-                            f"[{r_c_b[2]}]r={r_c_b[0]} c={r_c_b[1]:.4f}"
+                            f"[{r_c_b[2]}]r={r_c_b[0]} c={_np.float32(r_c_b[1]):.10f}({_f32hex(r_c_b[1])})"
                             for r_c_b in lst[:n])
                     emit(f"         final_beams GO: {_fmt_fb(go_fb)}")
                     emit(f"         final_beams PY: {_fmt_py_fb(py_fb)}")

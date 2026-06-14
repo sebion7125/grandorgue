@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v230r"
+TOOL_VERSION = "v231a"
 
 def _cpp_round(x: float) -> int:
     """C++ std::round() for non-negative x: round half away from zero."""
@@ -2093,9 +2093,10 @@ def _track_step_v2(loop_seg: np.ndarray, release_ds: np.ndarray,
         drift_d = min(drift_d, sp_T_d - drift_d)
         if bsc < _ratio * max(0.05, sc_prev) or drift_d * ds > TRACKING_RESCAN_DRIFT:
             needs_rescan = True
-        # C++ Numerik: Kumulative Score in float32 akkumulieren (wie C++ float cum_score).
-        # Python float64 akkumuliert über 4000 Steps ~2.4e-4 anders als float32 in C++.
-        if _cpp_numerics_enabled:
+        # Kumulative Score in float32 akkumulieren, immer wenn Numba aktiv (= NDP ist float32).
+        # float64-Akkumulation bei float32-NDP-Scores ist inkonsistent mit C++ float cum_score
+        # und erzeugt 1-ULP-Near-Tie-Kipper ohne --cpp-numerics.
+        if _CPP_NUMERICS_BACKEND == "numba":
             new_cum = float(np.float32(cum_sc) + np.float32(bsc))
         else:
             new_cum = cum_sc + bsc
@@ -2198,7 +2199,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     release_ds_a = release_mono[:r_max + window_len + 1 : ds].astype(np.float32)
     window_len_d = max(4, window_len // ds)
     r_max_d      = max(1, r_max // ds)
-    T_int_d      = max(1, T_int // ds)
+    T_int_d      = max(1, int(round(T_float / ds)))
     sp_T_d       = search_periods * T_int_d
 
     def _full_scan(cs_d_scan):
@@ -2213,8 +2214,8 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
         cands = _ensure_per_window_candidates(raw_cands_d, scores_d, T_int_d, search_periods)
         cands = sorted(cands, key=lambda x: x[1], reverse=True)[:(_top_k if _top_k else BRANCH_TOP_K)]
         # State: (r_d, score, r_d_prev=r_d, dn_prev=1, cumulative_score, beam_id)
-        # C++ Numerik: initialer cum_score als float32 (wie C++ BeamState.cum_score).
-        if _cpp_numerics_enabled:
+        # Initialer cum_score als float32, immer wenn Numba aktiv (NDP-Score ist float32).
+        if _CPP_NUMERICS_BACKEND == "numba":
             return [(r_d, float(np.float32(sc)), r_d, 1, float(np.float32(sc)), i)
                     for i, (r_d, sc) in enumerate(cands)]
         return [(r_d, float(sc), r_d, 1, float(sc), i) for i, (r_d, sc) in enumerate(cands)]
@@ -2240,7 +2241,6 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     beam_paths    = {}   # beam_id → {n: (r_samples, score)}
     all_cands_by_n = {}
     n_cur = n_last
-
     while n_cur >= n_start:
         cs_cur_d = _cpp_round(n_cur * T_float) // ds
         if cs_cur_d + window_len_d <= len(loop_seg):
@@ -2279,7 +2279,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
                         if bid in used_ids:
                             continue
                         used_ids.add(bid)
-                        if _cpp_numerics_enabled:
+                        if _CPP_NUMERICS_BACKEND == "numba":
                             new_cum = float(np.float32(nearest[4]) + np.float32(fr_sc))
                         else:
                             new_cum = nearest[4] + fr_sc
@@ -2303,7 +2303,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     # → Phase 1.5 kann Sprünge nicht durch Interpolation maskieren
     _raw_ns = sorted(primary_by_n.keys())
     _raw_jump_intervals = set()
-    _sp_T_raw = search_periods * T_int
+    _sp_T_raw = int(round(search_periods * T_float))
     for _rna, _rnb in zip(_raw_ns, _raw_ns[1:]):
         _rra, _ = primary_by_n[_rna]
         _rrb, _ = primary_by_n[_rnb]
@@ -2384,7 +2384,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     points = [p for p in points if p.best_score > -1.5 and p.n is not None]
 
     # Sprung-Markierung: dist/dn > T/16 (normiert auf Periode, skaliert mit T)
-    _sp_T_jump  = search_periods * T_int
+    _sp_T_jump  = int(round(search_periods * T_float))
     _jump_rate_t = T_int / 16.0
     _pts_jump = sorted(points, key=lambda p: p.n)
     for _ja, _jb in zip(_pts_jump, _pts_jump[1:]):
@@ -2404,7 +2404,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     meta["post_prune_points"] = [(p.n, int(p.best_r), int(getattr(p, 'is_jump', False))) for p in points]
 
     # approach_up im gefalteten [0, sp_T)-Raum bestimmen — kurzer Kreisbogen gibt Richtung
-    sp_T = search_periods * T_int
+    sp_T = int(round(search_periods * T_float))
     pts_s = sorted(points, key=lambda p: p.n)
     if pts_s:
         pts_s[0].approach_up = True
@@ -2449,7 +2449,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     meta["corr_at_data"]        = None
     meta["folded"]              = False            # v2: r in [0,2T), kein T-Fold
     meta["fold_reason"]         = "v2-unfolded"
-    meta["wrap_period"]         = search_periods * T_int
+    meta["wrap_period"]         = int(round(search_periods * T_float))
 
     return points, meta
 
@@ -2971,6 +2971,130 @@ def get_position_for_correlation(loop_pos: int, lut_points: list, T: int,
 
     return int(round(_interp(pts[lo], pts[hi], loop_pos)))
 
+
+def get_position_for_correlation_go(loop_pos: int, lut_points: list,
+                                    T_int: int, T_float: float) -> int:
+    """GO-kompatible LUT-Interpolation — exakte Replica von C++ GetPositionForCorrelation().
+
+    Unterschied zu get_position_for_correlation():
+    - phi = round(fmod(loop_pos, T_float)), guard: 2*phi >= round(2*T_f) → phi=0
+    - Interpolation nutzt zirkuläre v2-Arithmetik in [0, round(2*T_f)) mit approach_up/is_jump
+    - Rückgabe: round(fmod(r_interp + phi, round(2*T_f)))
+    """
+    if not lut_points:
+        return 0
+    T   = max(1, T_int)
+    T_f = T_float if T_float > 0.0 else float(T)
+    phi = int(round(math.fmod(loop_pos, T_f))) % T
+
+    sorted_pts = sorted(lut_points, key=lambda p: p.loop_pos)
+    is_v2 = getattr(sorted_pts[-1], 'is_jump', None) is not None
+    T2    = int(round(2.0 * T_f)) if is_v2 else int(round(T_f))
+
+    if len(sorted_pts) == 1 or loop_pos <= sorted_pts[0].loop_pos:
+        r_interp = int(sorted_pts[0].best_r)
+    elif loop_pos >= sorted_pts[-1].loop_pos:
+        r_interp = int(sorted_pts[-1].best_r)
+    else:
+        idx = 0
+        while idx + 1 < len(sorted_pts) and sorted_pts[idx + 1].loop_pos <= loop_pos:
+            idx += 1
+        p0 = sorted_pts[idx]
+        p1 = sorted_pts[idx + 1]
+        t  = (loop_pos - p0.loop_pos) / max(1, p1.loop_pos - p0.loop_pos)
+        r0, r1 = int(p0.best_r), int(p1.best_r)
+
+        if is_v2:
+            is_jump = bool(getattr(p1, 'is_jump', False))
+            if not is_jump:
+                if getattr(p1, 'approach_up', True):
+                    # Directed forward arc — no shortest-arc clamp.
+                    diff = (r1 - r0 + T2) % T2
+                else:
+                    bwd  = (r0 - r1 + T2) % T2
+                    diff = -bwd
+        else:
+            diff    = r1 - r0
+            if diff >  T // 2: diff -= T
+            if diff < -(T // 2): diff += T
+            is_jump = abs(diff) > T // 4
+
+        if is_jump:
+            r_interp = r0 if t < 0.5 else r1
+        else:
+            r_signed = r0 + int(round(t * diff))
+            r_interp = (r_signed % T2 + T2) % T2
+
+    return int(round(math.fmod(r_interp + phi, 2.0 * T_f if is_v2 else T_f)))
+
+
+def interp_lut_segment_raw(loop_pos: int, lut_points: list,
+                           wrap_period: int, lut_folded: bool = True) -> int:
+    """Kanonische LUT-Rohinterpolation im Wrap-Raum [0, wrap_period).
+
+    Kein phi, keine Runtime-Release-Start-Logik.
+    lut_folded=True  (v1): approach_up-basierte Wrap-Logik im gefalteten Raum.
+    lut_folded=False (v2): direkter linearer Weg im ungefalteten Raum [0, 2T).
+    Konstante Extrapolation vor erstem / nach letztem Punkt.
+    """
+    if not lut_points:
+        return 0
+    W = max(1, int(wrap_period))
+    pts = sorted(lut_points, key=lambda p: p.loop_pos)
+
+    if loop_pos <= pts[0].loop_pos:
+        return int(pts[0].best_r) % W
+    if loop_pos >= pts[-1].loop_pos:
+        return int(pts[-1].best_r) % W
+
+    idx = 0
+    while idx + 1 < len(pts) and pts[idx + 1].loop_pos <= loop_pos:
+        idx += 1
+    p0 = pts[idx]
+    p1 = pts[idx + 1]
+    t = (loop_pos - p0.loop_pos) / max(1, p1.loop_pos - p0.loop_pos)
+
+    if getattr(p1, 'is_jump', False):
+        return (int(p0.best_r) % W) if t < 0.5 else (int(p1.best_r) % W)
+
+    r0 = int(p0.best_r) % W
+    r1 = int(p1.best_r) % W
+
+    if lut_folded:
+        up = getattr(p1, 'approach_up', True)
+        if up:
+            delta = (r1 - r0) % W
+        else:
+            delta = -((r0 - r1) % W)
+        return int(round((r0 + t * delta) % W))
+    else:
+        return int(round(r0 + t * (r1 - r0)))
+
+
+def get_position_for_correlation_runtime(loop_pos: int, lut_points: list,
+                                          T_float: float, wrap_period: int,
+                                          lut_folded: bool = True) -> int:
+    """Runtime-LUT-Interpolation: interp_lut_segment_raw + phi + finaler Wrap.
+
+    Exakte Replica von C++ GetPositionForCorrelation().
+    Äquivalent zu get_position_for_correlation_go(), aber explizit zweischichtig:
+      1. interp_lut_segment_raw()  → r_lut in [0, wrap_period)
+      2. phi = round(fmod(loop_pos, T_float)) % T_int
+      3. Rückgabe: round(fmod(r_lut + phi, 2*T_float))  [für v2]
+    """
+    if not lut_points:
+        return 0
+    T_f = T_float if T_float > 0 else float(max(1, wrap_period))
+    T_int = max(1, int(round(T_f)))
+
+    r_lut = interp_lut_segment_raw(loop_pos, lut_points, wrap_period, lut_folded)
+    phi = int(round(math.fmod(loop_pos, T_f))) % T_int
+
+    sorted_pts = sorted(lut_points, key=lambda p: p.loop_pos)
+    is_v2 = getattr(sorted_pts[-1], 'is_jump', None) is not None
+    wrap_float = 2.0 * T_f if is_v2 else T_f
+
+    return int(round(math.fmod(r_lut + phi, wrap_float)))
 
 
 # ─── Legacy Release Alignment (Nachbau GOSoundReleaseAlignTable) ─────────────
@@ -3532,43 +3656,38 @@ class CrossfadeSimWindow:
         self._plot()
 
     def _get_r_interp(self, t_attack_samples: int) -> int:
-        """r aus LUT-Interpolation + Offset innerhalb Periode.
-        n = floor(t/T) — immer die Periode VOR dem aktuellen Sample."""
+        """GO-kompatibler Release-Start per LUT-Interpolation.
+        Exakte Replica von C++ GetPositionForCorrelation().
+        Verwendet get_position_for_correlation_runtime() → interp_lut_segment_raw() + phi."""
         pa = self.pa
-        T_float = pa.T_float if pa.T_float > 0 else float(max(1, pa.T_int))
-        if not pa.lut_points or T_float <= 0:
+        if not pa.lut_points:
             return 0
-        n_int  = int(t_attack_samples / T_float)   # floor, kein round
-        t_n    = int(round(n_int * T_float))
-        offset = t_attack_samples - t_n             # immer >= 0
-        r_base = get_position_for_correlation(t_n, pa.lut_points, pa.T_int,
-                                                     folded=getattr(pa, "lut_folded", True),
-                                                     r_max=getattr(pa, "lut_r_search_max", 2 * pa.T_int))
-        if getattr(pa, "lut_folded", True):
-            return (r_base + offset) % max(1, pa.T_int)
-        else:
-            return r_base + offset
+        W = getattr(pa, 'lut_wrap_period', pa.T_int)
+        return get_position_for_correlation_runtime(
+            t_attack_samples, pa.lut_points, pa.T_float, W,
+            getattr(pa, 'lut_folded', True))
 
     def _get_r_direct(self, t_attack_samples: int) -> int:
-        """r direkt per argmax aus Score-Matrix, kein mod-Fold."""
+        """r per argmax aus Score-Matrix + phi-Korrektur (wie GO Runtime).
+        Nächster Tracking-Schritt n zum Slider-Wert; danach (best_r + phi) % 2T."""
         if self._score_mat is None:
             return None
-        pa  = self.pa
-        ns  = self._score_ns
-        ds  = self._score_ds
+        pa      = self.pa
+        ns      = self._score_ns
+        ds      = self._score_ds
         T_float = pa.T_float if pa.T_float > 0 else float(max(1, pa.T_int))
-        n_int  = int(t_attack_samples / T_float)   # floor
-        t_n    = int(round(n_int * T_float))
-        offset = t_attack_samples - t_n             # >= 0
+        T       = max(1, pa.T_int)
+        T2      = int(round(2.0 * T_float))
+        phi     = int(round(math.fmod(t_attack_samples, T_float))) % T
+        n_int   = int(t_attack_samples / T_float)   # floor
 
         # Nächstes n in Score-Matrix
         if n_int not in ns:
             diffs = [abs(ni - n_int) for ni in ns]
             n_int = ns[diffs.index(min(diffs))]
         col_i = ns.index(n_int) if n_int in ns else 0
-        r_d   = int(np.argmax(self._score_mat[col_i]))
-        # Kein % T_int — roher Wert aus Score-Matrix + Offset
-        return r_d * ds + offset
+        r_d   = int(np.argmax(self._score_mat[col_i])) * ds
+        return int(round(math.fmod(r_d + phi, 2.0 * T_float)))
 
     def _get_r_legacy(self, t_attack_samples: int) -> int:
         if self._legacy_tbl is None or self._atk_mono is None:
@@ -3610,6 +3729,7 @@ class CrossfadeSimWindow:
         if len(self._rel_mono) < 4 or len(self._atk_mono) < 4:
             return
         t_smp = max(0, min(t_smp, len(self._atk_mono) - 1))
+        phi   = int(round(math.fmod(t_smp, T_float))) % T
 
         # Display bugfix: do NOT shorten the crossfade window at the right edge
         # of the attack WAV. safe_slice() below already zero-pads out-of-range
@@ -3622,6 +3742,9 @@ class CrossfadeSimWindow:
         r_interp = self._get_r_interp(t_smp)
         r_legacy = self._get_r_legacy(t_smp)
         r_direct = self._get_r_direct(t_smp)  # None wenn Score-Matrix fehlt
+        # Roher LUT-Wert (ohne phi) für Debug-Anzeige im Titel
+        W = getattr(pa, 'lut_wrap_period', T)
+        r_lut = interp_lut_segment_raw(t_smp, pa.lut_points, W) if pa.lut_points else 0
 
         # Gemeinsame Zeitachse: [-context, xfade_len + context]
         total = context + xfade_len + context
@@ -3680,10 +3803,10 @@ class CrossfadeSimWindow:
         if r_direct is not None:
             if show["ndp_direct"].get():
                 ax.plot(x, rel_seg(r_direct), color="#9c27b0", lw=1.2,
-                        label=f"Release NDP direkt (r={r_direct})")
+                        label=f"Release argmax+phi (r={r_direct})")
             if show["xfade_direct"].get():
                 ax.plot(x, make_xfade(r_direct), color="#9c27b0", lw=1.5,
-                        linestyle="--", label="Crossfade NDP direkt")
+                        linestyle="--", label="Crossfade argmax+phi")
 
         if show["legacy"].get():
             ax.plot(x, rel_seg(r_legacy), color=C_WARN, lw=1.2,
@@ -3702,7 +3825,8 @@ class CrossfadeSimWindow:
         ax.set_ylabel("Amplitude", color=C_TEXT2)
         ax.set_title(
             f"{pa.rank_name} {midi_to_name(pa.midi_note)} / {pa.release_type}"
-            f"  —  Attack {t_ms:.3f} ms ({t_smp} smp)  |  T={T}",
+            f"  —  Attack {t_ms:.3f} ms ({t_smp} smp)  |  T={T}"
+            f"  |  lut={r_lut}  phi={phi}  corr={r_interp}  W={W}",
             color=C_TEXT, fontsize=10)
         self._fig.tight_layout(rect=[0, 0, 0.78, 1])
         ax.legend(facecolor=C_BG2, edgecolor=C_BORDER, labelcolor=C_TEXT,
