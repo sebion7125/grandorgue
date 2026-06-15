@@ -106,6 +106,20 @@ get_position_for_correlation_cpp = _al.get_position_for_correlation_runtime
 
 # ── Log parser ────────────────────────────────────────────────────────────────
 
+def _parse_float_flex(s: str) -> float:
+    """Parse a float in hexfloat (0x…) or decimal format.  Returns 0.0 on error.
+    Tolerates leading garbage bytes (e.g. encoding artifacts like Ä before 0x)."""
+    try:
+        s = s.strip()
+        while s and s[0] not in '0123456789+-':
+            s = s[1:]
+        if s.startswith(("0x", "-0x", "+0x", "0X", "-0X", "+0X")):
+            return float.fromhex(s)
+        return float(s)
+    except (ValueError, OverflowError):
+        return 0.0
+
+
 def parse_verify_log(path: str) -> list:
     """Parse go_lut_verify.csv; return list of pipe-entry dicts."""
     entries  = []
@@ -132,7 +146,7 @@ def parse_verify_log(path: str) -> list:
                         k, _, v = tok.partition("=")
                         kv[k] = v
                 current["label"]         = label_str
-                current["T_float"]       = float(kv.get("T_float", "0"))
+                current["T_float"]       = _parse_float_flex(kv.get("T_float", "0"))
                 current["T_int"]         = int(kv.get("T_int", "0"))
                 current["crossfade_len"] = int(kv.get("crossfade_len", "0"))
                 current["ds"]            = int(kv.get("ds", "1"))
@@ -153,6 +167,14 @@ def parse_verify_log(path: str) -> list:
                 # v230j diagnostics
                 current["align_version"]    = kv.get("align_version", "")
                 current["ndp_silent_score"] = kv.get("ndp_silent_score", "?")
+                # v231b+ autocorr diagnostics (hexfloat for exact round-trip)
+                current["initial_T"]      = _parse_float_flex(kv.get("initial_T", "0"))
+                current["ac_loop_start"]  = int(kv.get("ac_loop_start",  "0"))
+                current["loop_end_used"]  = int(kv.get("loop_end_used",  "0"))
+                current["ac_offset"]      = int(kv.get("ac_offset",      "0"))
+                current["ac_window"]      = int(kv.get("ac_window",      "0"))
+                current["ac_min_p"]       = int(kv.get("ac_min_p",       "0"))
+                current["ac_max_p"]       = int(kv.get("ac_max_p",       "0"))
 
             elif line.startswith("lut,") and current is not None:
                 parts = line.split(",")
@@ -389,18 +411,30 @@ def _parse_organ_fast(organ_path: str) -> list:
 
             prev_max_ms = 0
             for ri, (rel_idx, rel_path, max_key_ms) in enumerate(release_infos):
+                # Crossfade priority: release-specific > pipe-level > rank-level > 0
+                _rel_xf_key  = f"{pk}Release{rel_idx:03d}ReleaseCrossfadeLength"
+                _pipe_xf_key = f"{pk}ReleaseCrossfadeLength"
+                if _rel_xf_key in sec:
+                    _crossfade_ms  = int(sec[_rel_xf_key])
+                    _crossfade_src = _rel_xf_key
+                elif _pipe_xf_key in sec:
+                    _crossfade_ms  = int(sec[_pipe_xf_key])
+                    _crossfade_src = _pipe_xf_key
+                else:
+                    _crossfade_ms  = xfade_ms
+                    _crossfade_src = "ReleaseCrossfadeLength" if xfade_ms else "default"
                 pipes.append({
-                    "rank_name":        rank_name,
-                    "midi_note":        midi_note,
-                    "attack_path":      resolve(atk_rel),
-                    "attack_paths":     all_attacks,
-                    "release_path":     resolve(rel_path),
-                    "harmonic_number":  harmonic,
-                    "crossfade_len_ms": int(sec.get(
-                        f"{pk}ReleaseCrossfadeLength", str(xfade_ms))),
-                    "min_key_press_ms": prev_max_ms,
-                    "max_key_press_ms": max_key_ms,
-                    "organ_base":       organ_dir,
+                    "rank_name":          rank_name,
+                    "midi_note":          midi_note,
+                    "attack_path":        resolve(atk_rel),
+                    "attack_paths":       all_attacks,
+                    "release_path":       resolve(rel_path),
+                    "harmonic_number":    harmonic,
+                    "crossfade_len_ms":   _crossfade_ms,
+                    "crossfade_len_source": _crossfade_src,
+                    "min_key_press_ms":   prev_max_ms,
+                    "max_key_press_ms":   max_key_ms,
+                    "organ_base":         organ_dir,
                 })
                 if max_key_ms is not None:
                     prev_max_ms = max_key_ms
@@ -498,10 +532,180 @@ def go_lut_to_lutpoints(go_lut: dict) -> list:
     return pts
 
 
+# ── Free-analyzer T_float path (analyze_pipe replica) ────────────────────────
+
+def _compute_free_analyzer_T(entry: dict, atk_mono, loops: list) -> dict:
+    """Reproduce analyze_pipe's T_float path using the first SMPL loop.
+
+    initial_T from log is smpl_T (pre-HN).  We derive hn_T = initial_T * hn/8,
+    replicate the window formula, and run estimate_period_by_autocorr().
+
+    Returns dict with 'available' key.  When True, also contains:
+      hn_T_float, py_T_float, py_ac_offset, py_ac_window, py_min_p, py_max_p,
+      py_loop_start, py_loop_end.
+    """
+    initial_T   = entry.get("initial_T", 0.0)  # smpl_T from log (hexfloat)
+    if initial_T <= 0.0 or not loops:
+        return {"available": False}
+
+    harmonic    = entry.get("harmonic", 8)
+    sample_rate = entry.get("sample_rate", 44100)
+
+    # Exact replica of analyze_pipe lines 2857–2904:
+    hn_T_float = initial_T * harmonic / 8.0
+    T_int_init = int(round(hn_T_float))
+    min_p      = max(16, int(round(0.5 * T_int_init)))
+    max_p      = min(sample_rate // 20, int(round(2.0 * T_int_init)))
+
+    loop_start = loops[0][0]
+    loop_end   = loops[0][1]
+    loop_len   = loop_end - loop_start + 1
+    loop_mid   = loop_start + loop_len // 2
+    ac_region  = atk_mono[loop_mid : loop_mid + max_p * 8]
+    ac_window  = len(ac_region)
+
+    py_T_float = hn_T_float  # default if autocorr is skipped
+    if max_p >= min_p * 2 and T_int_init >= 16 and ac_window >= max_p * 2:
+        t_est, _ = _al.estimate_period_by_autocorr(
+            ac_region, min_p, max_p, expected_period=hn_T_float)
+        py_T_float = float(t_est)
+
+    return {
+        "available":    True,
+        "hn_T_float":   hn_T_float,
+        "py_T_float":   py_T_float,
+        "py_ac_offset": loop_mid,
+        "py_ac_window": ac_window,
+        "py_min_p":     min_p,
+        "py_max_p":     max_p,
+        "py_loop_start":loop_start,
+        "py_loop_end":  loop_end,
+    }
+
+
+# ── Free-analyzer full run (analyze_pipe replica without GO overrides) ────────
+
+def _run_free_analysis(chosen_attack_path: str, pipe_desc: dict,
+                       entry: dict, _use_cpp_scale: bool) -> dict:
+    """Run the full analyze_pipe-style LUT computation from WAV smpl chunk.
+
+    Unlike compare_entry (which feeds GO's T_float/n_start/n_end back into
+    compute_lut_v2), this derives every input independently — same as analyze_lut
+    does when run standalone.  The resulting LUT is then compared to GO's LUT to
+    reveal whether GO's *input computation* (T_float, crossfade, loop bounds)
+    diverges from what the Python analyzer would compute.
+
+    Returns dict with 'available' key; when True also contains:
+      free_lut, free_T_float, free_T_int, free_crossfade, smpl_T, free_pts.
+    """
+    smpl = _parse_smpl_cached(chosen_attack_path)
+    if smpl["midi_note"] is None:
+        return {"available": False, "reason": "no_smpl"}
+
+    _load_fn = _load_wav_cpp_cached if _use_cpp_scale else _load_wav_cached
+    try:
+        atk_mono_full, sr = _load_fn(chosen_attack_path)
+        rel_mono, _       = _load_fn(pipe_desc["release_path"])
+    except Exception as e:
+        return {"available": False, "reason": f"wav_error:{e}"}
+
+    # T_float from smpl chunk — exact replica of analyze_pipe
+    midi_note  = smpl["midi_note"]
+    pitch_frac = smpl["pitch_frac"] / 2**32
+    freq_hz    = 440.0 * 2**((midi_note + pitch_frac - 69) / 12)
+    smpl_T     = sr / freq_hz
+    harmonic   = entry.get("harmonic", 8)
+    hn_T       = smpl_T * harmonic / 8.0
+    T_float    = hn_T
+    T_int      = int(round(T_float))
+
+    loops = smpl["loops"]
+    if loops:
+        loop_start      = loops[0][0]
+        loop_end        = loops[0][1]
+        latest_loop_end = max(l[1] for l in loops)
+    else:
+        loop_start      = 0
+        loop_end        = len(atk_mono_full) - 1
+        latest_loop_end = loop_end
+
+    # Autocorrelation — exact replica of analyze_pipe
+    T_hn_int = T_int
+    min_p = max(16, int(round(0.5 * T_hn_int)))
+    max_p = min(sr // 20, int(round(2.0 * T_hn_int)))
+    if max_p >= min_p * 2 and T_hn_int >= 16:
+        loop_len_ac = loop_end - loop_start + 1
+        loop_mid    = loop_start + loop_len_ac // 2
+        ac_region   = atk_mono_full[loop_mid : loop_mid + max_p * 8]
+        if len(ac_region) >= max_p * 2:
+            t_est, _ = _al.estimate_period_by_autocorr(
+                ac_region, min_p, max_p, expected_period=hn_T)
+            T_float = float(t_est)
+            T_int   = int(round(T_float))
+
+    # Crossfade — from ODF (already resolved per-release) or GO default formula.
+    # Use midi_note from smpl chunk (matches C++ m_MidiKeyNumber), not ODF midi_note.
+    xfade_ms         = pipe_desc.get("crossfade_len_ms", 0)
+    xfade_src        = pipe_desc.get("crossfade_len_source", "default")
+    if xfade_ms > 0:
+        crossfade_samples = int(xfade_ms * sr / 1000)
+    else:
+        auto_ms = _al._go_default_crossfade_ms(midi_note)
+        crossfade_samples = int(auto_ms * sr / 1000)
+        xfade_src = "go_default"
+    if crossfade_samples < 4:
+        crossfade_samples = 2 * T_int
+
+    # min/max sample from ODF pipe descriptor
+    min_key_ms = pipe_desc.get("min_key_press_ms") or 0
+    max_key_ms = pipe_desc.get("max_key_press_ms")
+    min_sample = int(min_key_ms * sr / 1000) if min_key_ms else 0
+    max_sample = int(max_key_ms * sr / 1000) if max_key_ms is not None else None
+
+    # Truncate attack to latest_loop_end — same as analyze_pipe
+    atk_for_lut = atk_mono_full[:latest_loop_end + 1]
+
+    try:
+        free_lut, free_meta = _al.compute_lut_v2(
+            attack_mono=atk_for_lut,
+            release_mono=rel_mono,
+            T_float=T_float,
+            T_int=T_int,
+            crossfade_len_samples=crossfade_samples,
+            harmonic_number=harmonic,
+            loop_start=loop_start,
+            loop_end=loop_end,
+            min_sample=min_sample,
+            max_sample=max_sample,
+            latest_loop_end_sample=latest_loop_end if latest_loop_end > 0 else None,
+            # No _n_start_override / _n_end_override — free run
+        )
+    except Exception as e:
+        return {"available": False, "reason": f"compute_error:{e}"}
+
+    return {
+        "available":        True,
+        "free_lut":         free_lut,
+        "free_meta":        free_meta,
+        "free_T_float":     T_float,
+        "free_T_int":       T_int,
+        "free_crossfade":     crossfade_samples,
+        "free_xfade_source":  xfade_src,
+        "free_min_sample":    min_sample,
+        "free_max_sample":    max_sample,
+        "free_latest_le":     latest_loop_end,
+        "free_loop_start":  loop_start,
+        "free_loop_end":    loop_end,
+        "smpl_T":           smpl_T,
+        "free_pts":         len(free_lut),
+    }
+
+
 # ── Per-entry comparison ──────────────────────────────────────────────────────
 
 def compare_entry(entry: dict, organ_path: str,
-                  sim_only: bool = False, verbose: bool = False) -> dict:
+                  sim_only: bool = False, verbose: bool = False,
+                  free_analysis: bool = False) -> dict:
     label   = entry["label"]
     T_float = entry["T_float"]
     T_int   = entry["T_int"]
@@ -753,6 +957,103 @@ def compare_entry(entry: dict, organ_path: str,
                  lut_count_diff <= 2)
         severity = "minor" if minor else "major"
 
+    # ── Free-analyzer T_float (reproduce analyze_pipe path exactly) ─────────────
+    # Re-read SMPL from the chosen attack file for correct loops list.
+    _smpl_chosen  = _parse_smpl_cached(chosen_attack_path)
+    _loops_chosen = _smpl_chosen.get("loops", [])
+    free_T = _compute_free_analyzer_T(entry, atk_mono, _loops_chosen)
+
+    # ── Autocorr window comparison (logged GO values vs Python-style expected) ──
+    diag_ac = {}
+    go_ac_max_p = entry.get("ac_max_p", 0)
+    if _loops_chosen and go_ac_max_p > 0:
+        buf_len          = entry["loop_len"]           # = GetLength()
+        go_loop_start    = _loops_chosen[0][0]         # = GetLoopStart()
+        py_loop_end      = _loops_chosen[0][1]         # first loop end (Python style)
+        go_loop_end_used = entry.get("loop_end_used", 0)  # what C++ actually used
+
+        # Python-style window (what analyze_pipe computes):
+        # No backshift — just clip at EOF like Python's array slice.
+        py_loop_len  = py_loop_end - go_loop_start + 1
+        py_ac_offset = go_loop_start + py_loop_len // 2
+        py_ac_window = min(8 * go_ac_max_p, buf_len - py_ac_offset) if py_ac_offset < buf_len else 0
+
+        # C++ values (from log)
+        go_ac_offset = entry.get("ac_offset", 0)
+        go_ac_window = entry.get("ac_window", 0)
+
+        diag_ac = {
+            "go_loop_start":    entry.get("ac_loop_start", 0),
+            "go_loop_end_used": go_loop_end_used,
+            "py_loop_start":    go_loop_start,
+            "py_loop_end":      py_loop_end,
+            "go_ac_offset":     go_ac_offset,
+            "py_ac_offset":     py_ac_offset,
+            "go_ac_window":     go_ac_window,
+            "py_ac_window":     py_ac_window,
+            "window_mismatch":  (go_ac_offset != py_ac_offset
+                                 or go_ac_window != py_ac_window),
+        }
+
+    # ── Free analysis: full analyze_pipe path, no GO overrides ──────────────────
+    free_result    = {"available": False}
+    free_lut_diffs = []
+    if free_analysis and not sim_only:
+        _use_cpp_scale = (_al.get_cpp_numerics()
+                          and _al._CPP_NUMERICS_BACKEND == "numba")
+        free_result = _run_free_analysis(
+            chosen_attack_path, pipe_desc, entry, _use_cpp_scale)
+        if free_result["available"]:
+            _free_lut     = free_result["free_lut"]
+            _free_T_int   = free_result["free_T_int"]
+            _free_T_float = free_result["free_T_float"]
+            _r_mod_free   = 2 * _free_T_int
+            _tol_free     = max(1, int(_free_T_float / 2))
+
+            _free_sorted = sorted(_free_lut, key=lambda p: p.loop_pos)
+            _go_sorted_f = sorted(entry["lut"], key=lambda p: p["loop_pos"])
+            _matched_f   = set()
+            _go_mat_f    = {}
+            j2 = 0
+            for gp in _go_sorted_f:
+                glp = gp["loop_pos"]
+                best_j2, best_d2 = -1, _tol_free + 1
+                k2 = j2
+                while k2 < len(_free_sorted):
+                    plp = _free_sorted[k2].loop_pos
+                    if plp > glp + _tol_free:
+                        break
+                    d2 = abs(plp - glp)
+                    if plp >= glp - _tol_free and d2 < best_d2 and k2 not in _matched_f:
+                        best_d2, best_j2 = d2, k2
+                    k2 += 1
+                if best_j2 >= 0:
+                    _matched_f.add(best_j2)
+                    _go_mat_f[glp] = (gp, _free_sorted[best_j2])
+                    while j2 < best_j2 and _free_sorted[j2].loop_pos < glp - _tol_free:
+                        j2 += 1
+                else:
+                    _go_mat_f[glp] = (gp, None)
+
+            for _fp in (_free_sorted[k2] for k2 in range(len(_free_sorted))
+                        if k2 not in _matched_f):
+                free_lut_diffs.append({"n": _fp.n, "issue": "GO_MISSING",
+                                       "go_r": None, "free_r": int(_fp.best_r)})
+
+            for glp, (gp, fp) in sorted(_go_mat_f.items()):
+                go_r = gp["best_r"]
+                if fp is None:
+                    free_lut_diffs.append({"n": gp["n"], "issue": "FREE_MISSING",
+                                           "go_r": go_r, "free_r": None})
+                else:
+                    free_r = int(fp.best_r)
+                    dist   = circ_dist(go_r, free_r, _r_mod_free)
+                    if dist > 1:
+                        free_lut_diffs.append({
+                            "n": gp["n"], "issue": "MISMATCH_r",
+                            "go_r": go_r, "free_r": free_r, "dist": dist,
+                        })
+
     return {
         "label":       label,
         "min_ms":      entry["min_ms"],
@@ -789,6 +1090,34 @@ def compare_entry(entry: dict, organ_path: str,
         "diag_rel_path": pipe_desc["release_path"],
         "diag_py_loop_end": max((l[1] for l in loops), default=0) if loops else 0,
         "diag_go_loop_end": entry.get("latest_loop_end", 0),
+        # T_float diagnostics (v231b+)
+        "diag_initial_T":    entry.get("initial_T", 0.0),
+        "diag_T_float_go":   entry["T_float"],
+        "diag_ac":           diag_ac,
+        "diag_free_T":       free_T,
+        # Free-analysis results
+        "free_result":    free_result,
+        "free_lut_diffs": free_lut_diffs,
+        # GO CSV params needed for input comparison in run_analysis FREE block
+        "go_params": {
+            "sample_rate":    entry.get("sample_rate", 44100),
+            "crossfade_len":  entry.get("crossfade_len", 0),
+            "n_start":        entry.get("n_start", 0),
+            "n_end":          entry.get("n_end", 0),
+            "ds":             entry.get("ds", 1),
+            "r_max":          entry.get("r_max", 0),
+            "loop_len":       entry.get("loop_len", 0),
+            "latest_loop_end":entry.get("latest_loop_end", 0),
+            "T_float":        entry.get("T_float", 0.0),
+            # ODF crossfade source for comparison with free-analysis source
+            "crossfade_len_source": pipe_desc.get("crossfade_len_source", "unknown"),
+            # Derived diagnostics for n_end and cs_last_d comparison
+            "n_total": max(1, int((entry.get("loop_len", 0) - entry.get("crossfade_len", 0))
+                                  / max(1e-9, entry.get("T_float", 1.0)))),
+            "max_sample": (int(entry.get("max_ms", 0) * entry.get("sample_rate", 44100) / 1000)
+                           if entry.get("max_ms", 0) > 0 else None),
+            "cs_last_full": int(round((entry.get("n_end", 1) - 1) * entry.get("T_float", 0.0))),
+        },
     }
 
 
@@ -820,6 +1149,7 @@ def _worker_init(cpp_num: bool) -> None:
 
 def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                  workers=None, verbose=False, sim_only=False,
+                 compare_inputs=False, free_analysis=False,
                  line_cb=None, progress_cb=None, cancel_event=None):
     """Run the full comparison.
     line_cb(str)          — called for each output line (None → print).
@@ -899,7 +1229,8 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
     # compare_entry is a module-level function → picklable for ProcessPool.
     import functools
     _run = functools.partial(compare_entry, organ_path=organ_path,
-                             sim_only=sim_only, verbose=verbose)
+                             sim_only=sim_only, verbose=verbose,
+                             free_analysis=free_analysis)
 
     if n_workers == 1:
         results = []
@@ -1017,11 +1348,192 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
 
     minor_mis = 0
     major_mis = 0
+    free_mis  = 0
+
+    def _emit_inputs(res):
+        """Emit one-line T_float + autocorr-window comparison for a single pipe."""
+        ft = res.get("diag_free_T", {})
+        if not ft.get("available"):
+            return
+        go_T   = res.get("diag_T_float_go", 0.0)
+        py_T   = ft["py_T_float"]
+        T_diff = go_T - py_T
+        if abs(T_diff) < 1e-9:
+            T_tag = "T✓"
+        else:
+            T_tag = f"T⚠  GO={go_T:.6f}  PY={py_T:.6f}  Δ={T_diff:+.6f}"
+        da = res.get("diag_ac", {})
+        if da:
+            loop_end_go = da.get("go_loop_end_used", 0)
+            loop_end_py = da.get("py_loop_end",      0)
+            le_tag = "le✓" if loop_end_go == loop_end_py else (
+                f"le⚠ GO={loop_end_go} PY={loop_end_py}")
+            if da.get("window_mismatch"):
+                win_tag = (f"win⚠  GO off={da['go_ac_offset']} win={da['go_ac_window']}"
+                           f"  PY off={da['py_ac_offset']} win={da['py_ac_window']}")
+            else:
+                win_tag = "win✓"
+            win_str = f"  {le_tag}  {win_tag}"
+        else:
+            win_str = ""
+        emit(f"  INP  {res['label']:50s} {_rel_tag(res):20s} {T_tag}{win_str}")
 
     for res in results:
         st  = res["status"]
         sev = res.get("severity", "none")
         rel = _rel_tag(res)
+        if compare_inputs:
+            _emit_inputs(res)
+
+        # ── FREE_DIFF: free-analyzer LUT vs GO (independent of REPLAY status) ──
+        # Processed first so that `continue` inside the REPLAY-DIFF block cannot
+        # suppress FREE_DIFF output.
+        free_diffs = res.get("free_lut_diffs", [])
+        fr         = res.get("free_result", {})
+
+        def _emit_free_inputs(fr, res):
+            """Emit GO vs FREE input parameter comparison with ⚠ on mismatches."""
+            fm = fr.get("free_meta", {})
+            if not fm:
+                return
+            gp = res.get("go_params", {})
+
+            go_xfade   = gp.get("crossfade_len", 0)
+            free_xfade = fm.get("window_len", fr.get("free_crossfade", 0))
+            go_ll      = gp.get("loop_len", 0)
+            free_ll    = fm.get("atk_full_len", 0)
+            go_le      = gp.get("latest_loop_end", 0)
+            free_le    = fr.get("free_latest_le", 0)
+            go_nst     = gp.get("n_start", 0)
+            free_nst   = fm.get("n_start", 0)
+            go_nend    = gp.get("n_end", 0)
+            free_nend  = fm.get("n_end", 0)
+            go_ds      = gp.get("ds", 1)
+            free_ds    = fm.get("ds", 1)
+            go_rmax    = gp.get("r_max", 0)
+            free_rmax  = fm.get("r_max", 0)
+            go_nlast   = go_nend - 1
+            free_nlast = fm.get("n_last", free_nend - 1)
+            go_csld    = int(round(go_nlast * gp.get("T_float", 0.0))) // max(1, go_ds)
+            free_csld  = fm.get("cs_last_d", 0)
+
+            def _w(gv, fv): return "⚠" if gv != fv else ""
+
+            go_xf_src   = gp.get("crossfade_len_source", "")
+            free_xf_src = fr.get("free_xfade_source", "")
+            xfade_diff  = go_xfade != free_xfade
+            xfade_src_note = f" [{go_xf_src}→{free_xf_src}]" if xfade_diff else ""
+            emit(f"         INP GO:   xfade={go_xfade} nst={go_nst} nend={go_nend} "
+                 f"ds={go_ds} rmax={go_rmax} n_last={go_nlast} "
+                 f"cs_last_d={go_csld} loop_len={go_ll} latest_le={go_le}")
+            emit(f"         INP FREE: xfade={free_xfade}{_w(go_xfade,free_xfade)}{xfade_src_note} "
+                 f"nst={free_nst}{_w(go_nst,free_nst)} "
+                 f"nend={free_nend}{_w(go_nend,free_nend)} "
+                 f"ds={free_ds}{_w(go_ds,free_ds)} "
+                 f"rmax={free_rmax}{_w(go_rmax,free_rmax)} "
+                 f"n_last={free_nlast}{_w(go_nlast,free_nlast)} "
+                 f"cs_last_d={free_csld}{_w(go_csld,free_csld)} "
+                 f"loop_len={free_ll}{_w(go_ll,free_ll)} "
+                 f"latest_le={free_le}{_w(go_le,free_le)}")
+
+            # ── Detail: cs_last_d ±1 (downsampling rounding) ──────────────────
+            if go_csld != free_csld:
+                go_T      = gp.get("T_float", 0.0)
+                free_T    = fr.get("free_T_float", 0.0)
+                go_cs_f   = gp.get("cs_last_full", int(round(go_nlast * go_T)))
+                free_cs_f = fm.get("cs_last", 0)
+                go_prod   = go_nlast   * go_T
+                free_prod = free_nlast * free_T
+                emit(f"           cs_last(full): GO={go_cs_f} FREE={free_cs_f}"
+                     f"{'⚠' if go_cs_f != free_cs_f else ''}"
+                     f"  (÷ds={go_ds}→{go_csld}, ÷ds={free_ds}→{free_csld})")
+                emit(f"           n_last×T: GO={go_prod:.15g} ({float.hex(go_prod)})")
+                emit(f"           n_last×T: FR={free_prod:.15g} ({float.hex(free_prod)})")
+
+            # ── Detail: nend/nst divergence ────────────────────────────────────
+            if go_nend != free_nend or go_nst != free_nst:
+                import math as _math
+                go_T      = gp.get("T_float", 0.0)
+                free_T    = fr.get("free_T_float", 0.0)
+                go_ntot   = gp.get("n_total", 0)
+                free_ntot = fm.get("n_total", 0)
+                go_max_s  = gp.get("max_sample")   # None for unbounded
+                free_max_s = fr.get("free_max_sample")
+                emit(f"           n_total: GO={go_ntot} FREE={free_ntot}"
+                     f"{'⚠' if go_ntot != free_ntot else ''}")
+                if go_max_s is not None and free_max_s is not None and go_T > 0 and free_T > 0:
+                    go_ratio   = go_max_s   / go_T
+                    free_ratio = free_max_s / free_T
+                    go_ceil    = _math.ceil(go_ratio)
+                    free_ceil  = _math.ceil(free_ratio)
+                    go_ne_calc  = min(go_ntot,   go_ceil   + 2)
+                    free_ne_calc = min(free_ntot, free_ceil + 2)
+                    emit(f"           max_sample: GO={go_max_s} FREE={free_max_s}"
+                         f"{'⚠' if go_max_s != free_max_s else ''}")
+                    emit(f"           max_s/T: GO={go_ratio:.10g} FREE={free_ratio:.10g}"
+                         f"{'⚠' if go_ratio != free_ratio else ''}")
+                    emit(f"           ceil(max_s/T): GO={go_ceil} FREE={free_ceil}"
+                         f"{'⚠' if go_ceil != free_ceil else ''}"
+                         f"  → n_end=min(ntot,ceil+2): GO={go_ne_calc} FREE={free_ne_calc}"
+                         f"{'⚠' if go_ne_calc != free_ne_calc else ''}")
+                elif go_max_s is None and free_max_s is None and go_T > 0 and free_T > 0:
+                    # Unbounded release: n_end from latest_loop_end
+                    go_le_r   = go_le   / go_T   if go_T   > 0 else 0.0
+                    free_le_r = free_le / free_T if free_T > 0 else 0.0
+                    go_ne_u   = min(go_ntot,   _math.ceil(go_le_r)   + 2)
+                    free_ne_u = min(free_ntot, _math.ceil(free_le_r) + 2)
+                    emit(f"           (unbounded) latest_le/T: GO={go_le_r:.10g} FREE={free_le_r:.10g}"
+                         f"{'⚠' if _math.ceil(go_le_r) != _math.ceil(free_le_r) else ''}")
+                    emit(f"           → n_end=min(ntot,ceil+2): GO={go_ne_u} FREE={free_ne_u}"
+                         f"{'⚠' if go_ne_u != free_ne_u else ''}")
+
+        if free_diffs:
+            free_mis += 1
+            go_T     = res.get("diag_T_float_go", 0.0)
+            free_T_f = fr.get("free_T_float", 0.0)
+            T_delta  = free_T_f - go_T
+            if abs(T_delta) > 0.001:
+                T_tag = f"freeT={free_T_f:.3f}(GOT={go_T:.3f},Δ={T_delta:+.3f})"
+            else:
+                T_tag = "freeT=T✓"
+            go_pts_n    = res.get("go_pts", "?")
+            free_pts_n  = fr.get("free_pts", "?")
+            max_free_dr = max((d.get("dist", 0) for d in free_diffs), default=0)
+            emit(f"  FREE   {res['label']:50s} {rel:20s} "
+                 f"go={go_pts_n:3} free={free_pts_n:3}  "
+                 f"[DIFF:{len(free_diffs)}]  maxΔr={max_free_dr}  {T_tag}")
+            # Input comparison before LUT points
+            _emit_free_inputs(fr, res)
+            # Phase0 candidates (GO vs FREE)
+            go_p0_raw = res.get("go_phase0", [])
+            free_p0   = fr.get("free_meta", {}).get("phase0_candidates", [])
+            if go_p0_raw or free_p0:
+                def _fmt_p0c(cands, n=3):
+                    return "  ".join(f"r={r:5d} sc={sc:.6f}" for r, sc in cands[:n])
+                go_p0_top  = [(c["r"], c["score"]) for c in go_p0_raw[:3]]
+                free_p0_top = free_p0[:3]
+                emit(f"         Phase0  GO: {_fmt_p0c(go_p0_top)}")
+                emit(f"         Phase0 FR: {_fmt_p0c(free_p0_top)}")
+            # LUT point diffs
+            for d in free_diffs[:6]:
+                issue = d.get("issue", "")
+                if issue == "MISMATCH_r":
+                    emit(f"         FREE n={d['n']:4d}  Δr={d['dist']:3d}  "
+                         f"go_r={d['go_r']:4d} free_r={d['free_r']:4d}")
+                elif d["go_r"] is None:
+                    emit(f"         FREE n={d['n']:4d}  GO_MISSING  free_r={d['free_r']}")
+                else:
+                    emit(f"         FREE n={d['n']:4d}  FREE_MISSING  go_r={d['go_r']}")
+            if len(free_diffs) > 6:
+                emit(f"         ... and {len(free_diffs)-6} more FREE diffs")
+        elif free_analysis and fr.get("available") and compare_inputs:
+            # Show FREE✓ line when compare_inputs is active (like INP lines)
+            go_T     = res.get("diag_T_float_go", 0.0)
+            free_T_f = fr.get("free_T_float", 0.0)
+            T_tag = "freeT=T✓" if abs(free_T_f - go_T) < 0.001 else f"freeT={free_T_f:.3f}"
+            emit(f"  FREE✓  {res['label']:50s} {rel:20s} "
+                 f"go={res.get('go_pts','?'):3} free={fr.get('free_pts','?'):3}  {T_tag}")
+
         if st == "OK":
             ok += 1
         elif st.startswith("skip"):
@@ -1098,6 +1610,26 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                             emit(f"           latest_loop_end: {le_match}")
                             ap = res.get("diag_atk_path","?")
                             emit(f"           atk_path: ...{ap[-60:]}" if len(ap)>60 else f"           atk_path: {ap}")
+            # T_float and autocorr-window diagnostics (v231b+ logs only).
+            # Show for any diff when initial_T or ac_offset data is present.
+            diag_ac = res.get("diag_ac", {})
+            _init_T  = res.get("diag_initial_T", 0.0)
+            _T_go    = res.get("diag_T_float_go", 0.0)
+            if _init_T > 0.0:
+                _T_delta = _T_go - _init_T
+                _T_tag   = f"Δ={_T_delta:+.6f}" if abs(_T_delta) > 1e-9 else "Δ=0 (no autocorr change)"
+                emit(f"         T_float: initial_T={_init_T:.6f}  →  T_float={_T_go:.6f}  {_T_tag}")
+            if diag_ac:
+                go_off = diag_ac["go_ac_offset"]
+                py_off = diag_ac["py_ac_offset"]
+                go_win = diag_ac["go_ac_window"]
+                py_win = diag_ac["py_ac_window"]
+                win_tag = "⚠MISMATCH" if diag_ac["window_mismatch"] else "✓"
+                emit(f"         autocorr window {win_tag}: "
+                     f"GO offset={go_off} win={go_win}  "
+                     f"PY offset={py_off} win={py_win}  "
+                     f"(loop_start={diag_ac['go_loop_start']} "
+                     f"py_loop_end={diag_ac['py_loop_end']})")
             # Pre/post-prune and final-beam diagnostics.
             # Major diffs always; minor diffs in verbose mode.
             if (sev == "major" or verbose) and res["lut_diffs"]:
@@ -1192,9 +1724,10 @@ def run_analysis(log_path, organ_path, filter_str="", max_pipes=0,
                 emit(f"         ... and {len(res['simsrc_diffs'])-5} more sim-logic diffs")
 
     minor_hint = f"  (minor diffs hidden — use --verbose to show)" if minor_mis > 0 and not verbose else ""
+    free_hint  = f"  FREE_DIFF={free_mis}" if free_analysis else ""
     emit(f"\nResult: {total} entries — "
          f"OK={ok}  MISMATCH={mis} (major={major_mis} minor={minor_mis})  "
-         f"SKIP={skip}  NOT_FOUND={notfound}  ERR={errs}{minor_hint}")
+         f"SKIP={skip}  NOT_FOUND={notfound}  ERR={errs}{free_hint}{minor_hint}")
     return ok, mis, skip, notfound, errs
 
 
@@ -1213,8 +1746,10 @@ def run_gui():
     var_workers = _tk.IntVar(   value=settings.get("workers", os.cpu_count() or 4))
     var_status      = _tk.StringVar(value="Ready")
     var_prog        = _tk.DoubleVar(value=0.0)
-    var_cpp_num     = _tk.BooleanVar(value=settings.get("cpp_numerics", False))
-    var_verbose     = _tk.BooleanVar(value=settings.get("verbose",      False))
+    var_cpp_num        = _tk.BooleanVar(value=settings.get("cpp_numerics",    False))
+    var_verbose        = _tk.BooleanVar(value=settings.get("verbose",         False))
+    var_compare_inputs = _tk.BooleanVar(value=settings.get("compare_inputs",  False))
+    var_free_analysis  = _tk.BooleanVar(value=settings.get("free_analysis",   False))
 
     def _apply_cpp_numerics(*_):
         _al.set_cpp_numerics(var_cpp_num.get())
@@ -1264,6 +1799,10 @@ def run_gui():
                      variable=var_cpp_num).pack(side="left", padx=(12, 0))
     _ttk.Checkbutton(filter_row, text="  Verbose",
                      variable=var_verbose).pack(side="left", padx=(8, 0))
+    _ttk.Checkbutton(filter_row, text="  Compare Inputs",
+                     variable=var_compare_inputs).pack(side="left", padx=(8, 0))
+    _ttk.Checkbutton(filter_row, text="  Free Analysis",
+                     variable=var_free_analysis).pack(side="left", padx=(8, 0))
     top.columnconfigure(1, weight=1)
 
     # Buttons
@@ -1339,6 +1878,8 @@ def run_gui():
             "workers": var_workers.get(),
             "cpp_numerics": var_cpp_num.get(),
             "verbose": var_verbose.get(),
+            "compare_inputs": var_compare_inputs.get(),
+            "free_analysis":  var_free_analysis.get(),
         })
 
         out.config(state="normal")
@@ -1356,6 +1897,8 @@ def run_gui():
                 filter_str=var_filter.get(),
                 workers=var_workers.get(),
                 verbose=var_verbose.get(),
+                compare_inputs=var_compare_inputs.get(),
+                free_analysis=var_free_analysis.get(),
                 line_cb=lambda s: q.put(("line", s)),
                 progress_cb=lambda d, t: q.put(("progress", d, t)),
                 cancel_event=cancel_ev,
@@ -1405,6 +1948,14 @@ def main():
                          "no BLAS) for Python comparison")
     ap.add_argument("--workers",   "-j", type=int, default=os.cpu_count() or 4, metavar="N",
                     help=f"Parallel worker threads (default: {os.cpu_count() or 4})")
+    ap.add_argument("--compare-inputs", "-i", action="store_true",
+                    help="Show free-analyzer vs GO input comparison (T_float, "
+                         "autocorr window) for every pipe, independent of LUT diffs")
+    ap.add_argument("--free-analysis", "-F", action="store_true",
+                    help="Run full analyze_pipe path from WAV smpl chunk (no GO "
+                         "overrides) and compare resulting LUT against GO — shows "
+                         "whether GO's input computation (T_float, crossfade, loop "
+                         "bounds) diverges from the Python analyzer")
     args = ap.parse_args()
 
     # If organ still missing after parsing, try GUI
@@ -1432,6 +1983,8 @@ def main():
         workers=args.workers,
         verbose=args.verbose,
         sim_only=args.sim_only,
+        compare_inputs=args.compare_inputs,
+        free_analysis=args.free_analysis,
     )
     if result is None:
         sys.exit(2)

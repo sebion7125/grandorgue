@@ -231,6 +231,18 @@ public:
     return latest;
   }
 
+  // Returns the sample position of the first sustain loop end (inclusive, 0-based),
+  // matching Python's loops[0][1] from the SMPL chunk.
+  // Finds the EndSegment whose next_start_segment_index == 1
+  // (= m_StartSegments[1], the first loop start).
+  // Falls back to GetLatestLoopEnd() for single-loop pipes or unusual orderings.
+  inline unsigned GetFirstLoopEnd() const {
+    for (const auto &seg : m_EndSegments)
+      if (seg.next_start_segment_index == 1 && seg.end_pos > 0)
+        return seg.end_pos - 1;
+    return GetLatestLoopEnd();
+  }
+
   inline unsigned GetEndSegmentCount() const {
     return (unsigned)m_EndSegments.size();
   }

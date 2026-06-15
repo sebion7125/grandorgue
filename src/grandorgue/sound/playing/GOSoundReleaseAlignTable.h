@@ -118,8 +118,9 @@ public:
   unsigned GetPositionForCorrelation(
     unsigned loop_pos, const GOSoundAudioSection *p_Attack = nullptr) const;
 
-  unsigned GetPeriodSamples() const { return m_CorrPeriodSamples; }
-  double   GetPeriodFloat()   const { return m_CorrPeriodFloat; }
+  unsigned GetPeriodSamples()    const { return m_CorrPeriodSamples; }
+  double   GetPeriodFloat()      const { return m_CorrPeriodFloat; }
+  unsigned GetCorrCrossfadeLen() const { return m_CorrCrossfadeLen; }
 
   // Set the period from the pitch formula only (no audio scan).
   // Used when ComputeCorrelationLut is skipped due to a pre-loaded LUT cache:

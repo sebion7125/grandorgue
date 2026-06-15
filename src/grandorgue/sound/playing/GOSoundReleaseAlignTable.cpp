@@ -798,11 +798,13 @@ static TrackResult TrackStepV2(
 // Douglas-Peucker pruning on v2 track points.
 // tolerance = max(2, T/V2_PRUNE_TOL_FACTOR).
 // Preserves jump points and predecessors of jump points.
-// Points are sorted by n ascending; r values are unfolded (may be ≥ T).
+// Points are sorted by n ascending; r is modular in [0,2T), track_r is
+// phase-unwrapped (may lie outside [0,2T)); DP uses track_r throughout.
 struct V2TrackPt {
   unsigned n;         // period index
   unsigned loop_pos;  // absolute sample position (= round(n * T_f))
-  int      r;         // unfolded release offset in original samples
+  int      r;         // modular release offset in [0, sp_T_full)
+  int      track_r;   // phase-unwrapped r (may lie outside [0, sp_T_full))
   float    score;
   bool     is_jump;
   bool     approach_up;
@@ -818,41 +820,51 @@ static std::vector<V2TrackPt> PruneV2(
   std::vector<bool> active(sz, true);
   bool changed = true;
   while (changed) {
-    changed = false;
     // Build list of currently active indices.
     std::vector<unsigned> idx;
     idx.reserve(sz);
     for (unsigned i = 0; i < sz; i++)
       if (active[i]) idx.push_back(i);
 
+    // FixA: collect deletions for this pass; apply only at pass end.
+    // Guard: skip cur if prev or next is already marked — prevents chain
+    // deletions whose final chord was never validated.
+    std::vector<bool> to_delete(sz, false);
+
     for (unsigned k = 1; k + 1 < (unsigned)idx.size(); k++) {
       const unsigned cur  = idx[k];
       const unsigned prev = idx[k - 1];
       const unsigned next = idx[k + 1];
 
+      if (to_delete[prev] || to_delete[next]) continue;
       // Never prune jump points or predecessors of jump points.
       if (pts[cur].is_jump)           continue;
       if (pts[next].is_jump)          continue;
       // Skip if neighbour gap is too wide.
       if (pts[next].n - pts[prev].n > V2_MAX_PRUNE_GAP_N) continue;
-      // Skip if r-discontinuity > T/4 at either side.
-      if (std::abs(pts[cur].r  - pts[prev].r) > (int)(T_int_f / 4.0f)) continue;
-      if (std::abs(pts[next].r - pts[cur].r)  > (int)(T_int_f / 4.0f)) continue;
+      // Skip if track_r-discontinuity > T/4 at either side.
+      if (std::abs(pts[cur].track_r  - pts[prev].track_r) > (int)(T_int_f / 4.0f)) continue;
+      if (std::abs(pts[next].track_r - pts[cur].track_r)  > (int)(T_int_f / 4.0f)) continue;
 
       // Douglas-Peucker: ALL original points in (prev, next) must fit within tol.
-      const float n0 = (float)pts[prev].n, r0 = (float)pts[prev].r;
-      const float n1 = (float)pts[next].n, r1 = (float)pts[next].r;
+      // Use unwrapped track_r for endpoints and intermediate values so the
+      // linear chord is correct across wrap boundaries (matches Python).
+      const float n0 = (float)pts[prev].n, r0 = (float)pts[prev].track_r;
+      const float n1 = (float)pts[next].n, r1 = (float)pts[next].track_r;
       const float dn = std::max(1.0f, n1 - n0);
       bool can_del = true;
       for (unsigned j = prev + 1; j < next; j++) {
         const float t  = (float)(pts[j].n - pts[prev].n) / dn;
         const float er = r0 + t * (r1 - r0);
-        if (std::abs((float)pts[j].r - er) > tol) { can_del = false; break; }
+        if (std::abs((float)pts[j].track_r - er) > tol) { can_del = false; break; }
       }
-      if (can_del) {
-        active[cur] = false;
-        changed     = true;
-      }
+      if (can_del)
+        to_delete[cur] = true;
+    }
+
+    changed = false;
+    for (unsigned i = 0; i < sz; i++) {
+      if (to_delete[i]) { active[i] = false; changed = true; }
     }
   }
 
@@ -890,7 +902,14 @@ static unsigned InterpolateCorrPointRaw(
 
   const int r0 = (int)p0.best_r % W;
   const int r1 = (int)p1.best_r % W;
-  int r_result = (int)std::round(r0 + t * (r1 - r0));
+  // Zirkuläre Interpolation via approach_up — entspricht Python interp_lut_segment_raw.
+  // Ohne dieses Bit würde 1380→20 (W=1400) als Rückwärts- statt Vorwärts-Wrap
+  // interpoliert (r0 + t*(r1-r0) fällt von 1380 auf 20 statt über 0 zu gehen).
+  const bool up = p1.IsApproachUp();
+  const int delta = up ? ((r1 - r0 + W) % W) : -(((r0 - r1 + W) % W));
+  double raw = std::fmod((double)r0 + t * (double)delta, (double)W);
+  if (raw < 0.0) raw += (double)W;
+  int r_result = (int)std::round(raw);
   r_result = std::max(0, std::min(W - 1, r_result));
   return (unsigned)r_result;
 }
@@ -935,6 +954,16 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
   // On the first call: initialise shared parameters.
   // On subsequent calls (additional attack variants): T must match.
   const bool first_call = m_CorrLuts.empty();
+#if __has_include("GOLogReleaseAlignEnable.h")
+  // Diagnostic locals for CSV logging — captured during first_call.
+  double   diag_initial_T     = 0.0;  // smpl_T before HN; verify derives hn_T = initial_T * hn/8
+  unsigned diag_ac_loop_start = 0;    // GetLoopStart() = loops[0][0]
+  unsigned diag_loop_end_used = 0;    // GetFirstLoopEnd() = loops[0][1]
+  unsigned diag_ac_offset     = 0;    // autocorr window start = loop_start + loop_len/2
+  unsigned diag_ac_window     = 0;    // autocorr window length (clipped, no backshift)
+  unsigned diag_ac_min_p      = 0;
+  unsigned diag_ac_max_p      = 0;
+#endif
   if (first_call) {
     m_CorrPeriodSamples = 0;
     m_CorrCrossfadeLen  = crossfade_len;
@@ -944,36 +973,56 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     return;
 
   if (first_call) {
-    m_CorrPeriodFloat   = (double)sample_rate / sample_freq_hz;
-    m_CorrPeriodSamples = (unsigned)std::round(m_CorrPeriodFloat);
+    // Match Python analyze_pipe exactly:
+    //   smpl_T     = sr / freq_hz
+    //   hn_T_float = smpl_T * harmonic_number / 8.0   ← working period
+    // For HN=8 both are equal; for HN≠8 (mixtures, mutations) they differ.
+    const double smpl_T_float = (double)sample_rate / sample_freq_hz;
+    const double hn_T_float   = smpl_T_float * (double)harmonic_number / 8.0;
+    m_CorrPeriodFloat   = hn_T_float;
+    m_CorrPeriodSamples = (unsigned)std::round(hn_T_float);
+#if __has_include("GOLogReleaseAlignEnable.h")
+    diag_initial_T = smpl_T_float;  // smpl_T (pre-HN); verify derives hn_T = initial_T * hn/8
+#endif
   }
 
   // Period estimation via autocorrelation.
-  //
-  // Search range [T_hn/2, 2*T_hn] centred on the HN-corrected working period
-  // T_hn = T_smpl * harmonic_number / 8.  This covers octave ambiguity (T/2
-  // and 2T peaks) and moderate detuning, matching the Python analyze_pipe
-  // behaviour exactly.  Read from the middle of the sustain loop region for
-  // a stable, oscillatory signal.
+  // Matches Python analyze_pipe exactly:
+  //   T_hn_int = round(hn_T_float) = m_CorrPeriodSamples
+  //   min_p = max(16, round(0.5 * T_hn_int))       ← round(), not integer divide
+  //   max_p = min(sr//20, round(2.0 * T_hn_int))   ← round(), not integer multiply
+  //   loop_len = GetFirstLoopEnd() - GetLoopStart() + 1  ← first SMPL loop only
+  //   ac_offset = loop_start + loop_len // 2
+  //   ac_window = min(8*max_p, buf_end - ac_offset) ← clip at EOF only, no backshift
   if (first_call) {
     const unsigned loop_len_full = loop_section.GetLength();
-    const unsigned T_smpl        = m_CorrPeriodSamples;
-    // HN-corrected working period (same formula as Python hn_T_float).
-    const unsigned T_hn = (unsigned)std::round(
-      (double)T_smpl * harmonic_number / 8.0);
-    const unsigned min_p = std::max(16u, T_hn / 2u);
-    const unsigned max_p = std::min(sample_rate / 20u, T_hn * 2u);
+    const unsigned T_hn_int      = m_CorrPeriodSamples;  // = round(hn_T_float)
+    const unsigned min_p = std::max(16u,
+      (unsigned)std::round(0.5 * (double)T_hn_int));
+    const unsigned max_p = std::min(sample_rate / 20u,
+      (unsigned)std::round(2.0 * (double)T_hn_int));
 
-    if (max_p >= min_p * 2 && T_hn >= 16u) {
-      // Read from the middle of the sustain loop region (matches Python
-      // loop_mid = loop_start + loop_len // 2).
-      const unsigned loop_start  = loop_section.GetLoopStart();
-      const unsigned loop_len    = loop_len_full - loop_start;
-      unsigned ac_offset = loop_start + loop_len / 2;
-      unsigned ac_window = 8 * max_p;
-      if (ac_offset + ac_window > loop_len_full)
-        ac_offset = loop_len_full > ac_window ? loop_len_full - ac_window : 0;
-      ac_window = std::min(ac_window, loop_len_full - ac_offset);
+    if (max_p >= min_p * 2 && T_hn_int >= 16u) {
+      const unsigned loop_start     = loop_section.GetLoopStart();
+      const unsigned first_loop_end = loop_section.GetFirstLoopEnd();
+      // Python: loop_len = loops[0][1] - loops[0][0] + 1 (first SMPL loop only).
+      // Falls back to full-buffer span when GetFirstLoopEnd() returns 0 (no loops).
+      const unsigned loop_len  = (first_loop_end > loop_start)
+                                 ? first_loop_end - loop_start + 1
+                                 : loop_len_full - loop_start;
+      const unsigned ac_offset = loop_start + loop_len / 2;
+      // Python: atk[loop_mid:loop_mid+window] — clips at EOF silently, no backshift.
+      const unsigned ac_window = (ac_offset < loop_len_full)
+                                 ? std::min(8u * max_p, loop_len_full - ac_offset)
+                                 : 0u;
+#if __has_include("GOLogReleaseAlignEnable.h")
+      diag_ac_loop_start  = loop_start;
+      diag_loop_end_used  = first_loop_end;
+      diag_ac_offset      = ac_offset;
+      diag_ac_window      = ac_window;
+      diag_ac_min_p       = min_p;
+      diag_ac_max_p       = max_p;
+#endif
 
       if (ac_window >= max_p * 2) {
         GOSoundCompressionCache ac_cache;
@@ -987,7 +1036,7 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
           ac_mono[i] = (float)(s / loop_ch);
         }
         const double refined_T = EstimatePeriodByAutocorr(
-          ac_mono.data(), ac_window, min_p, max_p, (double)T_hn);
+          ac_mono.data(), ac_window, min_p, max_p, (double)T_hn_int);
         m_CorrPeriodSamples = (unsigned)std::round(refined_T);
         m_CorrPeriodFloat   = refined_T;
       }
@@ -1387,12 +1436,39 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     }
 
     // ── Phase 2: build V2TrackPt list ─────────────────────────────────────
+    // Phase-unwrap the modular r values from primary_path (like Python's
+    // _unwrapped_r_by_n).  primary_path is a std::map → ascending n order.
+    // sp_T_wrap matches Python's search_periods * T_int = 2 * T_int.
+    const int sp_T_wrap = (int)(2u * m_CorrPeriodSamples);
+    std::map<unsigned, int> unwrapped_r_by_n;
+    {
+      int  acc_r  = 0;
+      int  prev_r = 0;
+      bool first  = true;
+      for (const auto &kv : primary_path) {
+        const int r_mod = kv.second.first;
+        if (first) {
+          acc_r = r_mod;
+          first = false;
+        } else {
+          int d = r_mod - prev_r;
+          if (d >  sp_T_wrap / 2) d -= sp_T_wrap;
+          if (d < -sp_T_wrap / 2) d += sp_T_wrap;
+          acc_r += d;
+        }
+        unwrapped_r_by_n[kv.first] = acc_r;
+        prev_r = r_mod;
+      }
+    }
+
     v2_pts.reserve(primary_path.size());
     for (const auto &kv : primary_path) {
       if (kv.second.second < -1.5f) continue;
       V2TrackPt p;
       p.n           = kv.first;
       p.r           = kv.second.first;
+      p.track_r     = unwrapped_r_by_n.count(kv.first)
+                      ? unwrapped_r_by_n.at(kv.first) : kv.second.first;
       p.score       = kv.second.second;
       p.loop_pos    = (unsigned)std::round(p.n * T_f);
       p.is_jump     = false;
@@ -1412,14 +1488,13 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
       pts[0].approach_up = true;
       pts[0].is_jump     = false;
       for (unsigned i = 1; i < (unsigned)pts.size(); i++) {
+        // is_jump: circular distance / dn (uses modular r, direction-agnostic).
         int dist = std::abs(pts[i].r - pts[i - 1].r);
         if ((unsigned)dist > sp_T_full / 2u) dist = (int)sp_T_full - dist;
         const unsigned dn_ab = std::max(1u, pts[i].n - pts[i - 1].n);
         pts[i].is_jump = ((float)dist / (float)dn_ab > jump_rate);
-        const int fwd =
-          ((pts[i].r - pts[i - 1].r) % (int)sp_T_full + (int)sp_T_full)
-          % (int)sp_T_full;
-        pts[i].approach_up = ((unsigned)fwd <= sp_T_full / 2u);
+        // approach_up: sign of unwrapped track_r delta (matches Python).
+        pts[i].approach_up = (pts[i].track_r - pts[i - 1].track_r) >= 0;
       }
     };
     mark_flags(v2_pts);
@@ -1433,14 +1508,11 @@ void GOSoundReleaseAlignTable::ComputeCorrelationLut(
     // PruneV2 protects jump points and their predecessors, so jumps are never
     // added or removed.  Recomputing is_jump here would diverge from Python
     // (reference) which also leaves is_jump unchanged after pruning.
+    // Use unwrapped track_r delta (matches Python's post-prune logic).
     if (!v2_pts.empty()) {
       v2_pts[0].approach_up = true;
-      for (unsigned i = 1; i < (unsigned)v2_pts.size(); i++) {
-        const int fwd =
-          ((v2_pts[i].r - v2_pts[i - 1].r) % (int)sp_T_full + (int)sp_T_full)
-          % (int)sp_T_full;
-        v2_pts[i].approach_up = ((unsigned)fwd <= sp_T_full / 2u);
-      }
+      for (unsigned i = 1; i < (unsigned)v2_pts.size(); i++)
+        v2_pts[i].approach_up = (v2_pts[i].track_r - v2_pts[i - 1].track_r) >= 0;
     }
   }
 
@@ -1531,12 +1603,11 @@ lut_commit:
       // NDP_SILENT_SCORE: what NDP_f32 returns when denom < 1e-12.
       // Before fix: 0.f  After fix: -2.f  Used to verify which binary is running.
       static constexpr float NDP_SILENT_SCORE = -2.f;
-      vf << std::setprecision(17)
-         << "pipe=" << label
-         << " align_version=v231a"
+      vf << "pipe=" << label
+         << " align_version=v231b"
          << " ndp_silent_score=" << NDP_SILENT_SCORE
-         << " T_float=" << m_CorrPeriodFloat
-         << " T_int=" << m_CorrPeriodSamples
+         << " T_float="    << std::hexfloat << m_CorrPeriodFloat   << std::defaultfloat
+         << " T_int="      << m_CorrPeriodSamples
          << " crossfade_len=" << crossfade_len
          << " ds=" << ds
          << " harmonic=" << harmonic_number
@@ -1556,6 +1627,13 @@ lut_commit:
               return c;
             }()
          << " attack_file=" << loop_section.GetLoaderBasename()
+         << " initial_T="     << std::hexfloat << diag_initial_T  << std::defaultfloat
+         << " ac_loop_start=" << diag_ac_loop_start
+         << " loop_end_used=" << diag_loop_end_used
+         << " ac_offset="     << diag_ac_offset
+         << " ac_window="     << diag_ac_window
+         << " ac_min_p="      << diag_ac_min_p
+         << " ac_max_p="      << diag_ac_max_p
          << "\n";
       // Phase-0 candidates: initial NDP peaks that seeded the tracking.
       // Format: phase0,beam_id,r_samples,score_hex,n_last

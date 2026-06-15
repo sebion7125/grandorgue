@@ -97,21 +97,49 @@ fi
 export CXXFLAGS="-O3 -DNDEBUG -g0"
 export CFLAGS="-O3 -DNDEBUG -g0"
 
-# ---- Release-Align-Logging (kein cmake-Eingriff nötig) ---------------------
-# Schreiben/Löschen eines Header-Files triggert automatisch nur GOSoundStream.cpp neu.
+# ---- Release-Align-Logging / Parity-Build -----------------------------------
+# The marker headers are intentionally allowed to change more than pure I/O:
+#   * GOLogReleaseAlignEnable.h enables CSV/verify logging, label plumbing,
+#     and strict parity numerics for Python/C++ comparison.
+#   * It also changes some public signatures / class layouts. Therefore the
+#     toggle is ABI-affecting and must invalidate all translation units that
+#     see the affected headers.
+#
+# Important: __has_include on a file that may not exist is not a reliable CMake
+# dependency. Touch the affected headers as well as direct users, so both
+# enable and disable transitions rebuild consistently in incremental builds.
 LOG_HEADER="$SRC_DIR/src/grandorgue/sound/playing/GOLogReleaseAlignEnable.h"
 LOG_VERBOSE_HEADER="$SRC_DIR/src/grandorgue/sound/playing/GOLogReleaseAlignVerbose.h"
+
 STREAM_SRC="$SRC_DIR/src/grandorgue/sound/playing/GOSoundStream.cpp"
 ALIGN_SRC="$SRC_DIR/src/grandorgue/sound/playing/GOSoundReleaseAlignTable.cpp"
+ALIGN_HDR="$SRC_DIR/src/grandorgue/sound/playing/GOSoundReleaseAlignTable.h"
+PROVIDER_SRC="$SRC_DIR/src/grandorgue/sound/providers/GOSoundProvider.cpp"
+PROVIDER_HDR="$SRC_DIR/src/grandorgue/sound/providers/GOSoundProvider.h"
+AUDIO_SECTION_SRC="$SRC_DIR/src/grandorgue/sound/playing/GOSoundAudioSection.cpp"
+AUDIO_SECTION_HDR="$SRC_DIR/src/grandorgue/sound/playing/GOSoundAudioSection.h"
+# Files with __has_include on the toggle headers — add here when new callers appear:
+SOUNDING_PIPE_SRC="$SRC_DIR/src/grandorgue/model/GOSoundingPipe.cpp"
+ORGAN_ENGINE_SRC="$SRC_DIR/src/grandorgue/sound/GOSoundOrganEngine.cpp"
+
+touch_release_align_toggle_deps() {
+  touch \
+    "$STREAM_SRC" \
+    "$ALIGN_SRC" "$ALIGN_HDR" \
+    "$PROVIDER_SRC" "$PROVIDER_HDR" \
+    "$AUDIO_SECTION_SRC" "$AUDIO_SECTION_HDR" \
+    "$SOUNDING_PIPE_SRC" \
+    "$ORGAN_ENGINE_SRC"
+}
+
 if $LOG_RELEASE_ALIGN; then
-  echo "// generated — delete to disable release-align logging" > "$LOG_HEADER"
-  echo "Release-Align-Logging aktiviert ($LOG_HEADER)"
-  # __has_include is not tracked by cmake deps — force recompile of affected files
-  touch "$STREAM_SRC" "$ALIGN_SRC"
+  echo "// generated — delete to disable release-align logging/parity build" > "$LOG_HEADER"
+  echo "Release-Align-Logging/Parity aktiviert ($LOG_HEADER)"
+  touch_release_align_toggle_deps
 else
   if [[ -f "$LOG_HEADER" ]]; then
     rm -v "$LOG_HEADER"
-    touch "$STREAM_SRC" "$ALIGN_SRC"
+    touch_release_align_toggle_deps
   fi
 fi
 if $LOG_RELEASE_ALIGN_VERBOSE; then

@@ -304,6 +304,21 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
     }
   }
 
+  // Read persisted release alignment mode for this organ (if present).
+  // Backwards compatibility: old CMB files without this entry default to Legacy.
+  {
+    const wxString ra_entry = cfg.ReadString(
+      CMBSetting, WX_ORGAN, wxT("ReleaseAlignMode"), false, wxEmptyString);
+    if (ra_entry.IsEmpty()) {
+      GOAudioParams::SetReleaseAlignMode(GOReleaseAlignMode::Legacy);
+    } else {
+      long ra = static_cast<long>(GOReleaseAlignMode::Legacy);
+      ra = cfg.ReadInteger(
+        CMBSetting, WX_ORGAN, wxT("ReleaseAlignMode"), 0, 10, false, ra);
+      GOAudioParams::SetReleaseAlignMode(static_cast<GOReleaseAlignMode>(ra));
+    }
+  }
+
   // It must be created before GOOrganModel::Load because lots of objects
   // reference to it
   GOOrganModel::SetCombinationController(m_setter);
@@ -1429,6 +1444,12 @@ bool GOOrganController::Export(const wxString &cmb) {
   {
     const long cf = static_cast<long>(GOAudioParams::GetCrossfadeMode());
     cfg.WriteInteger(WX_ORGAN, wxT("CrossfadeMode"), cf);
+  }
+
+  // Persist current release alignment mode for this organ
+  {
+    const long ra = static_cast<long>(GOAudioParams::GetReleaseAlignMode());
+    cfg.WriteInteger(WX_ORGAN, wxT("ReleaseAlignMode"), ra);
   }
 
   GOEventDistributor::Save(cfg);

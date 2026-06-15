@@ -19,7 +19,8 @@ static constexpr uint32_t GOLUT_FORMAT_VERSION = 2;
 // Increment when the LUT computation algorithm changes such that previously
 // cached {loop_pos, best_r} values would be incorrect for new GO builds.
 // v2: backward multi-beam tracking (v2 algorithm); adds approach_up/is_jump flags.
-static constexpr uint32_t GOLUT_ALGORITHM_VERSION = 2;
+// v3: parity fixes v205–v231 (sp_T, exp_pos rounding, NDP volatile, is_jump, etc.)
+static constexpr uint32_t GOLUT_ALGORITHM_VERSION = 3;
 
 // Magic bytes at the start of every .golut file (8 bytes incl. null).
 static constexpr char GOLUT_MAGIC[8] = {'G', 'O', 'R', 'A', 'L', 'C', '1', '\0'};

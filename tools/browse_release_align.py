@@ -149,6 +149,9 @@ class Browser:
     def draw(self):
         meta, data = self.transitions[self.idx]
 
+        T       = int(meta.get("T", 512))
+        xfade   = int(meta.get("xfade", 0))
+
         def maybe_norm(v):
             if not self._normalize or len(v) == 0:
                 return v
@@ -170,11 +173,24 @@ class Browser:
         if self._zoom_xlim is None:
             self.ax.relim()
             self.ax.autoscale_view()
+            # Constrain x to 5 periods; user can scroll/zoom freely after this.
+            self.ax.set_xlim(0, 5 * T)
         else:
             self.ax.set_xlim(self._zoom_xlim)
             self.ax.set_ylim(self._zoom_ylim)
 
         self.ax.set_ylabel("Amplitude (normiert)" if self._normalize else "Amplitude (raw)")
+
+        # NDP score: attack vs. corr-release over crossfade window
+        N = min(xfade or (5 * T), len(xv), len(cv))
+        if N > 4 and len(xv) > 0 and len(cv) > 0:
+            a = xv[:N].astype(float)
+            b = cv[:N].astype(float)
+            denom = np.linalg.norm(a) * np.linalg.norm(b)
+            ndp = np.dot(a, b) / denom if denom > 0.0 else 0.0
+            ndp_str = f"NDP={ndp:.4f}"
+        else:
+            ndp_str = "NDP=n/a"
 
         T_str   = meta.get("T", "?")
         phi_str = meta.get("phi", "?")
@@ -185,10 +201,11 @@ class Browser:
         pipe     = meta.get("pipe", "")
         atk_len  = meta.get("atk_len", "")
         atk_sr   = meta.get("atk_sr", "")
+        xfade_str = f"  xfade={xfade}" if xfade else ""
 
         title_line1 = f"{pipe}  " if pipe else ""
-        title_line1 += (f"loop_pos={lp}  phi={phi_str}  T={T_str}  "
-                        f"legacy={leg}  corr={corr}  circ_diff={cdiff}")
+        title_line1 += (f"loop_pos={lp}  phi={phi_str}  T={T_str}{xfade_str}  "
+                        f"legacy={leg}  corr={corr}  circ_diff={cdiff}  {ndp_str}")
         if atk_len or atk_sr:
             title_line1 += f"  atk:{atk_len}smp@{atk_sr}Hz"
         self.fig.suptitle(title_line1, fontsize=11)
@@ -240,11 +257,15 @@ class Browser:
     def prev(self, _event=None):
         if self.idx > 0:
             self.idx -= 1
+            self._zoom_xlim = None
+            self._zoom_ylim = None
             self.draw()
 
     def next(self, _event=None):
         if self.idx < len(self.transitions) - 1:
             self.idx += 1
+            self._zoom_xlim = None
+            self._zoom_ylim = None
             self.draw()
 
     def on_key(self, event):

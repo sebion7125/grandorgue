@@ -97,7 +97,9 @@ static void LogReleaseAlign(
 
 #ifdef GO_LOG_RELEASE_ALIGN_VERBOSE
 
-static constexpr unsigned VERBOSE_WINDOW    = 512;
+// 8192 samples covers crossfade windows up to ~186ms @ 44100 Hz.
+// Actual samples logged per event = min(crossfade_len, VERBOSE_WINDOW).
+static constexpr unsigned VERBOSE_WINDOW    = 8192;
 static constexpr unsigned VERBOSE_RING_SIZE = 32;
 static constexpr unsigned VERBOSE_MAX_LUT   = 30;
 
@@ -116,6 +118,7 @@ static std::string GetReleaseAlignVerbosePath() {
 // all string formatting happens in the writer thread.
 struct VerboseEntry {
   unsigned loop_pos, period, legacy, corr;
+  unsigned crossfade_len;      // actual crossfade window length (samples)
   unsigned atk_len, atk_sr;   // attack section length + sample rate (layer ID)
   uint32_t lut_pos[VERBOSE_MAX_LUT];
   uint16_t lut_r[VERBOSE_MAX_LUT];
@@ -152,7 +155,8 @@ static void VerboseWriterThread() {
           << " T=" << e.period
           << " legacy=" << e.legacy
           << " corr=" << e.corr
-          << " circ_diff=" << circ_diff;
+          << " circ_diff=" << circ_diff
+          << " xfade=" << e.crossfade_len;
         if (e.label[0]) f << " pipe=" << e.label;
         f << " atk_len=" << e.atk_len << " atk_sr=" << e.atk_sr << "\n";
         for (unsigned i = 0; i < e.n_lut; i++)
@@ -172,6 +176,7 @@ static void VerboseWriterThread() {
 static void LogReleaseAlignVerbose(
   unsigned loop_pos, unsigned period,
   unsigned legacy_result, unsigned corr_result,
+  unsigned crossfade_len,
   const GOSoundAudioSection *atk,
   const GOSoundAudioSection *rel,
   const GOSoundReleaseAlignTable *aligner,
@@ -190,12 +195,13 @@ static void LogReleaseAlignVerbose(
   VerboseEntry &e = s_VerbRing[idx % VERBOSE_RING_SIZE];
 
   // Audio thread: integer copies only, no formatting, no file I/O.
-  e.loop_pos = loop_pos;
-  e.period   = period;
-  e.legacy   = legacy_result;
-  e.corr     = corr_result;
-  e.atk_len  = atk->GetLength();
-  e.atk_sr   = atk->GetSampleRate();
+  e.loop_pos       = loop_pos;
+  e.period         = period;
+  e.legacy         = legacy_result;
+  e.corr           = corr_result;
+  e.crossfade_len  = crossfade_len;
+  e.atk_len        = atk->GetLength();
+  e.atk_sr         = atk->GetSampleRate();
   if (label)
     std::strncpy(e.label, label, sizeof(e.label) - 1);
   else
@@ -214,14 +220,43 @@ static void LogReleaseAlignVerbose(
   ca.Init(); cl.Init(); cc.Init();
   const unsigned atk_ch = atk->GetChannels();
   const unsigned rel_ch = rel->GetChannels();
+  const unsigned win = (crossfade_len && crossfade_len < VERBOSE_WINDOW)
+                        ? crossfade_len : VERBOSE_WINDOW;
+
+  // Attack loop boundaries for wraparound: loop_pos may be near atk_len,
+  // but the audio engine wraps back to loop_start — reproduce that here.
+  const unsigned atk_ls   = atk->GetLoopStart();
+  const unsigned atk_le   = atk->GetFirstLoopEnd() + 1; // exclusive
+  const unsigned atk_ll   = (atk_le > atk_ls) ? atk_le - atk_ls : 0u;
+
   e.n_atk = e.n_leg = e.n_cor = 0;
-  for (unsigned i = 0; i < VERBOSE_WINDOW; i++) {
-    if (loop_pos + i < atk_len) {
+
+  // Attack: phase 1 — linear samples from loop_pos until loop end or win
+  const unsigned phase1_n = (atk_ll > 0 && loop_pos + win > atk_le && atk_le > loop_pos)
+                             ? atk_le - loop_pos
+                             : win;
+  for (unsigned i = 0; i < phase1_n && loop_pos + i < atk_len; i++) {
+    float s = 0.f;
+    for (unsigned c = 0; c < atk_ch; c++)
+      s += (float)atk->GetSample(loop_pos + i, c, &ca);
+    e.atk[e.n_atk++] = s / atk_ch;
+  }
+  // Attack: phase 2 — wrapped samples from loop_start (separate cache so
+  // compressed sections advance sequentially from loop_start, not 0→loop_pos again)
+  if (phase1_n < win && atk_ll > 0) {
+    GOSoundCompressionCache ca2;
+    ca2.Init();
+    const unsigned phase2_n = win - phase1_n;
+    for (unsigned j = 0; j < phase2_n && atk_ls + j < atk_len; j++) {
       float s = 0.f;
       for (unsigned c = 0; c < atk_ch; c++)
-        s += (float)atk->GetSample(loop_pos + i, c, &ca);
+        s += (float)atk->GetSample(atk_ls + j, c, &ca2);
       e.atk[e.n_atk++] = s / atk_ch;
     }
+  }
+
+  // Release: no wrap needed — corr/legacy result is in [0, T) and sections are long
+  for (unsigned i = 0; i < win; i++) {
     if (legacy_result + i < rel_len) {
       float s = 0.f;
       for (unsigned c = 0; c < rel_ch; c++)
@@ -553,6 +588,7 @@ void GOSoundStream::InitAlignedStream(
     if (releaseAligner->HasCorrLut())
       LogReleaseAlignVerbose(
         loop_pos, releaseAligner->GetPeriodSamples(), legacy_result, corr_result,
+        releaseAligner->GetCorrCrossfadeLen(),
         existing_stream->audio_section, pSection, releaseAligner, debugLabel);
 #endif
     startIndex = useCorr ? corr_result : legacy_result;

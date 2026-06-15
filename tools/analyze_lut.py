@@ -19,7 +19,9 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import re
 import sys
+import json
 import struct
+import tempfile
 import threading
 import concurrent.futures
 import os as _os
@@ -31,17 +33,43 @@ from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
-TOOL_VERSION = "v231a"
+TOOL_VERSION = "v232g"
 
 def _cpp_round(x: float) -> int:
     """C++ std::round() for non-negative x: round half away from zero."""
     return int(math.floor(float(x) + 0.5))
+
+
+def _parse_float_flex(s: str) -> float:
+    """Parse float in hexfloat (0x…) or decimal format. Returns 0.0 on error.
+    Tolerates leading garbage bytes (e.g. encoding artifacts like Ä before 0x)."""
+    try:
+        s = s.strip()
+        # Strip leading chars that are not part of a number (handles Ä0x... artifacts)
+        while s and s[0] not in '0123456789+-':
+            s = s[1:]
+        if s.startswith(("0x", "-0x", "+0x", "0X", "-0X", "+0X")):
+            return float.fromhex(s)
+        return float(s)
+    except (ValueError, OverflowError):
+        return 0.0
 
 # ─── C++ Numerics Mode ────────────────────────────────────────────────────────
 # When enabled, NDP is computed with pre-normalised float32 scalar loops,
 # matching C++ NDP_f32 in GOSoundReleaseAlignTable.cpp exactly.
 # Without numba the einsum fallback is close but not byte-identical.
 _cpp_numerics_enabled: bool = False
+
+# Debug-only: Pruning im Python-Analyzer deaktivieren (kein C++-Äquivalent,
+# nicht für Paritätsprüfung verwenden).
+_DEBUG_DISABLE_PRUNING: bool = False
+
+def set_debug_disable_pruning(enabled: bool) -> None:
+    global _DEBUG_DISABLE_PRUNING
+    _DEBUG_DISABLE_PRUNING = bool(enabled)
+
+def get_debug_disable_pruning() -> bool:
+    return _DEBUG_DISABLE_PRUNING
 
 def set_cpp_numerics(enabled: bool) -> None:
     global _cpp_numerics_enabled
@@ -200,6 +228,12 @@ SCORE_LOW_FRACTION_WARN = 0.30  # Warnung nur, wenn relevante Minderheit schwach
 #       nächste Peak weit vom erwarteten Midpoint entfernt, bekommt der Übergang
 #       eine Penalty proportional zu (Abstand/allowed)^2. Ersetzt v104's hartes
 #       Blockieren; legitime T-Copies (Midpoint kohärent) werden kaum bestraft.
+# v232a: GO-Log-Modus: Hauptfenster-Button "GO-Log …" öffnet Dateidialog,
+#       lädt go_lut_verify.csv und befüllt Baum mit allen Pipes/Releases als
+#       wäre die Analyse abgeschlossen. Pfad wird in ~/.grandorgue_lut_analyzer.json
+#       gespeichert (Windows %TEMP%, Linux /tmp, oder individuell wählbar).
+#       CorrLandscapeWindow: Checkbox "GO-Log LUT" overlay bleibt erhalten.
+#       _parse_go_log_all_entries / _pa_from_log_entry als Hilfsfunktionen.
 # v99: Branch-Debug: globale DP speichert pro LUT-Punkt Kandidaten-Diagnose
 #      (raw_r, score, track_r, pred, err, penalties). Korrelationslandschaft
 #      kann interne Kandidaten und gewaehlten raw_r ueberlagern; Debug-CSV-Export.
@@ -469,6 +503,9 @@ class PipeAnalysis:
 
     lut_points:     list = field(default_factory=list)   # List[LutPoint]
     lut_points_predp: list = field(default_factory=list) # pre-DP corr_at Punkte (Tuning Lab)
+    lut_points_preprune: list = field(default_factory=list) # Punkte unmittelbar vor Pruning
+    lut_prune_trace: list = field(default_factory=list)  # Debug-Trace des Pruners
+    lut_pruning_disabled: bool = False
     lut_folded:    bool = True    # True = Pfad auf [0,T) gefaltet
     lut_points_raw_count: int = 0  # Anzahl Punkte vor Pruning
     lut_score_p10: float = 0.0   # 10. Perzentil der LUT-Scores (nur Diagnose)
@@ -1151,7 +1188,230 @@ def estimate_period_by_autocorr(samples: np.ndarray,
     return result, diag
 
 
-def _prune_lut_points(pts: list, T_int: int, min_interp_err: float = None) -> list:
+# ─── GO-Log Hilfsfunktionen ───────────────────────────────────────────────────
+
+SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".grandorgue_lut_analyzer.json")
+
+
+def _load_settings() -> dict:
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_settings(settings: dict) -> None:
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+    except Exception:
+        pass
+
+
+def _effective_go_log_path() -> str:
+    """Gibt den gespeicherten Log-Pfad zurück oder den OS-Temp-Standard."""
+    s = _load_settings()
+    if s.get("go_log_path"):
+        return s["go_log_path"]
+    return os.path.join(tempfile.gettempdir(), "go_lut_verify.csv")
+
+
+def _parse_go_log_all_entries(log_path: str) -> list:
+    """Parst die vollständige go_lut_verify.csv; gibt alle Einträge als Liste zurück."""
+    entries = []
+    current = None
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            if not line:
+                continue
+            if line.startswith("pipe="):
+                if current is not None:
+                    entries.append(current)
+                lm = re.match(r'^pipe=(.+\|midi=\d+)\s+(.*)', line)
+                label_str = lm.group(1).strip() if lm else ""
+                rest      = lm.group(2)         if lm else line[5:]
+                kv = {}
+                for tok in rest.split():
+                    if "=" in tok:
+                        k, _, v = tok.partition("=")
+                        kv[k] = v
+                current = {
+                    "label":        label_str,
+                    "T_float":      _parse_float_flex(kv.get("T_float",      "0")),
+                    "T_int":        int(kv.get("T_int",          "0")),
+                    "crossfade_len":int(kv.get("crossfade_len",  "0")),
+                    "sample_rate":  int(kv.get("sample_rate", "44100")),
+                    "n_start":      int(kv.get("n_start",        "1")),
+                    "n_end":        int(kv.get("n_end",          "0")),
+                    "loop_len":     int(kv.get("loop_len",       "0")),
+                    "release_len":  int(kv.get("release_len",    "0")),
+                    "min_ms":       int(kv.get("min_ms",         "0")),
+                    "max_ms":       int(kv.get("max_ms",         "0")),
+                    "harmonic":     int(kv.get("harmonic",       "8")),
+                    "attack_file":  kv.get("attack_file", ""),
+                    "lut":          [],
+                }
+            elif line.startswith("lut,") and current is not None:
+                parts = line.split(",")
+                if len(parts) >= 6:
+                    current["lut"].append({
+                        "n":           int(parts[1]),
+                        "loop_pos":    int(parts[2]),
+                        "best_r":      int(parts[3]),
+                        "approach_up": parts[4].strip() != "0",
+                        "is_jump":     parts[5].strip() != "0",
+                    })
+        if current is not None:
+            entries.append(current)
+    return entries
+
+
+def _pa_from_log_entry(entry: dict) -> "PipeAnalysis":
+    """Erstellt ein minimales PipeAnalysis-Objekt aus einem verify-Log-Eintrag."""
+    label = entry["label"]
+    lm = re.match(r'^(.+)\|midi=(\d+)$', label)
+    rank_name = lm.group(1) if lm else label
+    midi_note = int(lm.group(2)) if lm else 0
+
+    min_ms = entry.get("min_ms", 0)
+    max_ms = entry.get("max_ms", 0)
+    if max_ms == 0:
+        rel_type = f"≥{min_ms}ms" if min_ms > 0 else "∞"
+    else:
+        rel_type = f"≤{max_ms}ms" if min_ms == 0 else f"{min_ms}-{max_ms}ms"
+
+    af = entry.get("attack_file", "")
+    atk_label = os.path.splitext(os.path.basename(af))[0] if af else "main"
+
+    pts = [
+        LutPoint(
+            n=gp["n"],
+            loop_pos=gp["loop_pos"],
+            best_r=gp["best_r"],
+            best_score=0.0,
+            phase="dense",
+            approach_up=gp["approach_up"],
+            is_jump=gp["is_jump"],
+        )
+        for gp in entry["lut"]
+    ]
+
+    pa = PipeAnalysis(
+        organ_base="",
+        rank_name=rank_name,
+        midi_note=midi_note,
+        perspective="log",
+        release_type=rel_type,
+        attack_path=af,
+        release_path="",
+        harmonic_number=entry.get("harmonic", 8),
+        attack_label=atk_label,
+    )
+    pa.T_float               = entry["T_float"]
+    pa.T_int                 = entry["T_int"]
+    pa.sample_rate           = entry.get("sample_rate", 44100)
+    pa.n_total               = entry.get("n_end", 0)
+    pa.loop_len              = entry.get("loop_len", 0)
+    pa.release_len           = entry.get("release_len", 0)
+    pa.crossfade_len_samples = entry.get("crossfade_len", 0)
+    pa.lut_points            = pts
+    pa.lut_points_raw_count  = len(pts)
+    pa.lut_folded            = False
+    pa.lut_wrap_period       = 2 * entry["T_int"]
+    pa.lut_search_periods    = 2
+    pa.lut_r_search_max      = 2 * entry["T_int"]
+    pa.stabilized            = True
+    pa.stable_at_n           = entry.get("n_start", 1)
+    return pa
+
+
+def load_go_log_lut(pa, log_path: str = None):
+    """Lädt LUT-Punkte aus go_lut_verify.csv für die zu pa passende Pipe.
+
+    Gibt (lut_points, T_float, T_int, n_entries) zurück oder None wenn nicht gefunden.
+    n_entries = Anzahl der Log-Einträge die auf diese Pipe passen (für Statusanzeige).
+    Matching: zuerst nach attack_file-Basename, dann nach rank_name|midi=note.
+    """
+    if log_path is None:
+        log_path = _effective_go_log_path()
+    if not os.path.exists(log_path):
+        return None
+
+    try:
+        entries = _parse_go_log_all_entries(log_path)
+    except Exception:
+        return None
+
+    atk_basename = os.path.basename(pa.attack_path) if pa.attack_path else ""
+    label_target = f"{pa.rank_name}|midi={pa.midi_note}".lower()
+
+    # Drei-Prioritäten-Matching (case-insensitiv), analog _find_log_entry_for_pa:
+    # 1. Basename + Label  2. Nur Label  3. Nur Basename (Fallback)
+    found = None
+    for e in entries:
+        af = e.get("attack_file", "")
+        if (atk_basename and af and os.path.basename(af) == atk_basename
+                and e["label"].lower() == label_target and e["lut"]):
+            found = e
+            break
+    if found is None:
+        for e in entries:
+            if e["label"].lower() == label_target and e["lut"]:
+                found = e
+                break
+    if found is None:
+        for e in entries:
+            af = e.get("attack_file", "")
+            if atk_basename and af and os.path.basename(af) == atk_basename and e["lut"]:
+                found = e
+                break
+    if found is None:
+        return None
+
+    # n_matches für Statusanzeige
+    matches = [e for e in entries
+               if (atk_basename and os.path.basename(e.get("attack_file","")) == atk_basename)
+               or e["label"].lower() == label_target]
+
+    pts = [
+        LutPoint(
+            n=gp["n"],
+            loop_pos=gp["loop_pos"],
+            best_r=gp["best_r"],
+            best_score=0.0,
+            phase="dense",
+            approach_up=gp["approach_up"],
+            is_jump=gp["is_jump"],
+        )
+        for gp in found["lut"]
+    ]
+    return pts, found["T_float"], found["T_int"], len(matches)
+
+
+def _prune_point_snapshot(p, idx: int = None, active: bool = None) -> dict:
+    """Kompakter, serialisierbarer Snapshot eines LUT-Punktes fuer Debug-Reports."""
+    d = {
+        "idx": idx,
+        "n": int(getattr(p, "n", -1)),
+        "loop_pos": int(getattr(p, "loop_pos", -1)),
+        "best_r": int(getattr(p, "best_r", 0)),
+        "raw_r": int(getattr(p, "raw_r", getattr(p, "best_r", 0))),
+        "track_r": float(getattr(p, "track_r", getattr(p, "best_r", 0))),
+        "score": float(getattr(p, "best_score", 0.0)),
+        "phase": str(getattr(p, "phase", "")),
+        "is_jump": bool(getattr(p, "is_jump", False)),
+        "approach_up": bool(getattr(p, "approach_up", True)),
+        "folded": bool(getattr(p, "folded", False)),
+    }
+    if active is not None:
+        d["active"] = bool(active)
+    return d
+
+
+def _prune_lut_points(pts: list, T_int: int, min_interp_err: float = None,
+                      trace: Optional[list] = None) -> list:
     """Douglas-Peucker Pruning — C++-kompatible float32-Arithmetik (v230b).
 
     Alle Zwischenwerte in float32 wie C++ PruneV2, damit Grenzfälle nahe der
@@ -1162,6 +1422,12 @@ def _prune_lut_points(pts: list, T_int: int, min_interp_err: float = None) -> li
     neu aufbauen (wie C++ PruneV2 — verhindert progressives Gap-Anwachsen).
     """
     if len(pts) <= 2:
+        if trace is not None:
+            trace.append({
+                "type": "trivial",
+                "reason": "len<=2",
+                "points": [_prune_point_snapshot(p, i, True) for i, p in enumerate(pts)],
+            })
         return pts
     # C++: tol = std::max(2.0f, (float)T_int / V2_PRUNE_TOL_FACTOR)  (V2_PRUNE_TOL_FACTOR=32)
     if min_interp_err is None:
@@ -1173,43 +1439,143 @@ def _prune_lut_points(pts: list, T_int: int, min_interp_err: float = None) -> li
     sz       = len(pts)
     active   = [True] * sz
 
+    if trace is not None:
+        trace.append({
+            "type": "start",
+            "T_int": int(T_int),
+            "tol": float(tol),
+            "min_interp_err": None if min_interp_err is None else float(min_interp_err),
+            "max_prune_gap_n": int(MAX_PRUNE_GAP_N),
+            "points": [_prune_point_snapshot(p, i, True) for i, p in enumerate(pts)],
+        })
+
     changed = True
+    pass_no = 0
     while changed:
-        changed = False
+        pass_no += 1
         idx = [i for i in range(sz) if active[i]]
+        pass_event = None
+        if trace is not None:
+            pass_event = {
+                "type": "pass",
+                "pass": pass_no,
+                "active_before": idx[:],
+                "checks": [],
+                "deleted": [],
+            }
+        # FixA: Kandidaten erst sammeln und am Pass-Ende anwenden.
+        # Keine Löschung wenn prev oder nxt in diesem Pass bereits markiert —
+        # verhindert Kettenlöschungen, deren finale Großsehne nie geprüft wurde.
+        to_delete = set()
+
         for k in range(1, len(idx) - 1):
             cur  = idx[k]
             prev = idx[k - 1]
             nxt  = idx[k + 1]
 
-            if getattr(pts[cur], 'is_jump', False):               continue
-            if getattr(pts[nxt], 'is_jump', False):               continue
-            if getattr(pts[cur], 'phase', '') == "curve":         continue
-            if ns[nxt] - ns[prev]          > MAX_PRUNE_GAP_N:     continue
+            check = None
+            if trace is not None:
+                check = {
+                    "cur": cur, "prev": prev, "nxt": nxt,
+                    "cur_point":  _prune_point_snapshot(pts[cur],  cur,  active[cur]),
+                    "prev_point": _prune_point_snapshot(pts[prev], prev, active[prev]),
+                    "nxt_point":  _prune_point_snapshot(pts[nxt],  nxt,  active[nxt]),
+                    "intermediate": [],
+                    "decision": "keep",
+                    "reason": "",
+                }
+
+            def _keep(reason: str):
+                if check is not None:
+                    check["decision"] = "keep"
+                    check["reason"] = reason
+                    pass_event["checks"].append(check)
+                return False
+
+            if prev in to_delete or nxt in to_delete:
+                _keep("guard FixA: prev/nxt already marked for deletion in this pass")
+                continue
+            if getattr(pts[cur], 'is_jump', False):
+                _keep("guard: cur.is_jump")
+                continue
+            if getattr(pts[nxt], 'is_jump', False):
+                _keep("guard: nxt.is_jump")
+                continue
+            if getattr(pts[cur], 'phase', '') == "curve":
+                _keep("guard: cur.phase == curve")
+                continue
+            if ns[nxt] - ns[prev] > MAX_PRUNE_GAP_N:
+                _keep(f"guard: n_gap {ns[nxt] - ns[prev]} > MAX_PRUNE_GAP_N {MAX_PRUNE_GAP_N}")
+                continue
             # C++: std::abs(pts[cur].r - pts[prev].r) > (int)(T_int_f / 4.0f)
-            # Both sides are integer r-values; int truncation of T/4 matches.
-            if abs(track_rs[cur]  - track_rs[prev]) > T_int / 4.0: continue
-            if abs(track_rs[nxt]  - track_rs[cur])  > T_int / 4.0: continue
+            if abs(track_rs[cur]  - track_rs[prev]) > T_int / 4.0:
+                _keep(f"guard: |cur-prev|={abs(track_rs[cur] - track_rs[prev]):.6f} > T/4={T_int/4.0:.6f}")
+                continue
+            if abs(track_rs[nxt]  - track_rs[cur])  > T_int / 4.0:
+                _keep(f"guard: |nxt-cur|={abs(track_rs[nxt] - track_rs[cur]):.6f} > T/4={T_int/4.0:.6f}")
+                continue
 
             # C++ float32 arithmetic — must match PruneV2 exactly.
             n0 = np.float32(ns[prev]);   r0 = np.float32(track_rs[prev])
             n1 = np.float32(ns[nxt]);    r1 = np.float32(track_rs[nxt])
             dn_f = np.maximum(np.float32(1.0), n1 - n0)
             can_del = True
+            worst_err = 0.0
+            worst_j = None
             for j in range(prev + 1, nxt):
-                # C++: t = (float)(pts[j].n - pts[prev].n) / dn
                 t  = np.float32(ns[j] - ns[prev]) / dn_f
-                # C++: er = r0 + t * (r1 - r0)
                 er = r0 + t * (r1 - r0)
-                # C++: if (std::abs((float)pts[j].r - er) > tol) { can_del = false; break; }
-                if abs(np.float32(track_rs[j]) - er) > tol:
+                err = abs(np.float32(track_rs[j]) - er)
+                err_f = float(err)
+                if err_f > worst_err:
+                    worst_err = err_f
+                    worst_j = j
+                if check is not None:
+                    check["intermediate"].append({
+                        "idx": j,
+                        "n": int(ns[j]),
+                        "track_r": float(track_rs[j]),
+                        "expected": float(er),
+                        "err": err_f,
+                        "over_tol": bool(err > tol),
+                        "active": bool(active[j]),
+                        "phase": str(getattr(pts[j], "phase", "")),
+                        "is_jump": bool(getattr(pts[j], "is_jump", False)),
+                    })
+                if err > tol:
                     can_del = False
                     break
             if can_del:
-                active[cur] = False
-                changed     = True
+                to_delete.add(cur)
+                if check is not None:
+                    check["decision"] = "delete"
+                    check["reason"] = f"all intermediate errors <= tol; worst idx={worst_j}, err={worst_err:.6f}"
+                    pass_event["deleted"].append(cur)
+                    pass_event["checks"].append(check)
+            else:
+                if check is not None:
+                    check["decision"] = "keep"
+                    check["reason"] = f"intermediate idx={worst_j} err={worst_err:.6f} > tol={float(tol):.6f}"
+                    pass_event["checks"].append(check)
 
-    return [pts[i] for i in range(sz) if active[i]]
+        changed = bool(to_delete)
+        if changed:
+            for _i_del in sorted(to_delete):
+                active[_i_del] = False
+
+        if trace is not None:
+            pass_event["active_after"] = [i for i in range(sz) if active[i]]
+            pass_event["changed"] = bool(changed)
+            trace.append(pass_event)
+
+    result = [pts[i] for i in range(sz) if active[i]]
+    if trace is not None:
+        trace.append({
+            "type": "final",
+            "active": [i for i in range(sz) if active[i]],
+            "points": [_prune_point_snapshot(pts[i], i, active[i]) for i in range(sz) if active[i]],
+        })
+    return result
 
 
 def _go_default_crossfade_ms(midi_note: int) -> int:
@@ -1924,14 +2290,17 @@ def compute_lut(attack_mono: np.ndarray, release_mono: np.ndarray,
         meta["quality_score_count"] = 0
 
     # v82: LUT-Pruning: redundante Punkte entfernen.
-    def _prune_lut(pts: list) -> list:
-        return _prune_lut_points(pts, T_int)
-
+    meta["pre_prune_points_full"] = list(points)
+    prune_trace: list = []
     meta["pruned_count"] = 0
     if len(points) > 2:
         n_before_prune = len(points)
-        points = _prune_lut(points)
+        points = _prune_lut_points(points, T_int, trace=prune_trace)
         meta["pruned_count"] = n_before_prune - len(points)
+    else:
+        _prune_lut_points(points, T_int, trace=prune_trace)
+    meta["prune_trace"] = prune_trace
+    meta["post_prune_points"] = [(p.n, int(p.best_r), int(getattr(p, 'is_jump', False))) for p in points]
 
     # v125/v137: Nach dem Pruning die Segmentrichtung neu aus dem erhaltenen
     # entfalteten track_r ableiten. Das ist noetig, weil entfernte
@@ -2135,7 +2504,8 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
                    _top_k: int = None, _window_half: int = None,
                    _min_peak_dist: int = None, _rescan_ratio: float = None,
                    _n_start_override: int = None, _n_end_override: int = None,
-                   latest_loop_end_sample: Optional[int] = None) -> tuple:
+                   latest_loop_end_sample: Optional[int] = None,
+                   disable_pruning: bool = False) -> tuple:
     """Rückwärts-Tracking-Ersatz für compute_lut().
 
     Algorithmus:
@@ -2224,6 +2594,24 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     # ── Phase 0: Voller Scan bei n_end → Primärstrahl initialisieren ─────────
     n_last    = n_end - 1
     cs_last_d = _cpp_round(n_last * T_float) // ds
+    # Store computation inputs for diagnostic comparison (verify_lut --free-analysis).
+    meta.update({
+        "n_total":        n_total,
+        "n_start":        n_start,
+        "n_end":          n_end,
+        "ds":             ds,
+        "r_max":          r_max,
+        "r_max_d":        r_max_d,
+        "search_periods": search_periods,
+        "window_len":     window_len,
+        "window_len_d":   window_len_d,
+        "loop_len":       loop_len,
+        "atk_full_len":   atk_full_len,
+        "loop_needed":    loop_needed,
+        "n_last":         n_last,
+        "cs_last":        _cpp_round(n_last * T_float),
+        "cs_last_d":      cs_last_d,
+    })
     init_cands = _full_scan(cs_last_d)
     if not init_cands:
         return [], meta
@@ -2363,6 +2751,23 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     meta["phase15_ivs"]   = _phase15_ivs
     meta["phase15_steps"] = _phase15_steps
 
+    # Unwrap track_r via step-delta: Jeder Schritt wird als kürzester Kreisbogen
+    # in [0, sp_T) interpretiert. Das produziert echte unwrapped Koordinaten
+    # (können außerhalb [0, sp_T) liegen), sodass approach_up = (tb-ta) >= 0
+    # korrekt die Tracking-Richtung widerspiegelt — auch nach Pruning.
+    _sp_T_unwrap = float(search_periods * T_int)
+    _sorted_ns_unwr = sorted(primary_by_n.keys())
+    _unwrapped_r_by_n: dict = {}
+    if _sorted_ns_unwr:
+        _acc_r = float(primary_by_n[_sorted_ns_unwr[0]][0])
+        _unwrapped_r_by_n[_sorted_ns_unwr[0]] = _acc_r
+        for _ua, _ub in zip(_sorted_ns_unwr, _sorted_ns_unwr[1:]):
+            _d = float(primary_by_n[_ub][0]) - float(primary_by_n[_ua][0])
+            if _d >  _sp_T_unwrap / 2: _d -= _sp_T_unwrap
+            if _d < -_sp_T_unwrap / 2: _d += _sp_T_unwrap
+            _acc_r += _d
+            _unwrapped_r_by_n[_ub] = _acc_r
+
     # ── Phase 2: LUT-Punkte + Pruning ─────────────────────────────────────────
     chosen_r_by_n   = {}
     points = []
@@ -2377,7 +2782,7 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
                       best_score=float(best_sc), phase="dense",
                       raw_r=int(best_r), raw_score=float(best_sc),
                       folded=False, fold_ratio=1.0)
-        pt.track_r      = float(best_r)
+        pt.track_r      = _unwrapped_r_by_n.get(n, float(best_r))
         pt.candidates   = cands_full
         pt.all_candidates = cands_full
         points.append(pt)
@@ -2400,20 +2805,42 @@ def compute_lut_v2(attack_mono: np.ndarray, release_mono: np.ndarray,
     # Capture pre-prune for diagnostic comparison. (n, r, score, is_jump) tuples.
     meta["pre_prune_points"] = [(p.n, int(p.best_r), float(p.best_score),
                                  int(getattr(p, 'is_jump', False))) for p in points]
-    if len(points) > 2:
-        points = _prune_lut_points(points, T_int)
+    # approach_up auf pre-prune Punkten setzen (für Debug-Anzeige im Landscape-Fenster).
+    # Gleicher Algorithmus wie nach dem Pruning — approach_up wird nach dem Pruning
+    # nochmals auf den finalen Punkten neu gesetzt, also kein Einfluss auf Parität.
+    _pts_pp = sorted(points, key=lambda p: p.n)
+    if _pts_pp:
+        _pts_pp[0].approach_up = True
+        for _pa_pp, _pb_pp in zip(_pts_pp, _pts_pp[1:]):
+            _ta_pp = float(getattr(_pa_pp, 'track_r', _pa_pp.best_r))
+            _tb_pp = float(getattr(_pb_pp, 'track_r', _pb_pp.best_r))
+            _pb_pp.approach_up = (_tb_pp - _ta_pp) >= 0.0
+    meta["pre_prune_points_full"] = list(points)   # LutPoint-Objekte mit approach_up
+    prune_trace: list = []
+
+    if not disable_pruning and len(points) > 2:
+        points = _prune_lut_points(points, T_int, trace=prune_trace)
+    elif disable_pruning:
+        prune_trace.append({
+            "type": "disabled",
+            "T_int": int(T_int),
+            "points": [_prune_point_snapshot(p, i, True) for i, p in enumerate(points)],
+        })
+    else:
+        _prune_lut_points(points, T_int, trace=prune_trace)
+    meta["prune_trace"] = prune_trace
+    meta["pruning_disabled"] = disable_pruning
     meta["post_prune_points"] = [(p.n, int(p.best_r), int(getattr(p, 'is_jump', False))) for p in points]
 
-    # approach_up im gefalteten [0, sp_T)-Raum bestimmen — kurzer Kreisbogen gibt Richtung
-    sp_T = search_periods * T_int
+    # approach_up aus unwrapped track_r: echte Segmentrichtung aus dem Tracking,
+    # kein Modulo-Schätzer. Entspricht _assign_approach_flags() im v1-Pfad.
     pts_s = sorted(points, key=lambda p: p.n)
     if pts_s:
         pts_s[0].approach_up = True
         for _a, _b in zip(pts_s, pts_s[1:]):
-            ta = float(getattr(_a, 'track_r', _a.best_r)) % sp_T
-            tb = float(getattr(_b, 'track_r', _b.best_r)) % sp_T
-            fwd = (tb - ta) % sp_T
-            _b.approach_up = fwd <= sp_T // 2
+            ta = float(getattr(_a, 'track_r', _a.best_r))
+            tb = float(getattr(_b, 'track_r', _b.best_r))
+            _b.approach_up = (tb - ta) >= 0.0
 
     # Drift-Diagnose nur auf sprungfreien Segmenten (Sprünge würden Residuum aufblasen)
     pts_no_jump = [p for p in points if not getattr(p, 'is_jump', False)]
@@ -2574,12 +3001,26 @@ def parse_organ_file(organ_path: str) -> list:
             for atk_label, atk_path_v in attack_variants:
                 prev_max_ms = 0
                 for rel_idx_loop, info in enumerate(release_infos):
-                    rel_full = info["rel_path"]
+                    rel_full   = info["rel_path"]
                     rel_parent = info["rel_type"]
                     max_key_ms = info["max_key_ms"]
                     min_key_ms = prev_max_ms
+                    rel_idx    = info["rel_idx"]
                     if max_key_ms is not None:
                         prev_max_ms = max_key_ms
+
+                    # Crossfade priority: release-specific > pipe-level > rank-level > 0
+                    _rel_xf_key  = f"{pipe_key}Release{rel_idx:03d}ReleaseCrossfadeLength"
+                    _pipe_xf_key = f"{pipe_key}ReleaseCrossfadeLength"
+                    if _rel_xf_key in sec_data:
+                        _crossfade_ms  = int(sec_data[_rel_xf_key])
+                        _crossfade_src = _rel_xf_key
+                    elif _pipe_xf_key in sec_data:
+                        _crossfade_ms  = int(sec_data[_pipe_xf_key])
+                        _crossfade_src = _pipe_xf_key
+                    else:
+                        _crossfade_ms  = xfade_ms
+                        _crossfade_src = "ReleaseCrossfadeLength" if xfade_ms else "default"
 
                     pipes.append({
                         "rank_name":   rank_name,
@@ -2590,9 +3031,8 @@ def parse_organ_file(organ_path: str) -> list:
                         "attack_label": atk_label,
                         "release_path": rel_full,
                         "harmonic_number": harmonic,
-                        "crossfade_len_ms": int(sec_data.get(
-                            f"{pipe_key}ReleaseCrossfadeLength",
-                            str(xfade_ms))),
+                        "crossfade_len_ms":    _crossfade_ms,
+                        "crossfade_len_source": _crossfade_src,
                         "min_key_press_ms": min_key_ms,
                         "max_key_press_ms": max_key_ms,
                         "is_shortest_release": rel_idx_loop == 0,
@@ -2618,6 +3058,7 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         release_path=desc["release_path"],
         harmonic_number=desc["harmonic_number"],
     )
+    pa._desc = desc  # für Debug-Recompute (disable_pruning toggle)
 
     try:
         # smpl-Chunk lesen
@@ -2732,8 +3173,9 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         latest_loop_end = getattr(pa, "latest_loop_end", pa.loop_end)
         atk_for_lut = atk_mono[:latest_loop_end + 1]
 
-        _lut_fn = compute_lut_v2 if desc.get("use_v2", False) else compute_lut
-        pa.lut_points, lut_meta = _lut_fn(
+        use_v2 = desc.get("use_v2", False)
+        _lut_fn = compute_lut_v2 if use_v2 else compute_lut
+        _lut_kw: dict = dict(
             attack_mono=atk_for_lut,
             release_mono=rel_mono,
             T_float=pa.T_float,
@@ -2747,6 +3189,9 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
             downsampling=desc.get("downsampling", True),
             latest_loop_end_sample=latest_loop_end if latest_loop_end > 0 else None,
         )
+        if use_v2:
+            _lut_kw["disable_pruning"] = _DEBUG_DISABLE_PRUNING
+        pa.lut_points, lut_meta = _lut_fn(**_lut_kw)
         pa.lut_method              = lut_meta.get("lut_method", "v1")
         pa.lut_all_candidates_by_n = lut_meta.get("all_candidates_by_n", {})
         pa.lut_chosen_r_by_n       = lut_meta.get("chosen_r_by_n", {})
@@ -2761,8 +3206,11 @@ def analyze_pipe(desc: dict) -> PipeAnalysis:
         pa.lut_fold_reason = str(lut_meta.get("fold_reason", ""))
         pruned_count = int(lut_meta.get("pruned_count", 0) or 0)
         pa.lut_points_raw_count = len(pa.lut_points) + pruned_count
-        pa.lut_points_predp  = lut_meta.get("predp_points", [])
-        pa.lut_points_pre3b  = lut_meta.get("pre3b_points", [])
+        pa.lut_points_predp    = lut_meta.get("predp_points", [])
+        pa.lut_points_pre3b    = lut_meta.get("pre3b_points", [])
+        pa.lut_points_preprune = lut_meta.get("pre_prune_points_full", [])
+        pa.lut_pruning_disabled = bool(lut_meta.get("pruning_disabled", False))
+        pa.lut_prune_trace   = lut_meta.get("prune_trace", [])
         pa.corr_at           = lut_meta.get("corr_at", None)
         pa.corr_at_data      = lut_meta.get("corr_at_data", None)
         pa.lut_r_search_max  = int(lut_meta.get("r_search_max",  2 * pa.T_int))
@@ -3075,15 +3523,17 @@ def interp_lut_segment_raw(loop_pos: int, lut_points: list,
     r0 = int(p0.best_r) % W
     r1 = int(p1.best_r) % W
 
-    if lut_folded:
-        up = getattr(p1, 'approach_up', True)
-        if up:
-            delta = (r1 - r0) % W
-        else:
-            delta = -((r0 - r1) % W)
-        return int(round((r0 + t * delta) % W))
+    # Beide Fälle: zirkuläre Interpolation via approach_up.
+    # lut_folded=True: W = T (ein Periodenraum).
+    # lut_folded=False: W = 2T (v2-Suchraum); approach_up gibt Richtung über
+    #   die W-Grenze an — ohne dieses Bit wäre 1380→20 (W=1400) als Rückwärtssprung
+    #   statt als Vorwärts-Wrap interpretiert worden.
+    up = getattr(p1, 'approach_up', True)
+    if up:
+        delta = (r1 - r0) % W
     else:
-        return int(round(r0 + t * (r1 - r0)))
+        delta = -((r0 - r1) % W)
+    return int(round((r0 + t * delta) % W))
 
 
 def get_position_for_correlation_runtime(loop_pos: int, lut_points: list,
@@ -3522,9 +3972,15 @@ class CrossfadeSimWindow:
     # ── Datenladen ────────────────────────────────────────────────────────────
 
     def _load_data(self):
+        pa = self.pa
+        if not (pa.attack_path and os.path.isfile(pa.attack_path)
+                and pa.release_path and os.path.isfile(pa.release_path)):
+            self.win.after(0, lambda: self._status.config(
+                text="GO-Log-Modus: keine WAV-Dateien verfügbar.", fg=C_TEXT2))
+            return
         try:
-            atk, sr, _, _ = read_wav_mono_float(self.pa.attack_path)
-            rel, _,  _, _ = read_wav_mono_float(self.pa.release_path)
+            atk, sr, _, _ = read_wav_mono_float(pa.attack_path)
+            rel, _,  _, _ = read_wav_mono_float(pa.release_path)
             self._atk_mono = atk
             self._rel_mono = rel
             # Legacy-Tabelle aufbauen
@@ -3906,6 +4362,14 @@ class CorrLandscapeWindow:
         self._debug_var = tk.BooleanVar(value=True)
         self._lab_pts        = None   # Tuning-Lab LUT-Punkte (None = Original pa.lut_points)
         self._last_clicked_n = None   # n-Wert des zuletzt angeklickten Punkts
+        self._go_log_var     = tk.BooleanVar(value=False)
+        self._go_log_data    = None   # (lut_points, T_float, T_int, n_entries) aus verify-Log
+        # LUT-Quell-Selektor: "final" / "preprune" / "golog"
+        self._lut_source_var = tk.StringVar(value="final")
+        # n-Slider
+        self._sim_n_var      = tk.IntVar(value=0)
+        self._sim_active_var = tk.BooleanVar(value=False)
+        self._sim_info_text  = None   # tk.Text Widget (wird in _build_lab_panel gesetzt)
 
         self.win = tk.Toplevel(parent)
         self.win.title(f"Korrelationslandschaft — {pa.rank_name} {midi_to_name(pa.midi_note)} "
@@ -3989,6 +4453,46 @@ class CorrLandscapeWindow:
         tk.Label(bar2, text="(→ Berechnen drücken zum Anwenden)",
                  bg=C_BG3, fg=C_TEXT2, font=("Consolas", 8)).pack(side=tk.LEFT, padx=8)
 
+        tk.Label(bar2, text="  |", bg=C_BG3, fg=C_TEXT2,
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(4, 0))
+        chk_kw = dict(bg=C_BG3, fg=C_TEXT, selectcolor=C_BG2,
+                      activebackground=C_BG3, activeforeground=C_TEXT,
+                      font=("Consolas", 9))
+        tk.Checkbutton(bar2, text="GO-Log LUT",
+                       variable=self._go_log_var, command=self._toggle_go_log,
+                       **chk_kw).pack(side=tk.LEFT, padx=6)
+        self._go_log_lbl = tk.Label(bar2, text="", bg=C_BG3, fg=C_TEXT2,
+                                    font=("Consolas", 9))
+        self._go_log_lbl.pack(side=tk.LEFT, padx=2)
+
+        # LUT-Quell-Selektor: Final / Pre-prune / GO-Log
+        bar3 = tk.Frame(self.win, bg=C_BG3, pady=2)
+        bar3.pack(fill=tk.X)
+        tk.Label(bar3, text="LUT-Quelle:", bg=C_BG3, fg=C_TEXT,
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(8, 2))
+        _src_kw = dict(bg=C_BG3, fg=C_TEXT, selectcolor=C_BG2,
+                       activebackground=C_BG3, activeforeground=C_TEXT,
+                       font=("Consolas", 9))
+        for _src_val, _src_lbl in [("final",    "Final (pruned)"),
+                                    ("preprune", "Pre-prune"),
+                                    ("golog",    "GO-Log")]:
+            tk.Radiobutton(bar3, text=_src_lbl, variable=self._lut_source_var,
+                           value=_src_val, command=self._on_source_change,
+                           **_src_kw).pack(side=tk.LEFT, padx=6)
+        self._source_info_lbl = tk.Label(bar3, text="", bg=C_BG3, fg=C_TEXT2,
+                                          font=("Consolas", 8))
+        self._source_info_lbl.pack(side=tk.LEFT, padx=8)
+        # Debug: Pruning deaktivieren (nur Python, kein C++-Äquivalent)
+        tk.Label(bar3, text="  |", bg=C_BG3, fg=C_TEXT2,
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=(4, 0))
+        self._disable_prune_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(bar3, text="DEBUG: Pruning deaktivieren",
+                       variable=self._disable_prune_var,
+                       command=self._on_disable_pruning_toggle,
+                       bg=C_BG3, fg="#ffaa44", selectcolor=C_BG2,
+                       activebackground=C_BG3, activeforeground="#ffaa44",
+                       font=("Consolas", 9)).pack(side=tk.LEFT, padx=6)
+
         # Info
         pa = self.pa
         r_info = getattr(pa, "lut_r_search_max", 0) or (2 * pa.T_int)
@@ -4025,6 +4529,175 @@ class CorrLandscapeWindow:
             tk.Label(plot_frame, text="matplotlib nicht verfügbar",
                      bg=C_BG, fg=C_BAD, font=("Consolas", 10)).pack(pady=20)
 
+    def _active_lut_pts(self):
+        """Gibt die aktiven LUT-Punkte zurück abhängig vom LUT-Quell-Selektor."""
+        src = self._lut_source_var.get()
+        if src == "golog" and self._go_log_data is not None:
+            return self._go_log_data[0]
+        if src == "preprune":
+            return getattr(self.pa, "lut_points_preprune", None) or self.pa.lut_points
+        # "final": Tuning-Lab > Original
+        return self._lab_pts if self._lab_pts is not None else self.pa.lut_points
+
+    def _toggle_go_log(self):
+        if not self._go_log_var.get():
+            self._go_log_data = None
+            self._go_log_lbl.config(text="", fg=C_TEXT2)
+            self._plot()
+            return
+        result = load_go_log_lut(self.pa)
+        if result is None:
+            self._go_log_var.set(False)
+            self._go_log_lbl.config(text=f"Nicht gefunden ({GO_LOG_LUT_PATH})", fg="#ff6666")
+            return
+        pts, T_float, T_int, n_entries = result
+        self._go_log_data = result
+        release_hint = f"  ({n_entries} Release(s))" if n_entries > 1 else ""
+        self._go_log_lbl.config(
+            text=f"GO: {len(pts)} Punkte  T={T_float:.4f}{release_hint}",
+            fg="#aaffaa")
+        self._plot()
+
+    def _on_source_change(self):
+        """LUT-Quell-Selektor geändert."""
+        src = self._lut_source_var.get()
+        pts = self._active_lut_pts()
+        n_pts = len(pts) if pts else 0
+        if src == "preprune":
+            self._source_info_lbl.config(
+                text=f"{n_pts} Punkte (vor Pruning)", fg="#ffcc44")
+        elif src == "golog":
+            self._source_info_lbl.config(
+                text=f"{n_pts} Punkte (GO-Log)", fg="#aaffaa")
+        else:
+            disabled_tag = "  ⚠ pruning OFF" if getattr(self.pa, 'lut_pruning_disabled', False) else ""
+            self._source_info_lbl.config(
+                text=f"{n_pts} Punkte (final){disabled_tag}", fg=C_TEXT2)
+        self._plot()
+        if self._sim_active_var.get():
+            self._update_sim_marker()
+
+    def _on_sim_toggle(self):
+        self._plot()
+        if self._sim_active_var.get():
+            self._update_sim_marker()
+
+    def _on_sim_slider(self, _=None):
+        if self._sim_active_var.get():
+            self._update_sim_marker()
+            self._plot()
+
+    def _get_sim_info(self, n: int, lut_pts: list, label: str) -> tuple:
+        """Berechnet den Runtime-interpolierten r-Wert für n und gibt Debug-Info zurück.
+
+        Rückgabe: (r_result, info_lines)
+        Verwendet get_position_for_correlation_runtime — exakt die Runtime-Funktion.
+        """
+        pa = self.pa
+        T_float    = pa.T_float
+        T_int      = pa.T_int
+        wrap_period = int(getattr(pa, 'lut_wrap_period', T_int))
+        lut_folded  = bool(getattr(pa, 'lut_folded', True))
+        loop_pos    = int(round(n * T_float))
+
+        if not lut_pts:
+            return None, [f"[{label}] Keine LUT-Punkte"]
+
+        r_result = get_position_for_correlation_runtime(
+            loop_pos, lut_pts, T_float, wrap_period, lut_folded)
+
+        # Segment-Info: p0/p1 aus den sortierten Punkten heraussuchen
+        sorted_pts = sorted(lut_pts, key=lambda p: p.loop_pos)
+        p0 = p1 = None
+        for i, pt in enumerate(sorted_pts):
+            if pt.loop_pos <= loop_pos and (i + 1 < len(sorted_pts)):
+                if sorted_pts[i + 1].loop_pos >= loop_pos:
+                    p0 = sorted_pts[i]
+                    p1 = sorted_pts[i + 1]
+                    break
+        if p0 is None and sorted_pts:
+            p0 = sorted_pts[-2] if len(sorted_pts) >= 2 else sorted_pts[0]
+            p1 = sorted_pts[-1]
+
+        W = wrap_period
+        t_seg = 0.0
+        seg_mode = "?"
+        r_direct = r_wrap_up = r_wrap_dn = None
+        if p0 is not None and p1 is not None:
+            span = max(1, p1.loop_pos - p0.loop_pos)
+            t_seg = (loop_pos - p0.loop_pos) / span
+            is_jump = getattr(p1, 'is_jump', False)
+            r0 = int(p0.best_r) % W
+            r1 = int(p1.best_r) % W
+            if is_jump:
+                seg_mode = "jump (step)"
+                r_direct = r0 if t_seg < 0.5 else r1
+            else:
+                r_direct = int(round(r0 + t_seg * (r1 - r0)))
+                delta_up = (r1 - r0 + W) % W
+                delta_dn = -(((r0 - r1 + W) % W))
+                r_wrap_up = int(round((r0 + t_seg * delta_up) % W))
+                r_wrap_dn = int(round((r0 + t_seg * delta_dn) % W))
+                up = getattr(p1, 'approach_up', True)
+                seg_mode = f"wrap_{'up' if up else 'dn'} (approach_up={up})"
+
+        lines = [
+            f"[{label}]",
+            f"  n={n}  loop_pos={loop_pos}",
+            f"  r_runtime={r_result}",
+            f"  W={W}  folded={lut_folded}",
+            f"  seg_mode: {seg_mode}",
+            f"  t={t_seg:.3f}",
+        ]
+        if r_direct  is not None: lines.append(f"  r_direct={r_direct}")
+        if r_wrap_up is not None: lines.append(f"  r_wrap_up={r_wrap_up}")
+        if r_wrap_dn is not None: lines.append(f"  r_wrap_dn={r_wrap_dn}")
+        if p0:
+            lines.append(f"  p0: n={p0.n} r={p0.best_r} "
+                         f"up={int(getattr(p0,'approach_up',True))} "
+                         f"jmp={int(getattr(p0,'is_jump',False))}")
+        if p1:
+            lines.append(f"  p1: n={p1.n} r={p1.best_r} "
+                         f"up={int(getattr(p1,'approach_up',True))} "
+                         f"jmp={int(getattr(p1,'is_jump',False))}")
+        return r_result, lines
+
+    def _update_sim_marker(self):
+        """Aktualisiert das Debug-Text-Panel für den n-Slider."""
+        if self._sim_info_text is None:
+            return
+        n = self._sim_n_var.get()
+        # Final LUT
+        final_pts    = self._lab_pts if self._lab_pts is not None else self.pa.lut_points
+        preprune_pts = getattr(self.pa, 'lut_points_preprune', None) or []
+        _, lines_f = self._get_sim_info(n, final_pts,    "FINAL")
+        _, lines_p = self._get_sim_info(n, preprune_pts, "PRE-PRUNE")
+        text = "\n".join(lines_f + [""] + lines_p)
+        self._sim_info_text.config(state=tk.NORMAL)
+        self._sim_info_text.delete("1.0", tk.END)
+        self._sim_info_text.insert(tk.END, text)
+        self._sim_info_text.config(state=tk.DISABLED)
+
+    def _on_disable_pruning_toggle(self):
+        """Pruning-Schalter umgeschaltet — Pipe neu analysieren und neu zeichnen."""
+        enabled = self._disable_prune_var.get()
+        set_debug_disable_pruning(enabled)
+        desc = getattr(self.pa, '_desc', None)
+        if desc is None:
+            self._lab_status.config(
+                text="⚠ Kein desc verfügbar — Reload nötig.")
+            return
+        new_pa = analyze_pipe(desc)
+        # Interne Daten aus neuem pa übernehmen
+        self.pa.lut_points              = new_pa.lut_points
+        self.pa.lut_points_preprune     = getattr(new_pa, 'lut_points_preprune', [])
+        self.pa.lut_pruning_disabled    = getattr(new_pa, 'lut_pruning_disabled', False)
+        self.pa.lut_all_candidates_by_n = new_pa.lut_all_candidates_by_n
+        self.pa.lut_chosen_r_by_n       = new_pa.lut_chosen_r_by_n
+        tag = "⚠ DEBUG: pruning disabled" if enabled else "Pruning aktiv"
+        self._lab_status.config(text=tag)
+        self._on_source_change()
+
     def _zoom_to_lut(self):
         self._zoom_mode = "lut"
         self._plot()
@@ -4054,6 +4727,13 @@ class CorrLandscapeWindow:
     def _compute_worker(self, win_name: str):
         pa = self.pa
         try:
+            if not (pa.attack_path and os.path.isfile(pa.attack_path)
+                    and pa.release_path and os.path.isfile(pa.release_path)):
+                self.win.after(0, lambda: self._status.config(
+                    text="GO-Log-Modus: keine WAV-Dateien — Heatmap nicht berechenbar. "
+                         "LUT-Overlay (GO-Log LUT Haken) ist trotzdem verfügbar.",
+                    fg=C_TEXT2))
+                return
             atk_mono, sr, _, _ = read_wav_mono_float(pa.attack_path)
             rel_mono, _,  _, _ = read_wav_mono_float(pa.release_path)
 
@@ -4208,8 +4888,8 @@ class CorrLandscapeWindow:
         cbar.set_label("NDP-Score", color=C_TEXT2)
         cbar.ax.tick_params(colors=C_TEXT2)
 
-        # Aktive LUT-Punkte: Tuning-Lab-Ergebnis oder Original
-        active_pts = self._lab_pts if self._lab_pts is not None else self.pa.lut_points
+        # Aktive LUT-Punkte: GO-Log > Tuning-Lab > Original
+        active_pts = self._active_lut_pts()
 
         # Aktive LUT-Punkte anzeigen — exakt wie _plot_lut im Hauptfenster
         if active_pts:
@@ -4259,28 +4939,25 @@ class CorrLandscapeWindow:
                         segs.append(([x0, x1], [y0, y1]))
 
                 def _directed(x0, x1, r0, r1, up):
-                    if lut_folded:
-                        r0i = int(round(r0)) % W
-                        r1i = int(round(r1)) % W
-                        needs_wrap = (up and r1i < r0i) or (not up and r1i > r0i)
-                        if not needs_wrap:
-                            _seg(x0, x1, float(r0i), float(r1i))
-                        elif up:
-                            span = (W - r0i) + r1i
-                            if span <= 0:
-                                _seg(x0, x1, float(r0i), float(r1i)); return
-                            x_w = x0 + (W - r0i) / float(span) * (x1 - x0)
-                            _seg(x0, x_w, float(r0i), float(W))
-                            _seg(x_w, x1, 0.0, float(r1i))
-                        else:
-                            span = r0i + (W - r1i)
-                            if span <= 0:
-                                _seg(x0, x1, float(r0i), float(r1i)); return
-                            x_w = x0 + float(r0i) / float(span) * (x1 - x0)
-                            _seg(x0, x_w, float(r0i), 0.0)
-                            _seg(x_w, x1, float(W), float(r1i))
+                    r0i = int(round(r0)) % W
+                    r1i = int(round(r1)) % W
+                    needs_wrap = (up and r1i < r0i) or (not up and r1i > r0i)
+                    if not needs_wrap:
+                        _seg(x0, x1, float(r0i), float(r1i))
+                    elif up:
+                        span = (W - r0i) + r1i
+                        if span <= 0:
+                            _seg(x0, x1, float(r0i), float(r1i)); return
+                        x_w = x0 + (W - r0i) / float(span) * (x1 - x0)
+                        _seg(x0, x_w, float(r0i), float(W))
+                        _seg(x_w, x1, 0.0, float(r1i))
                     else:
-                        _seg(x0, x1, float(r0), float(r1))
+                        span = r0i + (W - r1i)
+                        if span <= 0:
+                            _seg(x0, x1, float(r0i), float(r1i)); return
+                        x_w = x0 + float(r0i) / float(span) * (x1 - x0)
+                        _seg(x0, x_w, float(r0i), 0.0)
+                        _seg(x_w, x1, float(W), float(r1i))
 
                 for pa_pt, pb_pt in zip(pts_sorted, pts_sorted[1:]):
                     if getattr(pb_pt, "is_jump", False):
@@ -4353,32 +5030,31 @@ class CorrLandscapeWindow:
                         chr_segs.append(([x0, x1], [y0, y1]))
 
                 def _v2directed(x0, x1, r0, r1):
-                    if lut_folded:
-                        r0i = int(round(r0)) % W
-                        r1i = int(round(r1)) % W
-                        fwd = (r1i - r0i) % W
-                        up  = fwd <= W // 2
-                        needs_wrap = (up and r1i < r0i) or (not up and r1i > r0i)
-                        if not needs_wrap:
-                            _v2seg(x0, x1, float(r0i), float(r1i))
-                        elif up:
-                            span = (W - r0i) + r1i
-                            if span <= 0:
-                                _v2seg(x0, x1, float(r0i), float(r1i)); return
-                            x_w = x0 + (W - r0i) / float(span) * (x1 - x0)
-                            _v2seg(x0, x_w, float(r0i), float(W))
-                            _v2seg(x_w, x1, 0.0, float(r1i))
-                        else:
-                            span = r0i + (W - r1i)
-                            if span <= 0:
-                                _v2seg(x0, x1, float(r0i), float(r1i)); return
-                            x_w = x0 + float(r0i) / float(span) * (x1 - x0)
-                            _v2seg(x0, x_w, float(r0i), 0.0)
-                            _v2seg(x_w, x1, float(W), float(r1i))
+                    # Dichte Tracking-Schritte: Shortest-Arc-Heuristik korrekt,
+                    # weil Schritte klein sind (kein LUT-Punkt an jedem n verfügbar).
+                    r0i = int(round(r0)) % W
+                    r1i = int(round(r1)) % W
+                    fwd = (r1i - r0i) % W
+                    up  = fwd <= W // 2
+                    needs_wrap = (up and r1i < r0i) or (not up and r1i > r0i)
+                    if not needs_wrap:
+                        _v2seg(x0, x1, float(r0i), float(r1i))
+                    elif up:
+                        span = (W - r0i) + r1i
+                        if span <= 0:
+                            _v2seg(x0, x1, float(r0i), float(r1i)); return
+                        x_w = x0 + (W - r0i) / float(span) * (x1 - x0)
+                        _v2seg(x0, x_w, float(r0i), float(W))
+                        _v2seg(x_w, x1, 0.0, float(r1i))
                     else:
-                        _v2seg(x0, x1, float(r0), float(r1))
+                        span = r0i + (W - r1i)
+                        if span <= 0:
+                            _v2seg(x0, x1, float(r0i), float(r1i)); return
+                        x_w = x0 + float(r0i) / float(span) * (x1 - x0)
+                        _v2seg(x0, x_w, float(r0i), 0.0)
+                        _v2seg(x_w, x1, float(W), float(r1i))
 
-                pt_by_n = {p.n: p for p in (self._lab_pts or self.pa.lut_points)}
+                pt_by_n = {p.n: p for p in (self._active_lut_pts() or [])}
                 for i in range(len(chr_x) - 1):
                     n_b = chr_x[i + 1]
                     if getattr(pt_by_n.get(n_b), "is_jump", False):
@@ -4429,6 +5105,30 @@ class CorrLandscapeWindow:
             ax.set_xlim(self._lut_xlim)
             ax.set_ylim(self._lut_ylim)
 
+        # ── n-Slider Sim-Marker ────────────────────────────────────────────────
+        if self._sim_active_var.get():
+            _n_sim = self._sim_n_var.get()
+            _final_pts    = self._lab_pts if self._lab_pts is not None else self.pa.lut_points
+            _preprune_pts = getattr(self.pa, 'lut_points_preprune', None) or []
+            _wrap   = int(getattr(self.pa, 'lut_wrap_period', T))
+            _folded = bool(getattr(self.pa, 'lut_folded', True))
+            _T_f    = self.pa.T_float
+            # Marker FINAL (weiß mit rotem Kreuz)
+            _r_final, _ = self._get_sim_info(_n_sim, _final_pts, "FINAL")
+            if _r_final is not None:
+                ax.axvline(_n_sim, color="#ffffff", linewidth=0.8, alpha=0.5,
+                            linestyle=":", zorder=9)
+                ax.scatter([_n_sim], [_r_final], c="#ffffff", s=200,
+                            marker="+", linewidths=2.5, zorder=12,
+                            label=f"Sim Final r={_r_final}")
+            # Marker PRE-PRUNE (orange)
+            if _preprune_pts:
+                _r_pre, _ = self._get_sim_info(_n_sim, _preprune_pts, "PRE-PRUNE")
+                if _r_pre is not None:
+                    ax.scatter([_n_sim], [_r_pre], c="#ffaa44", s=200,
+                                marker="x", linewidths=2.5, zorder=12,
+                                label=f"Sim Pre-prune r={_r_pre}")
+
         win_name = self._win_var.get()
         ax.set_xlabel("Periodenindex n", color=C_TEXT2)
         ax.set_ylabel("r (Sample-Offset in Release)", color=C_TEXT2)
@@ -4443,6 +5143,9 @@ class CorrLandscapeWindow:
         # Rechts Platz fuer die Legende lassen; unten Platz fuer die horizontale Colorbar.
         self._fig.tight_layout(rect=[0, 0.08, 0.82, 1])
         self._canvas.draw()
+        # Debug-Panel nach dem Zeichnen aktualisieren
+        if self._sim_active_var.get():
+            self._update_sim_marker()
 
     # ─── Branch Tuning Lab ────────────────────────────────────────────────────
 
@@ -4582,6 +5285,34 @@ class CorrLandscapeWindow:
                                      font=("Consolas", 8), anchor=tk.W,
                                      justify=tk.LEFT, wraplength=255)
         self._lab_status.pack(fill=tk.X, padx=6)
+
+        # ── n-Slider / Sim-Marker ─────────────────────────────────────────────
+        tk.Label(frame, text="── n-Slider / Sim-Marker ──", **sec_kw).pack(
+            fill=tk.X, padx=6, pady=(8, 2))
+        chk_sim = tk.Checkbutton(frame, text="Marker aktivieren",
+                                  variable=self._sim_active_var,
+                                  command=self._on_sim_toggle,
+                                  **dict(bg=C_BG3, fg=C_TEXT, selectcolor=C_BG2,
+                                         activebackground=C_BG3, activeforeground=C_TEXT,
+                                         font=("Consolas", 9)))
+        chk_sim.pack(anchor=tk.W, padx=8)
+
+        n_min = int(getattr(self.pa, 'n_start', 0) or 0)
+        n_max = int(getattr(self.pa, 'n_total', 100) or 100)
+        self._sim_n_var.set(max(n_min, n_max // 2))
+        self._sim_slider = tk.Scale(
+            frame, from_=n_min, to=n_max, orient=tk.HORIZONTAL,
+            variable=self._sim_n_var, resolution=1,
+            bg=C_BG3, fg=C_TEXT, troughcolor=C_BG2,
+            highlightbackground=C_BG3, activebackground=C_BTN_ACT,
+            font=("Consolas", 8), length=240,
+            command=self._on_sim_slider)
+        self._sim_slider.pack(fill=tk.X, padx=6, pady=(2, 0))
+
+        self._sim_info_text = tk.Text(frame, height=14, bg=C_BG2, fg="#88ddff",
+                                       font=("Consolas", 8), relief=tk.SUNKEN, bd=1,
+                                       state=tk.DISABLED, wrap=tk.NONE)
+        self._sim_info_text.pack(fill=tk.X, padx=6, pady=(2, 4))
 
         # ── Punkt-Info (Klick) ────────────────────────────────────────────────
         tk.Label(frame, text="── Punkt-Info ──", **sec_kw).pack(
@@ -4852,7 +5583,7 @@ class CorrLandscapeWindow:
         """Info-Panel für den zuletzt angeklickten Punkt neu rendern (z.B. nach Param-Änderung)."""
         if self._last_clicked_n is None:
             return
-        pts = self._lab_pts if self._lab_pts is not None else self.pa.lut_points
+        pts = self._active_lut_pts()
         if not pts:
             return
         closest = min(pts, key=lambda p: abs(p.n - self._last_clicked_n))
@@ -4862,7 +5593,7 @@ class CorrLandscapeWindow:
         """Klick in die Heatmap: zeige Kandidaten des naechsten LUT-Punkts."""
         if event.inaxes is None:
             return
-        pts = self._lab_pts if self._lab_pts is not None else self.pa.lut_points
+        pts = self._active_lut_pts()
         if not pts:
             return
         n_click = event.xdata
@@ -5050,6 +5781,8 @@ class LUTAnalyzerApp(tk.Tk):
         self._result_queue = queue.Queue()
         self._total_work  = 0
         self._done_work   = 0
+        self._go_log_entries: list = []   # alle Einträge aus go_lut_verify.csv
+        self._go_log_mode = tk.BooleanVar(value=False)
 
         self._build_ui()
         self.after(100, self._poll_results)
@@ -5096,6 +5829,24 @@ class LUTAnalyzerApp(tk.Tk):
         self._btn_report = tk.Button(toolbar, text="📄  Report speichern",
                   command=self._save_report, state=tk.DISABLED, **btn_kw)
         self._btn_report.pack(side=tk.LEFT, padx=4)
+
+        tk.Button(toolbar, text="📋  GO-Log …",
+                  command=self._load_go_log, **btn_kw).pack(side=tk.LEFT, padx=4)
+
+        self._go_log_chk = tk.Checkbutton(
+            toolbar, text="GO-Log",
+            variable=self._go_log_mode,
+            command=self._on_go_log_toggle,
+            state=tk.DISABLED,
+            bg=C_BG3, fg="#aaffaa", selectcolor=C_BG2,
+            activebackground=C_BG3, activeforeground="#aaffaa",
+            disabledforeground=C_TEXT2,
+            font=("Consolas", 10))
+        self._go_log_chk.pack(side=tk.LEFT, padx=(0, 4))
+
+        self._btn_organ_back = tk.Button(toolbar, text="🔄  Organ",
+                  command=self._reload_organ, state=tk.DISABLED, **btn_kw)
+        self._btn_organ_back.pack(side=tk.LEFT, padx=0)
 
         self._organ_label = tk.Label(toolbar, text="Keine Datei geladen",
                                       bg=C_BG3, fg=C_TEXT2,
@@ -5250,6 +6001,8 @@ class LUTAnalyzerApp(tk.Tk):
                   command=self._open_crossfade_sim, **btn_kw2).pack(side=tk.LEFT, padx=2)
         tk.Button(btn_frame, text="🎲  Zufalls-Release",
                   command=self._open_random_sim, **btn_kw2).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_frame, text="✂  Pruning-Bericht",
+                  command=self._open_prune_report, **btn_kw2).pack(side=tk.LEFT, padx=2)
 
         # Plot-Bereich
         if HAS_MATPLOTLIB:
@@ -5322,9 +6075,185 @@ class LUTAnalyzerApp(tk.Tk):
         if path:
             self._load_organ(path)
 
+    def _load_go_log(self):
+        """Öffnet Dateidialog und lädt go_lut_verify.csv.
+
+        Wenn ein ODF geladen ist: Log als Overlay — Baum bleibt, Toggle zeigt
+        GO-LUT für die ausgewählte Pfeife.
+        Ohne ODF: Baum aus Log befüllen (Standalone-Modus).
+        """
+        settings  = _load_settings()
+        last_path = settings.get("go_log_path", _effective_go_log_path())
+        path = filedialog.askopenfilename(
+            title="GO-Log auswählen (go_lut_verify.csv)",
+            initialdir=os.path.dirname(last_path),
+            initialfile=os.path.basename(last_path),
+            filetypes=[("CSV-Dateien", "*.csv"), ("Alle Dateien", "*.*")],
+        )
+        if not path:
+            return
+        settings["go_log_path"] = path
+        _save_settings(settings)
+
+        try:
+            entries = _parse_go_log_all_entries(path)
+        except Exception as e:
+            messagebox.showerror("GO-Log", f"Fehler beim Lesen:\n{e}")
+            return
+        if not entries:
+            messagebox.showinfo("GO-Log", "Keine Einträge im Log gefunden.")
+            return
+
+        self._go_log_entries = entries
+
+        if getattr(self, "_pipe_descs", None):
+            # ── Overlay-Modus: ODF-Baum bleibt ──────────────────────────────
+            self._go_log_chk.config(state=tk.NORMAL)
+            self._go_log_mode.set(True)
+            odf_name = os.path.basename(self._organ_path) if self._organ_path else "Organ"
+            self._organ_label.config(
+                text=f"{odf_name}  +  GO-Log ({len(entries)} Einträge)",
+                fg=C_TEXT)
+            self._refresh_selection()
+        else:
+            # ── Standalone-Modus: kein ODF → Baum aus Log ───────────────────
+            self._analyses.clear()
+            self._key_to_item.clear()
+            self._tree.delete(*self._tree.get_children())
+            self._btn_all.config(state=tk.DISABLED)
+            self._btn_report.config(state=tk.DISABLED)
+            self._pipe_descs = []
+            if getattr(self, "_organ_path", "") and hasattr(self, "_btn_organ_back"):
+                self._btn_organ_back.config(state=tk.NORMAL)
+
+            ranks = {}
+            for entry in entries:
+                lm = re.match(r'^(.+)\|midi=(\d+)$', entry["label"])
+                if not lm:
+                    continue
+                rn = lm.group(1); mn = int(lm.group(2))
+                ranks.setdefault(rn, {}).setdefault(mn, []).append(entry)
+
+            for rank_name in sorted(ranks):
+                rank_id = self._tree.insert("", tk.END,
+                                             text=f"♩ {rank_name}",
+                                             values=("–",), tags=("rank",))
+                self._tree.tag_configure("rank", foreground=C_RANK,
+                                          font=("Consolas", 10, "bold"))
+                for midi in sorted(ranks[rank_name]):
+                    note_id = self._tree.insert(rank_id, tk.END,
+                                                 text=f"  {midi_to_name(midi)} ({midi})",
+                                                 values=("–",), tags=("note",))
+                    self._tree.tag_configure("note", foreground=C_NOTE)
+                    for entry in entries:
+                        lm2 = re.match(r'^(.+)\|midi=(\d+)$', entry["label"])
+                        if not lm2 or lm2.group(1) != rank_name or int(lm2.group(2)) != midi:
+                            continue
+                        pa = _pa_from_log_entry(entry)
+                        key = (f"{pa.rank_name}|{pa.midi_note}|"
+                               f"{pa.perspective}|{pa.release_type}|{pa.attack_label}")
+                        label_text = f"    log / {pa.release_type}"
+                        if pa.attack_label not in ("main", ""):
+                            label_text += f" [{pa.attack_label}]"
+                        item_id = self._tree.insert(note_id, tk.END,
+                                                     text=label_text,
+                                                     values=(pa.status_text,),
+                                                     tags=("pipe", key))
+                        self._tree.tag_configure("pipe", foreground=C_OK)
+                        self._tree.tag_configure(key, foreground=C_OK)
+                        self._key_to_item[key] = item_id
+                        self._analyses[key] = pa
+
+            self._go_log_chk.config(state=tk.DISABLED)
+            self._organ_label.config(
+                text=f"GO-Log: {len(entries)} Releases  —  {os.path.basename(path)}",
+                fg="#aaffaa")
+            self._title(f"GrandOrgue LUT Analyzer — {TOOL_VERSION} — GO-Log")
+            self._fit_tree_columns()
+
+    def _find_log_entry_for_pa(self, pa: "PipeAnalysis"):
+        """Sucht den passenden Log-Eintrag für eine PA.
+
+        Priorität:
+        1. Basename UND Label passen (case-insensitiv; exakter Treffer)
+        2. Nur Label passt (mehrere Stops teilen dieselbe WAV-Datei)
+        3. Nur Basename passt (Fallback, wenn Label fehlt/abweicht)
+
+        GO schreibt den Rank-Namen im Log lowercase; ODF kann gemischte
+        Groß-/Kleinschreibung haben → Vergleich immer case-insensitiv.
+        """
+        atk_basename   = os.path.basename(pa.attack_path) if pa.attack_path else ""
+        label_target   = f"{pa.rank_name}|midi={pa.midi_note}".lower()
+        # Runde 1: Basename + Label (case-insensitiv)
+        for e in self._go_log_entries:
+            af = e.get("attack_file", "")
+            if (atk_basename and af and os.path.basename(af) == atk_basename
+                    and e["label"].lower() == label_target):
+                return e
+        # Runde 2: nur Label (case-insensitiv)
+        for e in self._go_log_entries:
+            if e["label"].lower() == label_target:
+                return e
+        # Runde 3: nur Basename
+        for e in self._go_log_entries:
+            af = e.get("attack_file", "")
+            if atk_basename and af and os.path.basename(af) == atk_basename:
+                return e
+        return None
+
+    def _get_effective_pa(self, pa: "PipeAnalysis") -> "PipeAnalysis":
+        """Gibt pa zurück — im GO-Log-Modus mit LUT-Daten aus dem Log überschrieben."""
+        if not self._go_log_mode.get() or not self._go_log_entries:
+            return pa
+        import copy
+        found = self._find_log_entry_for_pa(pa)
+        if found is None:
+            return pa
+        log_pa = copy.copy(pa)
+        pts = [LutPoint(n=gp["n"], loop_pos=gp["loop_pos"], best_r=gp["best_r"],
+                        best_score=0.0, phase="dense",
+                        approach_up=gp["approach_up"], is_jump=gp["is_jump"])
+               for gp in found["lut"]]
+        log_pa.lut_points            = pts
+        log_pa.lut_points_raw_count  = len(pts)
+        log_pa.T_float               = found["T_float"]
+        log_pa.T_int                 = found["T_int"]
+        log_pa.lut_folded            = False
+        log_pa.lut_wrap_period       = 2 * found["T_int"]
+        log_pa.lut_r_search_max      = 2 * found["T_int"]
+        log_pa.crossfade_len_samples = found.get("crossfade_len", pa.crossfade_len_samples)
+        log_pa.stabilized            = True
+        log_pa.stable_at_n           = found.get("n_start", pa.stable_at_n)
+        return log_pa
+
+    def _on_go_log_toggle(self):
+        """Checkbox-Toggle: zeigt aktuelle Selektion mit Python- oder GO-Log-LUT."""
+        self._refresh_selection()
+
+    def _refresh_selection(self):
+        """Zeigt die aktuell ausgewählte Pfeife neu an (nach Modus-Wechsel)."""
+        sel = self._tree.selection() if hasattr(self, "_tree") else []
+        if not sel:
+            return
+        tags = self._tree.item(sel[0], "tags")
+        key  = next((t for t in tags if "|" in t), None)
+        if not key:
+            return
+        pa = self._analyses.get(key)
+        if not isinstance(pa, PipeAnalysis):
+            return
+        self._show_detail(self._get_effective_pa(pa))
+
+    def _reload_organ(self):
+        """Kehrt nach GO-Log-Ansicht zur zuletzt geladenen Orgel zurück."""
+        if getattr(self, "_organ_path", ""):
+            self._load_organ(self._organ_path)
+
     def _load_organ(self, path: str):
         self._organ_path = path
         self._organ_label.config(text=os.path.basename(path), fg=C_TEXT)
+        if hasattr(self, "_btn_organ_back"):
+            self._btn_organ_back.config(state=tk.DISABLED)
         self._analyses.clear()
         self._key_to_item.clear()
         self._tree.delete(*self._tree.get_children())
@@ -5580,7 +6509,7 @@ class LUTAnalyzerApp(tk.Tk):
             self._analyses[key] = pa
             self._update_tree_item(key, pa)
 
-        self._show_detail(pa)
+        self._show_detail(self._get_effective_pa(pa))
 
     def _open_crossfade_sim(self):
         if not self._current_pa:
@@ -5607,6 +6536,187 @@ class LUTAnalyzerApp(tk.Tk):
             iid = self._key_to_item[key]
             self._tree.selection_set(iid)
             self._tree.see(iid)
+
+    def _format_prune_report_point(self, p, idx=None) -> str:
+        prefix = f"#{idx:03d} " if idx is not None else ""
+        return (f"{prefix}n={getattr(p, 'n', -1):5} loop={getattr(p, 'loop_pos', -1):8} "
+                f"best_r={int(getattr(p, 'best_r', 0)):6} raw_r={int(getattr(p, 'raw_r', getattr(p, 'best_r', 0))):6} "
+                f"track_r={float(getattr(p, 'track_r', getattr(p, 'best_r', 0))):10.3f} "
+                f"score={float(getattr(p, 'best_score', 0.0)):8.5f} "
+                f"phase={getattr(p, 'phase', ''):>6} "
+                f"jump={int(bool(getattr(p, 'is_jump', False)))} up={int(bool(getattr(p, 'approach_up', True)))}")
+
+    def _format_prune_snapshot(self, d: dict) -> str:
+        idx = d.get("idx")
+        prefix = f"#{idx:03d} " if idx is not None else ""
+        return (f"{prefix}n={d.get('n', -1):5} loop={d.get('loop_pos', -1):8} "
+                f"best_r={int(d.get('best_r', 0)):6} raw_r={int(d.get('raw_r', 0)):6} "
+                f"track_r={float(d.get('track_r', 0.0)):10.3f} "
+                f"score={float(d.get('score', 0.0)):8.5f} "
+                f"phase={str(d.get('phase', '')):>6} "
+                f"jump={int(bool(d.get('is_jump', False)))} up={int(bool(d.get('approach_up', True)))}")
+
+    def _linear_track_from_points(self, n: int, points: list):
+        pts = sorted(points, key=lambda p: p.n)
+        if not pts:
+            return None
+        if len(pts) == 1 or n <= pts[0].n:
+            return float(getattr(pts[0], 'track_r', pts[0].best_r))
+        if n >= pts[-1].n:
+            if len(pts) < 2:
+                return float(getattr(pts[-1], 'track_r', pts[-1].best_r))
+            a, b = pts[-2], pts[-1]
+        else:
+            a = b = None
+            for x, y in zip(pts, pts[1:]):
+                if x.n <= n <= y.n:
+                    a, b = x, y
+                    break
+            if a is None:
+                return None
+        span = max(1, b.n - a.n)
+        t = (n - a.n) / span
+        ra = float(getattr(a, 'track_r', a.best_r))
+        rb = float(getattr(b, 'track_r', b.best_r))
+        return ra + t * (rb - ra)
+
+    def _build_prune_report_text(self, pa: "PipeAnalysis") -> str:
+        lines = []
+        lines.append(f"GrandOrgue LUT Analyzer {TOOL_VERSION} — Pruning-Bericht")
+        lines.append(f"Pipe: {pa.rank_name} | midi={pa.midi_note} | {pa.perspective} | {pa.release_type} | attack={getattr(pa, 'attack_label', 'main')}")
+        lines.append(f"T_float={pa.T_float:.9f} T_int={pa.T_int} wrap={getattr(pa, 'lut_wrap_period', pa.T_int)} "
+                     f"folded={getattr(pa, 'lut_folded', True)} search_periods={getattr(pa, 'lut_search_periods', 2)} "
+                     f"r_max={getattr(pa, 'lut_r_search_max', 2*pa.T_int)}")
+        lines.append(f"Pruning disabled: {bool(getattr(pa, 'lut_pruning_disabled', False))}")
+        pre_pts = list(getattr(pa, 'lut_points_preprune', []) or [])
+        post_pts = list(getattr(pa, 'lut_points', []) or [])
+        lines.append(f"Punkte: pre={len(pre_pts)} post={len(post_pts)} removed={max(0, len(pre_pts)-len(post_pts))}")
+        lines.append("")
+
+        lines.append("=== PRE-PRUNE POINTS ===")
+        if pre_pts:
+            for i, p in enumerate(sorted(pre_pts, key=lambda q: q.n)):
+                lines.append(self._format_prune_report_point(p, i))
+        else:
+            lines.append("<keine pre-prune Punkte gespeichert; Analyse mit dieser Version neu ausführen>")
+        lines.append("")
+
+        lines.append("=== POST-PRUNE POINTS / CURRENT LUT ===")
+        if post_pts:
+            for i, p in enumerate(sorted(post_pts, key=lambda q: q.n)):
+                lines.append(self._format_prune_report_point(p, i))
+        else:
+            lines.append("<keine post-prune Punkte>")
+        lines.append("")
+
+        if pre_pts and post_pts:
+            lines.append("=== VALIDATION: pre point vs. post-pruned track_r(n) ===")
+            lines.append("idx  n      pre_track     post_track       err      over_T32  over_3T32")
+            tol = max(2.0, pa.T_int / 32.0)
+            max_err = 0.0
+            max_info = None
+            for i, p in enumerate(sorted(pre_pts, key=lambda q: q.n)):
+                r_pre = float(getattr(p, 'track_r', p.best_r))
+                r_post = self._linear_track_from_points(p.n, post_pts)
+                if r_post is None:
+                    continue
+                err = abs(r_pre - r_post)
+                if err > max_err:
+                    max_err = err
+                    max_info = (i, p.n, r_pre, r_post, err)
+                lines.append(f"{i:3d} {p.n:6d} {r_pre:12.6f} {r_post:12.6f} {err:9.6f} "
+                             f"{int(err > tol):9d} {int(err > 3.0*tol):10d}")
+            if max_info:
+                i, n, r_pre, r_post, err = max_info
+                lines.append(f"MAX track_r err: idx={i} n={n} pre={r_pre:.6f} post={r_post:.6f} err={err:.6f}  tol={tol:.6f}  3tol={3*tol:.6f}")
+            lines.append("")
+
+        trace = list(getattr(pa, 'lut_prune_trace', []) or [])
+        lines.append("=== PRUNE TRACE ===")
+        if not trace:
+            lines.append("<kein Trace gespeichert; Analyse mit dieser Version neu ausführen>")
+        for ev in trace:
+            typ = ev.get('type')
+            if typ == 'start':
+                lines.append(f"START: T_int={ev.get('T_int')} tol={ev.get('tol'):.6f} max_gap_n={ev.get('max_prune_gap_n')}")
+                for p in ev.get('points', []):
+                    lines.append("  " + self._format_prune_snapshot(p))
+            elif typ == 'trivial':
+                lines.append(f"TRIVIAL: {ev.get('reason')}")
+                for p in ev.get('points', []):
+                    lines.append("  " + self._format_prune_snapshot(p))
+            elif typ == 'disabled':
+                lines.append("DISABLED: Pruning war deaktiviert")
+                for p in ev.get('points', []):
+                    lines.append("  " + self._format_prune_snapshot(p))
+            elif typ == 'pass':
+                lines.append("")
+                lines.append(f"PASS {ev.get('pass')}: active_before={ev.get('active_before')} changed={ev.get('changed')}")
+                for ch in ev.get('checks', []):
+                    decision = ch.get('decision')
+                    reason = ch.get('reason', '')
+                    lines.append(f"  CHECK cur=#{ch.get('cur')} prev=#{ch.get('prev')} next=#{ch.get('nxt')} -> {decision.upper()} :: {reason}")
+                    lines.append("    prev " + self._format_prune_snapshot(ch.get('prev_point', {})))
+                    lines.append("    cur  " + self._format_prune_snapshot(ch.get('cur_point', {})))
+                    lines.append("    next " + self._format_prune_snapshot(ch.get('nxt_point', {})))
+                    inter = ch.get('intermediate', [])
+                    if inter:
+                        lines.append("    intermediate points checked against prev→next line:")
+                        for it in inter:
+                            lines.append(f"      #{it.get('idx'):03d} n={it.get('n'):5d} "
+                                         f"track={float(it.get('track_r', 0.0)):10.3f} "
+                                         f"expected={float(it.get('expected', 0.0)):10.3f} "
+                                         f"err={float(it.get('err', 0.0)):9.6f} "
+                                         f"over_tol={int(bool(it.get('over_tol', False)))} "
+                                         f"active={int(bool(it.get('active', False)))} "
+                                         f"phase={it.get('phase', '')} jump={int(bool(it.get('is_jump', False)))}")
+                lines.append(f"  deleted={ev.get('deleted', [])}")
+                lines.append(f"  active_after={ev.get('active_after')}")
+            elif typ == 'final':
+                lines.append("")
+                lines.append(f"FINAL active={ev.get('active')}")
+                for p in ev.get('points', []):
+                    lines.append("  " + self._format_prune_snapshot(p))
+            else:
+                lines.append(repr(ev))
+        return "\n".join(lines)
+
+    def _open_prune_report(self):
+        if not self._current_pa:
+            return
+        pa = self._current_pa
+        text = self._build_prune_report_text(pa)
+        win = tk.Toplevel(self)
+        win.title(f"Pruning-Bericht — {pa.rank_name} {midi_to_name(pa.midi_note)}")
+        win.geometry("1100x750")
+        win.configure(bg=C_BG)
+        bar = tk.Frame(win, bg=C_BG3, pady=5)
+        bar.pack(fill=tk.X)
+        def _copy_all():
+            win.clipboard_clear()
+            win.clipboard_append(text)
+        tk.Button(bar, text="Alles kopieren", command=_copy_all,
+                  bg=C_BTN, fg=C_TEXT, relief=tk.RAISED,
+                  font=("Consolas", 9), padx=8, pady=3,
+                  activebackground=C_BTN_ACT, cursor="hand2").pack(side=tk.LEFT, padx=6)
+        tk.Label(bar, text="Der Bericht ist reines Debug-Tracing; der Algorithmus wurde nicht geändert.",
+                 bg=C_BG3, fg="#dddddd", font=("Consolas", 9)).pack(side=tk.LEFT, padx=8)
+        report_bg = "#101014"
+        report_fg = "#f2f2f2"
+        txt = tk.Text(win, wrap=tk.NONE,
+                      bg=report_bg, fg=report_fg,
+                      insertbackground=report_fg,
+                      selectbackground="#3a5f8a", selectforeground="#ffffff",
+                      font=("Consolas", 9), relief=tk.FLAT,
+                      padx=8, pady=6)
+        ysb = tk.Scrollbar(win, orient=tk.VERTICAL, command=txt.yview)
+        xsb = tk.Scrollbar(win, orient=tk.HORIZONTAL, command=txt.xview)
+        txt.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        xsb.pack(side=tk.BOTTOM, fill=tk.X)
+        txt.insert("1.0", text)
+        txt.configure(state=tk.NORMAL)
 
     def _open_corr_landscape(self):
         """Oeffnet separates Fenster mit vollstaendiger Korrelationslandschaft."""
@@ -5758,35 +6868,31 @@ class LUTAnalyzerApp(tk.Tk):
                 nonlocal visual_phase_wrap
                 r0i = int(round(r0)) % W
                 r1i = int(round(r1)) % W
-                if lut_folded:
-                    needs_wrap = (up and r1i < r0i) or (not up and r1i > r0i)
-                    if not needs_wrap:
-                        _add_seg(x0, x1, float(r0i), float(r1i))
-                    else:
-                        visual_phase_wrap = True
-                        if up:
-                            # Weg: r0 → W (oben raus), dann 0 → r1
-                            span = (W - r0i) + r1i
-                            if span <= 0:
-                                _add_seg(x0, x1, float(r0i), float(r1i))
-                                return
-                            t_w = (W - r0i) / float(span)
-                            x_w = x0 + t_w * (x1 - x0)
-                            _add_seg(x0, x_w, float(r0i), float(W))
-                            _add_seg(x_w, x1, 0.0, float(r1i))
-                        else:
-                            # Weg: r0 → 0 (unten raus), dann W → r1
-                            span = r0i + (W - r1i)
-                            if span <= 0:
-                                _add_seg(x0, x1, float(r0i), float(r1i))
-                                return
-                            t_w = float(r0i) / float(span)
-                            x_w = x0 + t_w * (x1 - x0)
-                            _add_seg(x0, x_w, float(r0i), 0.0)
-                            _add_seg(x_w, x1, float(W), float(r1i))
+                needs_wrap = (up and r1i < r0i) or (not up and r1i > r0i)
+                if not needs_wrap:
+                    _add_seg(x0, x1, float(r0i), float(r1i))
                 else:
-                    # Ungefaltet: direkter linearer Weg
-                    _add_seg(x0, x1, float(r0), float(r1))
+                    visual_phase_wrap = True
+                    if up:
+                        # Weg: r0 → W (oben raus), dann 0 → r1
+                        span = (W - r0i) + r1i
+                        if span <= 0:
+                            _add_seg(x0, x1, float(r0i), float(r1i))
+                            return
+                        t_w = (W - r0i) / float(span)
+                        x_w = x0 + t_w * (x1 - x0)
+                        _add_seg(x0, x_w, float(r0i), float(W))
+                        _add_seg(x_w, x1, 0.0, float(r1i))
+                    else:
+                        # Weg: r0 → 0 (unten raus), dann W → r1
+                        span = r0i + (W - r1i)
+                        if span <= 0:
+                            _add_seg(x0, x1, float(r0i), float(r1i))
+                            return
+                        t_w = float(r0i) / float(span)
+                        x_w = x0 + t_w * (x1 - x0)
+                        _add_seg(x0, x_w, float(r0i), 0.0)
+                        _add_seg(x_w, x1, float(W), float(r1i))
 
             # Lead-in: horizontal vor erstem Punkt (nur kuerzestes Release)
             if first_release and n_min < float(n_min_pts):
