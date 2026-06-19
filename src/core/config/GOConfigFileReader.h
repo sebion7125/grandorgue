@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <map>
+#include <functional>
 
 class GOOpenedFile;
 

@@ -8,6 +8,8 @@
 #ifndef GOSOUNDSYSTEM_H
 #define GOSOUNDSYSTEM_H
 
+#include <functional>
+#include <map>
 #include <vector>
 
 #include <wx/string.h>
@@ -124,6 +126,9 @@ private:
   void StopAndDestroyEngine();
 
 public:
+  void WithOrganEngineQuiesced(const std::function<void()> &action);
+
+
   static void FillDeviceNamePattern(
     const GOSoundDevInfo &deviceInfo, GODeviceNamePattern &pattern);
 

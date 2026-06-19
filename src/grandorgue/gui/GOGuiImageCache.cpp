@@ -9,12 +9,20 @@
 
 #include <wx/intl.h>
 #include <wx/mstream.h>
+#include <wx/stopwatch.h>
 
 #include "files/GOOpenedFile.h"
 #include "loader/GOLoaderFilename.h"
 
 #include "GOBuffer.h"
 #include "GOGuiLog.h"
+#ifndef LOG_TIMING
+# define LOG_TIMING(...)
+#endif
+#ifndef LOG_GUI_GAP
+# define LOG_GUI_GAP(...)
+#endif
+#define GUI_BITMAP_TIMING 1
 #include "Images.h"
 
 #define BITMAP_LIST                                                            \
@@ -223,9 +231,13 @@ const wxImage *GOGuiImageCache::LoadImage(
   const wxString &filename, const wxString &maskName) {
   const wxImage *pImage = FindImage(filename, maskName);
 
+  #if GUI_BITMAP_TIMING
+    wxStopWatch swBmp;
+  #endif
+
   if (!pImage) {
     wxImage image, maskimage;
-
+  
     if (!LoadImageFromFile(filename, image))
       throw wxString::Format(
         _("Failed to open the graphic '%s'"), filename.c_str());
@@ -253,5 +265,14 @@ const wxImage *GOGuiImageCache::LoadImage(
     RegisterImage(filename, maskName, pNewImage);
     pImage = pNewImage;
   }
+
+  #if GUI_BITMAP_TIMING
+  long long ms = swBmp.Time();
+  // Log only relatively slow decodes to avoid spamming the log
+  if (ms > 120) {
+    LOG_GUI_GAP(wxString::Format("GUI.Bitmap.Load key=\"%s\" ms=%lld", filename.c_str(), ms));
+  }
+  #endif
+
   return pImage;
 }

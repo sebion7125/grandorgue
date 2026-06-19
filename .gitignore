@@ -1,5 +1,6 @@
 /bin/
 /build/
+**/build/
 /CPackConfig.cmake
 /CPackSourceConfig.cmake
 /ImportExecutables.cmake
@@ -27,10 +28,29 @@ Makefile
 nbproject/
 CLAUDE.md
 .DS_Store
-.idea/
+
+# Ignore editor/IDE caches and indexes
+.cache/
+.cache/clangd/
 .vscode/
+
+# Local Claude assistant settings
+.claude/settings.json
+.claude/settings.local.json
+*.idx
+*.log
+*.swp
+tags
+
+# Ignore common OS/editor files
+*.~
+*.tmp
+*.bak
+
+.idea/
 
 # eclipse
 .cproject
 .project
 .settings/
+repomix-output.xml

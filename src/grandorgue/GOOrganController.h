@@ -8,6 +8,7 @@
 #ifndef GOORGANCONTROLLER_H
 #define GOORGANCONTROLLER_H
 
+#include <atomic>
 #include <vector>
 
 #include <wx/filefn.h>
@@ -69,6 +70,9 @@ private:
   wxString m_SettingFilename;
   wxString m_ODFHash;
   bool m_Cacheable;
+  // Total number of release sections across all pipes, set after each load.
+  // Used as releaseCount in the LUT cache file header.
+  unsigned m_lutReleaseCount;
   GOSetter *m_setter;
   GODivisionalSetter *m_DivisionalSetter;
   GOAudioRecorder *m_AudioRecorder;
@@ -177,6 +181,16 @@ public:
   bool CachePresent() const { return wxFileExists(m_CacheFilename); }
   bool IsCacheable() const { return m_Cacheable; }
   bool UpdateCache(bool compress, GOProgressMonitor &monitor);
+  unsigned GetLutReleaseCount() const { return m_lutReleaseCount; }
+  const wxString &GetOdfHash() const { return m_ODFHash; }
+  wxString        GetLutCachePath() const;
+  unsigned EnumerateReleaseParseIndices();
+  bool GenerateLutCache(wxString &errorMsg, bool forceAll = false,
+                        std::atomic<unsigned> *p_progress = nullptr,
+                        std::atomic<bool>     *p_cancel   = nullptr);
+  void DeleteLutCache();
+  void ClearAllCachedLuts();
+  bool ApplyLutCacheNow();
   void DeleteCache();
   void DeleteSettings();
   void Abort();

@@ -109,6 +109,11 @@ private:
   void VelocityChanged(unsigned velocity, unsigned old_velocity) override;
 
 public:
+  // Override to allow identification via GOCacheObject* without dynamic_cast
+  // (private base class inheritance makes dynamic_cast from base unreliable).
+  GOSoundingPipe       *AsSoundingPipe()       override { return this; }
+  const GOSoundingPipe *AsSoundingPipe() const override { return this; }
+
   GOSoundingPipe(
     GOOrganModel *pOrganModel,
     GORank *rank,
@@ -126,6 +131,32 @@ public:
     const wxString &filename);
   void Load(GOConfigReader &cfg, const wxString &group, const wxString &prefix)
     override;
+
+  // ODF-based MIDI key number (the pressed key), not the sample's recorded pitch.
+  unsigned GetKeyMidiNumber() const { return m_MidiKeyNumber; }
+
+  // Assign sequential parse indices to all release sections of this pipe.
+  // Returns the next available index (startIndex + release count).
+  unsigned AssignReleaseParseIndices(unsigned startIndex) {
+    return m_SoundProvider.AssignReleaseParseIndices(startIndex);
+  }
+  void SetSkipCorrLutCompute(bool skip) {
+    m_SoundProvider.SetSkipCorrLutCompute(skip);
+  }
+  unsigned GetReleaseCount() const {
+    return m_SoundProvider.GetReleaseCount();
+  }
+  const GOSoundAudioSection *GetReleaseSection(unsigned i) const {
+    return m_SoundProvider.GetReleaseSection(i);
+  }
+  GOSoundProvider::LutResult
+  TryPermissiveLutForRelease(unsigned releaseIdx) const {
+    return m_SoundProvider.TryPermissiveLutForRelease(releaseIdx);
+  }
+  GOSoundProvider::LutResult
+  TryExhaustiveLutForRelease(unsigned releaseIdx) const {
+    return m_SoundProvider.TryExhaustiveLutForRelease(releaseIdx);
+  }
 };
 
 #endif

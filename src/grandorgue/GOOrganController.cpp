@@ -8,6 +8,9 @@
 #include "GOOrganController.h"
 
 #include <algorithm>
+#include <atomic>
+#include <math.h>
+#include <thread>
 
 #include <wx/filename.h>
 #include <wx/log.h>
@@ -67,6 +70,7 @@
 #include "model/GOTremulant.h"
 #include "sound/GOCrossfadeParam.h"
 #include "sound/GOSoundOrganEngine.h"
+#include "sound/playing/GOLutCacheFile.h"
 #include "sound/playing/GOSoundReleaseAlignTable.h"
 #include "temperaments/GOTemperament.h"
 #include "yaml/GOYamlModel.h"
@@ -103,6 +107,7 @@ GOOrganController::GOOrganController(GOConfig &config, bool isAppInitialized)
     m_config(config),
     m_FileStore(config),
     m_Cacheable(false),
+    m_lutReleaseCount(0),
     m_setter(0),
     m_AudioRecorder(NULL),
     m_MidiPlayer(NULL),
@@ -280,6 +285,22 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressMonitor &mo
     }
   }
 
+  // Read persisted release alignment mode for this organ (if present).
+  // Backwards compatibility: old CMB files without this entry default to Legacy.
+  {
+    const wxString ra_entry = cfg.ReadString(
+      CMBSetting, WX_ORGAN, wxT("ReleaseAlignMode"), false, wxEmptyString);
+    if (ra_entry.IsEmpty()) {
+      GOAudioParams::SetReleaseAlignMode(GOReleaseAlignMode::Legacy);
+    } else {
+      long ra = static_cast<long>(GOReleaseAlignMode::Legacy);
+      ra = cfg.ReadInteger(
+        CMBSetting, WX_ORGAN, wxT("ReleaseAlignMode"), 0, 10, false, ra);
+      GOAudioParams::SetReleaseAlignMode(static_cast<GOReleaseAlignMode>(ra));
+    }
+  }
+
+
   // It must be created before GOOrganModel::Load because lots of objects
   // reference to it
   GOOrganModel::SetCombinationController(m_setter);
@@ -398,6 +419,7 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressMonitor &mo
         ThrowGOLoadAborted(__func__);
     }
 
+
     __tim_panels_ms = __go_panelsload_sw.Time();
     LOG_TIMING(wxString::Format("GUI.Panels.Load total_ms=%ld panels=%u", __go_panelsload_sw.Time(), (unsigned)m_panels.size()));
   }
@@ -459,6 +481,204 @@ wxString GOOrganController::GenerateCacheFileName() {
   return m_config.OrganCachePath() + wxFileName::GetPathSeparator()
     + GOStdFileName::composeCacheFileName(GetOrganHash(), m_config.Preset());
 }
+
+// Shared body for Phase 3 (Load) and Phase 6 (ApplyLutCacheNow).
+static void ApplyLutReaderToOrgan(
+  const GOLutCacheReader             &reader,
+  const std::vector<GOCacheObject *> &cacheObjects) {
+  const std::vector<int32_t>    &releaseMap = reader.GetReleaseMap();
+  const std::vector<GOLutEntry> &lutEntries = reader.GetLuts();
+  for (GOCacheObject *obj : cacheObjects) {
+    GOSoundingPipe *pipe = obj->AsSoundingPipe();
+    if (!pipe) continue;
+    for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
+      const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
+      if (!sec) continue;
+      const unsigned parseIdx = sec->GetReleaseParseIndex();
+      if (parseIdx >= (unsigned)releaseMap.size()) continue;
+      const int32_t lutIdx = releaseMap[parseIdx];
+      if (lutIdx < 0) continue;
+      GOSoundReleaseAlignTable *aligner = sec->GetReleaseAligner();
+      if (!aligner) continue;
+      const GOLutEntry &entry = lutEntries[(unsigned)lutIdx];
+      std::vector<GOSoundReleaseAlignTable::CorrPoint> pts;
+      pts.reserve(entry.points.size());
+      for (const GOLutPoint &pt : entry.points)
+        pts.push_back({pt.loop_pos, pt.best_r, pt.flags, pt._pad});
+      aligner->OverrideCorrLutsFromCache(
+        std::move(pts), entry.period_samples, entry.period_float);
+    }
+  }
+}
+
+bool GOOrganController::ApplyLutCacheNow() {
+  const wxString path
+    = GOLutCacheWriter::MakePath(m_config.OrganCachePath(), GetOrganHash());
+  GOLutCacheReader reader;
+  if (!reader.Load(path, m_ODFHash, m_lutReleaseCount))
+    return false;
+  ApplyLutReaderToOrgan(reader, GetCacheObjects());
+  return true;
+}
+
+wxString GOOrganController::GetLutCachePath() const {
+  return GOLutCacheWriter::MakePath(m_config.OrganCachePath(), m_hash);
+}
+
+void GOOrganController::ClearAllCachedLuts() {
+  for (GOCacheObject *obj : GetCacheObjects()) {
+    GOSoundingPipe *pipe = obj->AsSoundingPipe();
+    if (!pipe) continue;
+    for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
+      const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
+      if (!sec) continue;
+      GOSoundReleaseAlignTable *aligner = sec->GetReleaseAligner();
+      if (aligner)
+        aligner->ClearCachedLut();
+    }
+  }
+}
+
+void GOOrganController::DeleteLutCache() {
+  const wxString path
+    = GOLutCacheWriter::MakePath(m_config.OrganCachePath(), GetOrganHash());
+  if (wxFileExists(path))
+    wxRemoveFile(path);
+}
+
+bool GOOrganController::GenerateLutCache(wxString &errorMsg, bool forceAll,
+    std::atomic<unsigned> *p_progress, std::atomic<bool> *p_cancel) {
+  EnumerateReleaseParseIndices();
+
+  if (m_lutReleaseCount == 0) {
+    if (GetCacheObjects().empty()) {
+      errorMsg = _("No organ loaded. Load an organ first.");
+    } else {
+      unsigned pipeCount = 0;
+      for (const GOCacheObject *obj : GetCacheObjects())
+        if (obj->AsSoundingPipe()) pipeCount++;
+      errorMsg = wxString::Format(
+        _("No release audio sections found (%u sounding pipes checked).\n"
+          "The LUT cache requires loop-based samples (WAV files with loop and\n"
+          "release markers).  Simple single-file or percussive pipes are not\n"
+          "supported.\n\n"
+          "If this organ should have looped releases, try deleting the\n"
+          ".gorgan cache (File > Delete Cache) and reloading."),
+        pipeCount);
+    }
+    return false;
+  }
+
+  // Build flat work-item list (preserves ODF/parse-index order)
+  struct WorkItem {
+    GOSoundingPipe          *pipe;
+    unsigned                 releaseIdx;
+    unsigned                 parseIdx;
+    const GOSoundAudioSection *sec;
+  };
+  std::vector<WorkItem> items;
+  items.reserve(m_lutReleaseCount);
+  for (GOCacheObject *obj : GetCacheObjects()) {
+    GOSoundingPipe *pipe = obj->AsSoundingPipe();
+    if (!pipe) continue;
+    for (unsigned i = 0; i < pipe->GetReleaseCount(); i++) {
+      const GOSoundAudioSection *sec = pipe->GetReleaseSection(i);
+      if (!sec) continue;
+      const unsigned idx = sec->GetReleaseParseIndex();
+      if (idx < m_lutReleaseCount)
+        items.push_back({pipe, i, idx, sec});
+    }
+  }
+
+  // Pre-allocate per-release output (indexed by parseIdx; empty = not cached).
+  // Threads write to disjoint index ranges — no mutex needed.
+  std::vector<GOLutEntry> tmpLuts(m_lutReleaseCount);
+
+  const unsigned nThreads = std::max(
+    1u, std::min((unsigned)std::thread::hardware_concurrency(),
+                 (unsigned)items.size()));
+  std::vector<std::thread> threads;
+  threads.reserve(nThreads);
+
+  for (unsigned t = 0; t < nThreads; t++) {
+    const unsigned start = t * (unsigned)items.size() / nThreads;
+    const unsigned end   = (t + 1) * (unsigned)items.size() / nThreads;
+
+    threads.emplace_back([&, start, end, forceAll]() {
+      for (unsigned i = start; i < end; i++) {
+        if (p_cancel && p_cancel->load(std::memory_order_relaxed)) break;
+
+        const WorkItem &item = items[i];
+        const GOSoundReleaseAlignTable *aligner
+          = item.sec->GetReleaseAligner();
+
+        GOLutEntry entry;
+        if (aligner && aligner->HasCorrLut() && !forceAll) {
+          const auto *p = aligner->GetFirstLutPoints();
+          if (p) {
+            entry.period_samples = aligner->GetPeriodSamples();
+            entry.period_float   = aligner->GetPeriodFloat();
+            entry.points.reserve(p->size());
+            for (const auto &cp : *p)
+              entry.points.push_back({cp.loop_pos, cp.best_r});
+          }
+        } else {
+          auto res = item.pipe->TryExhaustiveLutForRelease(item.releaseIdx);
+          entry.period_samples = res.period_samples;
+          entry.period_float   = res.period_float;
+          entry.points.reserve(res.points.size());
+          for (const auto &cp : res.points)
+            entry.points.push_back({cp.loop_pos, cp.best_r});
+        }
+
+        if (!entry.points.empty())
+          tmpLuts[item.parseIdx] = std::move(entry);
+
+        if (p_progress)
+          p_progress->fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+  }
+
+  for (auto &t : threads) t.join();
+
+  if (p_cancel && p_cancel->load()) {
+    errorMsg = _("Generation cancelled.");
+    return false;
+  }
+
+  std::vector<int32_t>    releaseMap(m_lutReleaseCount, -1);
+  std::vector<GOLutEntry> luts;
+  for (unsigned i = 0; i < m_lutReleaseCount; i++) {
+    if (!tmpLuts[i].points.empty()) {
+      releaseMap[i] = (int32_t)luts.size();
+      luts.push_back(std::move(tmpLuts[i]));
+    }
+  }
+
+  const wxString path
+    = GOLutCacheWriter::MakePath(m_config.OrganCachePath(), GetOrganHash());
+
+  GOLutGeneratorCriteria criteria;
+  if (!GOLutCacheWriter::Write(
+        path, m_ODFHash, m_lutReleaseCount, releaseMap, luts, criteria)) {
+    errorMsg = wxString::Format(_("Failed to write LUT cache to %s"), path);
+    return false;
+  }
+  return true;
+}
+
+unsigned GOOrganController::EnumerateReleaseParseIndices() {
+  unsigned counter = 0;
+  for (GOCacheObject *obj : GetCacheObjects()) {
+    GOSoundingPipe *pipe = obj->AsSoundingPipe();
+    if (pipe)
+      counter = pipe->AssignReleaseParseIndices(counter);
+  }
+  m_lutReleaseCount = counter;
+  return counter;
+}
+
 
  
 wxString GOOrganController::Load(
@@ -689,6 +909,20 @@ wxString GOOrganController::Load(
         sw_phase.Start();
 #endif
 
+        // Pre-check: if a valid LUT cache exists, mark all pipes to skip
+        // ComputeCorrelationLut() during WAV loading — Phase 3 will apply the
+        // cached values instead, saving significant load time.
+        {
+          const wxString lutPath = GOLutCacheWriter::MakePath(
+            m_config.OrganCachePath(), GetOrganHash());
+          if (GOLutCacheReader::PeekHeader(lutPath, m_ODFHash)) {
+            for (GOCacheObject *obj : GetCacheObjects()) {
+              GOSoundingPipe *pipe = obj->AsSoundingPipe();
+              if (pipe) pipe->SetSkipCorrLutCompute(true);
+            }
+          }
+        }
+
         /* Figure out list of pipes to load */
 #ifdef GO_PROFILE_ODFLOAD
         LOG_TIMING("Timing: Preparing audio objects…");
@@ -828,6 +1062,8 @@ wxString GOOrganController::Load(
         }
 
           if (!cache_ok) {
+            GOAudioParams::SetCorrLutDownsampling(
+              m_config.CorrLutDownsampling());
             GOLoadWorker thisWorker(m_FileStore, m_pool, objectDistributor);
             ptr_vector<GOLoadThread> threads;
 
@@ -895,8 +1131,25 @@ wxString GOOrganController::Load(
           // Despite a possible exception automatic calling ~GOLoadThread from
           // ~ptr_vector stops all additional worker threads
         }
-      __tim_cache_ms = __sw_cache.Time();      
-      
+      __tim_cache_ms = __sw_cache.Time();
+
+      // Phase 3: Apply pre-computed LUT cache if available.
+      // Silently ignored on any mismatch (wrong ODF, version, count).
+      // Safe: PreparePlayback has not been called yet, no audio thread active.
+      {
+        const wxString lutPath = GOLutCacheWriter::MakePath(
+          m_config.OrganCachePath(), GetOrganHash());
+        if (wxFileExists(lutPath)) {
+          EnumerateReleaseParseIndices();
+          GOLutCacheReader lutReader;
+          if (lutReader.Load(lutPath, m_ODFHash, m_lutReleaseCount))
+            ApplyLutReaderToOrgan(lutReader, GetCacheObjects());
+        } else {
+          EnumerateReleaseParseIndices();
+        }
+      }
+
+
     } catch (const GOOutOfMemory &e) {
         GOMessageBox(
           _("Out of memory - only parts of the organ are loaded. Please "
@@ -1128,6 +1381,13 @@ bool GOOrganController::Export(const wxString &cmb) {
     const long cf = static_cast<long>(GOAudioParams::GetCrossfadeMode());
     cfg.WriteInteger(WX_ORGAN, wxT("CrossfadeMode"), cf);
   }
+
+  // Persist current release alignment mode for this organ
+  {
+    const long ra = static_cast<long>(GOAudioParams::GetReleaseAlignMode());
+    cfg.WriteInteger(WX_ORGAN, wxT("ReleaseAlignMode"), ra);
+  }
+
 
   GOEventDistributor::Save(cfg);
   GetDialogSizeSet().Save(cfg);

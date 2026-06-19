@@ -295,7 +295,13 @@ void GOSoundProviderWave::LoadFromOneFile(
 
     if (
       is_release
-      && (!is_attack || (wave.GetNbLoops() > 0 && wave.HasReleaseMarker() && !percussive)))
+      && (!is_attack || (wave.GetNbLoops() > 0 && wave.HasReleaseMarker() && !percussive))) {
+      // UINT_MAX = sentinel "not set in ODF" → fall back to MIDI-key default.
+      // Explicit 0 in ODF = "no crossfade / traktur noise" → respect it (0).
+      const unsigned effectiveCrossfade
+        = (releaseCrossfadeLength == (unsigned)-1u)
+          ? midiKeyCrossfadeLength     // not specified → use key-based default
+          : releaseCrossfadeLength;    // explicit (including 0 = no crossfade)
       AddReleaseSection(
         pool,
         loaderFilename,
@@ -308,8 +314,8 @@ void GOSoundProviderWave::LoadFromOneFile(
         bits_per_sample,
         channels,
         compress,
-        releaseCrossfadeLength ? releaseCrossfadeLength
-                               : midiKeyCrossfadeLength);
+        effectiveCrossfade);
+    }
   } catch (GOOutOfMemory e) {
     throw e;
   } catch (const wxString &error) {

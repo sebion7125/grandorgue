@@ -7,6 +7,10 @@
 
 #include "GOSoundProvider.h"
 
+#include "../model/GOSoundingPipe.h"
+
+#include <cmath>
+
 #include <wx/intl.h>
 
 #include "loader/cache/GOCache.h"
@@ -29,11 +33,15 @@
 void GOSoundProvider::UpdateCacheHash(GOHash &hash) {
   hash.Update(sizeof(AttackSelector));
   hash.Update(sizeof(ReleaseSelector));
+  // Bump when the cache format changes (v5: float period T for phase accuracy)
+  static const uint8_t CACHE_FORMAT_VERSION = 6;
+  hash.Update(CACHE_FORMAT_VERSION);
 }
 
 GOSoundProvider::GOSoundProvider()
   : m_MidiKeyNumber(0),
     m_MidiPitchFract(0),
+    m_HarmonicNumber(8),
     m_Tuning(1),
     m_ToneBalanceValue(0),
     m_IsWaveTremulantActive(BOOL3_FALSE),
@@ -92,6 +100,8 @@ bool GOSoundProvider::LoadCache(GOMemoryPool &pool, GOCache &cache) {
       return false;
   }
 
+  // Restore per-attack LUT pointers (lost across cache serialisation).
+  RebuildAlignmentPointers();
   return true;
 }
 
@@ -127,7 +137,7 @@ bool GOSoundProvider::SaveCache(GOCacheWriter &cache) const {
   return true;
 }
 
-void GOSoundProvider::ComputeReleaseAlignmentInfo() {
+void GOSoundProvider::RebuildAlignmentPointers() {
   std::vector<const GOSoundAudioSection *> sections;
   for (int8_t k = BOOL3_MIN; k <= BOOL3_MAX; ++k) {
     sections.clear();
@@ -136,7 +146,71 @@ void GOSoundProvider::ComputeReleaseAlignmentInfo() {
         sections.push_back(m_Attack[i]);
     for (unsigned i = 0; i < m_Release.size(); i++)
       if (m_ReleaseInfo[i].m_WaveTremulantStateFor == k)
-        m_Release[i]->SetupStreamAlignment(sections, 0);
+        m_Release[i]->AssignAttackLutPointers(sections);
+  }
+}
+
+float GOSoundProvider::ComputeSampleFreqHz() const {
+  // Returns the fundamental frequency of this pipe's recorded audio.
+  //
+  // For aliquot/mixture stops the smpl-chunk MIDI note already encodes the
+  // sounding pitch (stop transposition baked in), so HarmonicNumber/8 must
+  // NOT be applied again — that would double-count the transposition.
+  // Detection: if smpl_midi != key_midi the sample is transposed → use smpl.
+  //
+  // Fallback when GetOwnerPipe() is unavailable: legacy formula unchanged.
+  if (m_OwnerPipe != nullptr && m_MidiKeyNumber > 0) {
+    const unsigned keyMidi = m_OwnerPipe->GetKeyMidiNumber();
+    if (m_MidiKeyNumber != keyMidi) {
+      return 440.f
+        * std::pow(2.f, ((float)m_MidiKeyNumber + m_MidiPitchFract / 100.f - 69.f)
+                          / 12.f);
+    } else {
+      return 440.f
+        * std::pow(2.f, ((float)keyMidi + m_MidiPitchFract / 100.f - 69.f)
+                          / 12.f)
+        * ((float)m_HarmonicNumber / 8.f);
+    }
+  }
+  return 440.f
+    * std::pow(2.f, ((float)m_MidiKeyNumber + m_MidiPitchFract / 100.f - 69.f)
+                      / 12.f)
+    * ((float)m_HarmonicNumber / 8.f);
+}
+
+void GOSoundProvider::ComputeReleaseAlignmentInfo() {
+  const float sample_freq_hz = ComputeSampleFreqHz();
+
+  std::vector<const GOSoundAudioSection *> sections;
+  for (int8_t k = BOOL3_MIN; k <= BOOL3_MAX; ++k) {
+    sections.clear();
+    for (unsigned i = 0; i < m_Attack.size(); i++)
+      if (m_AttackInfo[i].m_WaveTremulantStateFor == k)
+        sections.push_back(m_Attack[i]);
+    for (unsigned i = 0; i < m_Release.size(); i++) {
+      if (m_ReleaseInfo[i].m_WaveTremulantStateFor != k)
+        continue;
+      const unsigned my_max = m_ReleaseInfo[i].max_playback_time;
+      // min_ms = highest max_playback_time in this group that is strictly below my_max.
+      // This works regardless of release sort order.
+      unsigned min_ms = 0;
+      for (unsigned j = 0; j < m_Release.size(); j++) {
+        if (j == i || m_ReleaseInfo[j].m_WaveTremulantStateFor != k)
+          continue;
+        const unsigned their_max = m_ReleaseInfo[j].max_playback_time;
+        if (their_max < my_max && their_max > min_ms)
+          min_ms = their_max;
+      }
+      // max_key_press_ms=0 signals "no limit" (unlimited release).
+      const unsigned max_ms = (my_max == (unsigned)-1) ? 0u : my_max;
+      m_Release[i]->SetupStreamAlignment(
+        sections, 0, sample_freq_hz, m_HarmonicNumber, min_ms, max_ms,
+        m_skipCorrLutCompute
+#if __has_include("sound/playing/GOLogReleaseAlignEnable.h")
+        , m_label.empty() ? nullptr : m_label.c_str()
+#endif
+      );
+    }
 
     sections.clear();
     for (unsigned i = 0; i < m_Attack.size(); i++)
@@ -144,7 +218,7 @@ void GOSoundProvider::ComputeReleaseAlignmentInfo() {
         sections.push_back(m_Attack[i]);
     for (unsigned i = 0; i < m_Attack.size(); i++)
       if (m_AttackInfo[i].m_WaveTremulantStateFor == k)
-        m_Attack[i]->SetupStreamAlignment(sections, 1);
+        m_Attack[i]->SetupStreamAlignment(sections, 1, sample_freq_hz, m_HarmonicNumber);
   }
 
   for (unsigned i = 1; i < m_Attack.size(); i++)
@@ -313,4 +387,98 @@ GOSampleStatistic GOSoundProvider::GetStatistic() {
   for (unsigned i = 0; i < m_Release.size(); i++)
     stat.Cumulate(m_Release[i]->GetStatistic());
   return stat;
+}
+
+unsigned GOSoundProvider::AssignReleaseParseIndices(unsigned startIndex) {
+  for (unsigned i = 0; i < m_Release.size(); i++)
+    m_Release[i]->SetReleaseParseIndex(startIndex + i);
+  return startIndex + (unsigned)m_Release.size();
+}
+
+GOSoundProvider::LutResult
+GOSoundProvider::TryPermissiveLutForRelease(unsigned releaseIdx) const {
+  if (releaseIdx >= m_Release.size()) return {};
+
+  const GOSoundAudioSection *rel = m_Release[releaseIdx];
+  const unsigned crossfade_len = rel->GetReleaseCrossfadeLength();
+  if (crossfade_len < 2) return {};
+
+  const unsigned sample_rate = rel->GetSampleRate();
+  const float sample_freq_hz = ComputeSampleFreqHz();
+
+  const GOBool3 k = m_ReleaseInfo[releaseIdx].m_WaveTremulantStateFor;
+
+  // Collect attack sections for this tremulant state (same logic as
+  // ComputeReleaseAlignmentInfo, same grouping).
+  std::vector<const GOSoundAudioSection *> attacks;
+  for (unsigned i = 0; i < m_Attack.size(); i++)
+    if (m_AttackInfo[i].m_WaveTremulantStateFor == k)
+      attacks.push_back(m_Attack[i]);
+  if (attacks.empty()) return {};
+
+  // Determine key-press time window for this release.
+  const unsigned my_max = m_ReleaseInfo[releaseIdx].max_playback_time;
+  unsigned min_ms = 0;
+  for (unsigned j = 0; j < m_Release.size(); j++) {
+    if (j == releaseIdx || m_ReleaseInfo[j].m_WaveTremulantStateFor != k)
+      continue;
+    const unsigned their_max = m_ReleaseInfo[j].max_playback_time;
+    if (their_max < my_max && their_max > min_ms)
+      min_ms = their_max;
+  }
+  const unsigned max_ms = (my_max == (unsigned)-1) ? 0u : my_max;
+
+  // Compute on a temporary aligner — does not touch the live m_ReleaseAligner.
+  GOSoundReleaseAlignTable tmp;
+  for (const GOSoundAudioSection *att : attacks)
+    tmp.ComputeCorrelationLut(
+      *att, *rel, crossfade_len, sample_rate, sample_freq_hz,
+      m_HarmonicNumber, min_ms, max_ms, /*permissive=*/true);
+
+  const auto *pts = tmp.GetFirstLutPoints();
+  if (!pts || pts->empty()) return {};
+  return {*pts, tmp.GetPeriodSamples(), tmp.GetPeriodFloat()};
+}
+
+GOSoundProvider::LutResult
+GOSoundProvider::TryExhaustiveLutForRelease(unsigned releaseIdx) const {
+  if (releaseIdx >= m_Release.size()) return {};
+
+  const GOSoundAudioSection *rel = m_Release[releaseIdx];
+  const unsigned crossfade_len = rel->GetReleaseCrossfadeLength();
+  if (crossfade_len < 2) return {};
+
+  const unsigned sample_rate = rel->GetSampleRate();
+  const float sample_freq_hz = ComputeSampleFreqHz();
+
+  const GOBool3 k = m_ReleaseInfo[releaseIdx].m_WaveTremulantStateFor;
+
+  std::vector<const GOSoundAudioSection *> attacks;
+  for (unsigned i = 0; i < m_Attack.size(); i++)
+    if (m_AttackInfo[i].m_WaveTremulantStateFor == k)
+      attacks.push_back(m_Attack[i]);
+  if (attacks.empty()) return {};
+
+  const unsigned my_max = m_ReleaseInfo[releaseIdx].max_playback_time;
+  unsigned min_ms = 0;
+  for (unsigned j = 0; j < m_Release.size(); j++) {
+    if (j == releaseIdx || m_ReleaseInfo[j].m_WaveTremulantStateFor != k)
+      continue;
+    const unsigned their_max = m_ReleaseInfo[j].max_playback_time;
+    if (their_max < my_max && their_max > min_ms)
+      min_ms = their_max;
+  }
+  const unsigned max_ms = (my_max == (unsigned)-1) ? 0u : my_max;
+
+  // exhaustive=true: full scan of every period position, no cap.
+  GOSoundReleaseAlignTable tmp;
+  for (const GOSoundAudioSection *att : attacks)
+    tmp.ComputeCorrelationLut(
+      *att, *rel, crossfade_len, sample_rate, sample_freq_hz,
+      m_HarmonicNumber, min_ms, max_ms,
+      /*permissive=*/true, /*exhaustive=*/true);
+
+  const auto *pts = tmp.GetFirstLutPoints();
+  if (!pts || pts->empty()) return {};
+  return {*pts, tmp.GetPeriodSamples(), tmp.GetPeriodFloat()};
 }

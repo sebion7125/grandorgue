@@ -10,12 +10,15 @@
 #include <wx/file.h>
 #include <wx/intl.h>
 #include <wx/log.h>
+#include <cstring>
 
 #include "files/GOOpenedFile.h"
 
 #include "GOWavPack.h"
 #include "GOWavPackWriter.h"
 #include "GOWaveTypes.h"
+
+//#define GO_WAVE_FASTCOPY
 
 void GOWave::SetInvalid() {
   m_SampleData.free();
@@ -379,6 +382,41 @@ void GOWave::ReadSamples(
 
   const uint8_t *input = m_SampleData.get();
   uint8_t *output = (uint8_t *)dest_buffer;
+
+  // Fast-path: if no repacking/merging is required and the target format matches
+  // the on-disk sample format, avoid per-sample conversion and copy raw data.
+  // Disabled by default; enable with -DGO_WAVE_FASTCOPY after validation.
+#ifdef GO_WAVE_FASTCOPY
+  // Conditions:
+  //  - same sample rate, already checked above
+  //  - no channel selection/merge (select_channel == 0) and return_channels == m_Channels
+  //  - not WavPack-packed (m_isPacked == false)
+  //  - byte width matches the requested SAMPLE_FORMAT
+  if (!m_isPacked && select_channel == 0 && (unsigned)return_channels == m_Channels) {
+    switch (read_format) {
+    case SF_SIGNEDSHORT_16:
+      if (m_BytesPerSample == 2) {
+        std::memcpy(output, input, m_SampleData.GetSize());
+        return;
+      }
+      break;
+    case SF_SIGNEDINT24_24:
+      if (m_BytesPerSample == 3) {
+        std::memcpy(output, input, m_SampleData.GetSize());
+        return;
+      }
+      break;
+    case SF_IEEE_FLOAT:
+      if (m_BytesPerSample == 4) {
+        std::memcpy(output, input, m_SampleData.GetSize());
+        return;
+      }
+      break;
+    default:
+      break;
+    }
+  }
+#endif
 
   unsigned len = m_Channels * GetLength() / merge_count;
   for (unsigned i = 0; i < len; i++) {

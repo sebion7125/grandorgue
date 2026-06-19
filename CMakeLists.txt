@@ -76,7 +76,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 if(NOT DEFINED BUILD_VERSION)
-  set(BUILD_VERSION "0.local")
+  set(BUILD_VERSION "0.XFadeDemo")
 elseif(NOT BUILD_VERSION)
   set(BUILD_VERSION "0.0")
 endif()

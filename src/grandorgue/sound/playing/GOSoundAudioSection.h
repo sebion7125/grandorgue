@@ -94,6 +94,11 @@ private:
   GOSoundReleaseAlignTable *m_ReleaseAligner;
   unsigned m_ReleaseStartSegment;
 
+  // Sequential index assigned across all releases of all pipes after loading.
+  // Used to map GOLutCacheFile releaseMap entries to this section.
+  // UINT_MAX = attack section or not yet indexed.
+  unsigned m_releaseParseIndex;
+
   /* Number of significant bits in the decoded sample data */
   unsigned m_SampleFracBits;
 
@@ -116,6 +121,10 @@ private:
   int m_MaxAbsAmplitude;
   int m_MaxAbsDerivative;
   unsigned m_ReleaseCrossfadeLength; // in ms
+
+  // Basename of the source file (set in Setup, used for CSV logging).
+  // Fixed-size to avoid pulling <string> into this header.
+  char m_loaderBasename[256];
 
   void ClearData();
 
@@ -202,6 +211,42 @@ public:
 
   inline unsigned GetLength() const { return m_SampleCount; }
 
+  // Returns the basename of the source WAV file (empty string if not set).
+  const char *GetLoaderBasename() const { return m_loaderBasename; }
+
+  // Returns the sample offset of the first sustain loop, or 0 if no loop.
+  inline unsigned GetLoopStart() const {
+    return (m_StartSegments.size() > 1) ? m_StartSegments[1].start_offset : 0;
+  }
+
+  // Returns the latest loop-end sample position across all sustain loops,
+  // or 0 if no sustain loops exist.
+  // end_seg.end_pos = loop.m_EndPosition + 1 (exclusive), so end = end_pos - 1.
+  // next_start_segment_index >= 0 identifies loop ends (vs. release end = -1).
+  inline unsigned GetLatestLoopEnd() const {
+    unsigned latest = 0;
+    for (const auto &seg : m_EndSegments)
+      if (seg.next_start_segment_index >= 0 && seg.end_pos > 0)
+        latest = std::max(latest, seg.end_pos - 1);
+    return latest;
+  }
+
+  // Returns the sample position of the first sustain loop end (inclusive, 0-based),
+  // matching Python's loops[0][1] from the SMPL chunk.
+  // Finds the EndSegment whose next_start_segment_index == 1
+  // (= m_StartSegments[1], the first loop start).
+  // Falls back to GetLatestLoopEnd() for single-loop pipes or unusual orderings.
+  inline unsigned GetFirstLoopEnd() const {
+    for (const auto &seg : m_EndSegments)
+      if (seg.next_start_segment_index == 1 && seg.end_pos > 0)
+        return seg.end_pos - 1;
+    return GetLatestLoopEnd();
+  }
+
+  inline unsigned GetEndSegmentCount() const {
+    return (unsigned)m_EndSegments.size();
+  }
+
   unsigned GetReleaseCrossfadeLength() const {
     return m_ReleaseCrossfadeLength;
   }
@@ -272,9 +317,24 @@ public:
 
   inline bool SupportsStreamAlignment() const { return (m_ReleaseAligner); }
 
+  void     SetReleaseParseIndex(unsigned idx) { m_releaseParseIndex = idx; }
+  unsigned GetReleaseParseIndex() const { return m_releaseParseIndex; }
+
   void SetupStreamAlignment(
     const std::vector<const GOSoundAudioSection *> &joinables,
-    unsigned start_index);
+    unsigned start_index,
+    float    sample_freq_hz    = 440.f,
+    unsigned harmonic_number   = 8,
+    unsigned min_key_press_ms  = 0,
+    unsigned max_key_press_ms  = 0,
+    bool     skipCorrLut       = false
+#if __has_include("GOLogReleaseAlignEnable.h")
+    , const char *label        = nullptr
+#endif
+    );
+
+  void AssignAttackLutPointers(
+    const std::vector<const GOSoundAudioSection *> &attacks);
 
   GOSampleStatistic GetStatistic();
 };

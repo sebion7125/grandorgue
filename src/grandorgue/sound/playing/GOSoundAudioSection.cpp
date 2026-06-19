@@ -7,6 +7,7 @@
 
 #include "GOSoundAudioSection.h"
 
+#include <wx/filename.h>
 #include <wx/intl.h>
 #include <wx/log.h>
 
@@ -39,11 +40,13 @@ GOSoundAudioSection::GOSoundAudioSection(GOMemoryPool &pool)
   : m_data(NULL),
     m_ReleaseAligner(NULL),
     m_ReleaseStartSegment(0),
+    m_releaseParseIndex((unsigned)-1),
     m_Pool(pool) {
   ClearData();
 }
 
 void GOSoundAudioSection::ClearData() {
+  m_loaderBasename[0] = '\0';
   m_AllocSize = 0;
   m_SampleCount = 0;
   m_SampleRate = 0;
@@ -353,6 +356,18 @@ void GOSoundAudioSection::Setup(
   m_BitsPerSample = wave_bits_per_sample(pcm_data_format);
   compress = (compress) && (m_BitsPerSample > 8);
 
+  // Store the source basename for attack-variant identification in CSV logging.
+  m_loaderBasename[0] = '\0';
+  if (pLoaderFilename) {
+    wxFileName fn(pLoaderFilename->GetPath());
+    fn.SetPath(wxEmptyString);  // keep only name+ext
+    strncpy(
+      m_loaderBasename,
+      fn.GetFullName().utf8_str(),
+      sizeof(m_loaderBasename) - 1);
+    m_loaderBasename[sizeof(m_loaderBasename) - 1] = '\0';
+  }
+
   unsigned fade_len = loopCrossfadeLength * pcm_data_sample_rate / 1000;
 
   m_ReleaseCrossfadeLength = releaseCrossfadeLength;
@@ -586,9 +601,24 @@ void GOSoundAudioSection::Compress(bool format16) {
     throw GOOutOfMemory();
 }
 
+void GOSoundAudioSection::AssignAttackLutPointers(
+  const std::vector<const GOSoundAudioSection *> &attacks) {
+  if (m_ReleaseAligner)
+    m_ReleaseAligner->AssignAttackPointers(attacks);
+}
+
 void GOSoundAudioSection::SetupStreamAlignment(
   const std::vector<const GOSoundAudioSection *> &joinables,
-  unsigned start_index) {
+  unsigned start_index,
+  float    sample_freq_hz,
+  unsigned harmonic_number,
+  unsigned min_key_press_ms,
+  unsigned max_key_press_ms,
+  bool     skipCorrLut
+#if __has_include("GOLogReleaseAlignEnable.h")
+  , const char *label
+#endif
+  ) {
   if (m_ReleaseAligner) {
     delete m_ReleaseAligner;
     m_ReleaseAligner = NULL;
@@ -616,6 +646,24 @@ void GOSoundAudioSection::SetupStreamAlignment(
       max_derivative,
       m_SampleRate,
       m_StartSegments[m_ReleaseStartSegment].start_offset);
+
+    if (start_index == 0 && !joinables.empty() && m_ReleaseCrossfadeLength > 0) {
+      if (!skipCorrLut) {
+        unsigned crossfade_samples = m_ReleaseCrossfadeLength * m_SampleRate / 1000;
+        for (const GOSoundAudioSection *pAttack : joinables)
+          m_ReleaseAligner->ComputeCorrelationLut(
+            *pAttack, *this, crossfade_samples, m_SampleRate, sample_freq_hz,
+            harmonic_number, min_key_press_ms, max_key_press_ms
+#if __has_include("GOLogReleaseAlignEnable.h")
+            , false, false, label
+#endif
+          );
+      } else {
+        // LUT cache will be applied after loading — just set the period so
+        // that OverrideCorrLutsFromCache (which guards on period != 0) works.
+        m_ReleaseAligner->InitPeriodFromFormula(m_SampleRate, sample_freq_hz);
+      }
+    }
   }
 }
 

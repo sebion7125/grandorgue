@@ -34,6 +34,7 @@
 #include "files/GOStdFileName.h"
 #include "gui/GOGuiApp.h"
 #include "gui/GOGuiOrgan.h"
+#include "gui/dialogs/GOLutCacheDlg.h"
 #include "gui/dialogs/GONewReleaseDialog.h"
 #include "gui/dialogs/GOProgressDialog.h"
 #include "gui/dialogs/GOPropertiesDialog.h"
@@ -94,6 +95,11 @@ EVT_MENU(ID_AUDIO_PANIC, GOAppWindow::OnAudioPanic)
 EVT_MENU(ID_AUDIO_MEMSET, GOAppWindow::OnAudioMemset)
 EVT_MENU(ID_AUDIO_STATE, GOAppWindow::OnAudioState)
 EVT_MENU_RANGE(ID_Crossfade_Linear, ID_Crossfade_Custom, GOAppWindow::OnSetCrossfade)
+EVT_MENU_RANGE(ID_ReleaseAlign_Legacy, ID_ReleaseAlign_Correlation, GOAppWindow::OnSetReleaseAlign)
+EVT_MENU(ID_LUT_CACHE_GENERATE, GOAppWindow::OnLutCacheGenerate)
+EVT_MENU(ID_LUT_CACHE_DELETE,   GOAppWindow::OnLutCacheDelete)
+EVT_UPDATE_UI(ID_LUT_CACHE_GENERATE, GOAppWindow::OnUpdateLutCache)
+EVT_UPDATE_UI(ID_LUT_CACHE_DELETE,   GOAppWindow::OnUpdateLutCache)
 EVT_MENU(ID_SETTINGS, GOAppWindow::OnSettings)
 EVT_MENU(ID_MIDI_LOAD, GOAppWindow::OnMidiLoad)
 EVT_MENU(wxID_HELP, GOAppWindow::OnHelp)
@@ -273,6 +279,27 @@ GOAppWindow::GOAppWindow(
   m_crossfade_menu->AppendRadioItem(ID_Crossfade_Custom,  _("Custom (Placeholder)\tF12"));
   m_audio_menu->AppendSubMenu(m_crossfade_menu, _("&Crossfade"));
 
+  m_releasealign_menu = new wxMenu;
+  m_releasealign_menu->AppendRadioItem(
+    ID_ReleaseAlign_Legacy,      _("Legacy (instantaneous values)\tF2"));
+  m_releasealign_menu->AppendRadioItem(
+    ID_ReleaseAlign_Correlation, _("Correlation (new)\tF3"));
+  m_releasealign_menu->AppendSeparator();
+  m_releasealign_menu->Append(
+    ID_LUT_CACHE_GENERATE, _("Generate LUT Cache..."), wxEmptyString, wxITEM_NORMAL);
+  m_releasealign_menu->Append(
+    ID_LUT_CACHE_DELETE,   _("Delete LUT Cache"),    wxEmptyString, wxITEM_NORMAL);
+  m_audio_menu->AppendSubMenu(m_releasealign_menu, _("&Release Alignment"));
+
+  {
+    using namespace GOAudioParams;
+    if (GetReleaseAlignMode() == GOReleaseAlignMode::Correlation)
+      m_releasealign_menu->Check(ID_ReleaseAlign_Correlation, true);
+    else
+      m_releasealign_menu->Check(ID_ReleaseAlign_Legacy, true);
+  }
+
+
   // Mark the menu radio item that matches the current runtime crossfade mode
   // (uses GOAudioParams::GetCrossfadeMode())
   {
@@ -319,15 +346,16 @@ GOAppWindow::GOAppWindow(
   menu_bar->Append(help_menu, _("&Help"));
   SetMenuBar(menu_bar);
 
-  // Accelerator keys for Crossfade menu (F7..F12)
   {
-    wxAcceleratorEntry entries[6];
-    entries[0].Set(wxACCEL_NORMAL, WXK_F7,  ID_Crossfade_Linear);
-    entries[1].Set(wxACCEL_NORMAL, WXK_F8,  ID_Crossfade_SinEq);
-    entries[2].Set(wxACCEL_NORMAL, WXK_F9,  ID_Crossfade_Sin2);
-    entries[3].Set(wxACCEL_NORMAL, WXK_F10, ID_Crossfade_SqrtEq);
-    entries[4].Set(wxACCEL_NORMAL, WXK_F11, ID_Crossfade_X2);
-    entries[5].Set(wxACCEL_NORMAL, WXK_F12, ID_Crossfade_Custom);
+    wxAcceleratorEntry entries[8];
+    entries[0].Set(wxACCEL_NORMAL, WXK_F2,  ID_ReleaseAlign_Legacy);
+    entries[1].Set(wxACCEL_NORMAL, WXK_F3,  ID_ReleaseAlign_Correlation);
+    entries[2].Set(wxACCEL_NORMAL, WXK_F7,  ID_Crossfade_Linear);
+    entries[3].Set(wxACCEL_NORMAL, WXK_F8,  ID_Crossfade_SinEq);
+    entries[4].Set(wxACCEL_NORMAL, WXK_F9,  ID_Crossfade_Sin2);
+    entries[5].Set(wxACCEL_NORMAL, WXK_F10, ID_Crossfade_SqrtEq);
+    entries[6].Set(wxACCEL_NORMAL, WXK_F11, ID_Crossfade_X2);
+    entries[7].Set(wxACCEL_NORMAL, WXK_F12, ID_Crossfade_Custom);
     wxAcceleratorTable accel(WXSIZEOF(entries), entries);
     SetAcceleratorTable(accel);
   }
@@ -631,6 +659,15 @@ void GOAppWindow::Init(const wxString &filename, bool isGuiOnly) {
 void GOAppWindow::AttachDetachOrganController(bool isToAttach) {
   if (p_OrganController) {
     p_OrganController->SetModificationListener(isToAttach ? this : nullptr);
+
+    if (isToAttach && m_releasealign_menu) {
+      using namespace GOAudioParams;
+      if (GetReleaseAlignMode() == GOReleaseAlignMode::Correlation)
+        m_releasealign_menu->Check(ID_ReleaseAlign_Correlation, true);
+      else
+        m_releasealign_menu->Check(ID_ReleaseAlign_Legacy, true);
+    }
+
 
     // Sync crossfade menu with current runtime value when attaching an organ
     if (isToAttach && m_crossfade_menu) {
@@ -1305,6 +1342,32 @@ void GOAppWindow::OnSetCrossfade(wxCommandEvent &e) {
       GOAudioParams::FastCrossfadeCache::PrecomputeForMode(m, buckets);
     }).detach();
   }
+}
+
+void GOAppWindow::OnSetReleaseAlign(wxCommandEvent &e) {
+  using namespace GOAudioParams;
+  GOReleaseAlignMode m = GOReleaseAlignMode::Legacy;
+  if (e.GetId() == ID_ReleaseAlign_Correlation)
+    m = GOReleaseAlignMode::Correlation;
+  SetReleaseAlignMode(m);
+}
+
+void GOAppWindow::OnUpdateLutCache(wxUpdateUIEvent &event) {
+  event.Enable(p_OrganController != nullptr);
+}
+
+void GOAppWindow::OnLutCacheGenerate(wxCommandEvent &) {
+  if (!p_OrganController) return;
+  GOLutCacheDlg dlg(this, p_OrganController, r_SoundSystem);
+  dlg.ShowModal();
+}
+
+void GOAppWindow::OnLutCacheDelete(wxCommandEvent &) {
+  if (!p_OrganController) return;
+  p_OrganController->DeleteLutCache();
+  r_SoundSystem.WithOrganEngineQuiesced([this]() {
+    p_OrganController->ClearAllCachedLuts();
+  });
 }
 
 void GOAppWindow::OnOrganSettings(wxCommandEvent &event) {

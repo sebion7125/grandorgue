@@ -127,8 +127,9 @@ public:
    */
   void InitAlignedStream(
     const GOSoundAudioSection *pSection,
-    GOSoundResample::InterpolationType interpolationType,
-    const GOSoundStream *pExistingStream);
+    GOSoundResample::InterpolationType interpolation,
+    const GOSoundStream *existing_stream,
+    const char *debugLabel = nullptr);
 
   /* Read an audio buffer from an audio section stream */
   bool ReadBlock(float *buffer, unsigned int n_blocks);

@@ -257,6 +257,9 @@ public:
   /** Stop worker threads and tear down the organ setup */
   void StopAndDestroy();
 
+  /** Wait for all worker threads to finish their current work item. */
+  void WaitForThreadsIdle();
+
   /** Wake up all worker threads. Called from the audio callback. */
   void WakeupThreads();
 

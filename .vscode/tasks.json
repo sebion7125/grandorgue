@@ -1,0 +1,88 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Win64: update-build-on-linux.sh",
+      "type": "shell",
+      "command": "./update-build-on-linux.sh",
+      "options": {
+        "cwd": "${workspaceFolder}/build-scripts/for-win64"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Win64: build-on-linux.sh",
+      "type": "shell",
+      "command": "./build-on-linux.sh",
+      "options": {
+        "cwd": "${workspaceFolder}/build-scripts/for-win64"
+      },
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Linux: build-on-linux.sh",
+      "type": "shell",
+      "command": "./build-on-linux.sh",
+      "options": {
+        "cwd": "${workspaceFolder}/build-scripts/for-linux"
+      },
+      "group": "build",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Linux: do-tests.sh",
+      "type": "shell",
+      "command": "./do-tests.sh",
+      "options": {
+        "cwd": "${workspaceFolder}/build-scripts/for-linux"
+      },
+      "group": "test",
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "Win64: run latest exe via wine",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "exe=$(ls -t ${workspaceFolder}/build-scripts/for-win64/build/*.exe 2>/dev/null | head -n1); if [ -n \"$exe\" ]; then echo \"Running: $exe\"; wine \"$exe\"; else echo \"No .exe found in build-scripts/for-win64/build\"; fi"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Dev: link compile_commands.json to build/win64",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "mkdir -p ${workspaceFolder}/build/win64 && src=$(find ${workspaceFolder} -maxdepth 4 -name compile_commands.json | head -n1); if [ -n \"$src\" ]; then ln -sf \"$src\" ${workspaceFolder}/build/win64/compile_commands.json && echo \"Linked $src -> build/win64/compile_commands.json\"; else echo \"compile_commands.json not found. Build with -DCMAKE_EXPORT_COMPILE_COMMANDS=ON\"; fi"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}

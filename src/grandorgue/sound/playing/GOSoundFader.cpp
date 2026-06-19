@@ -10,6 +10,16 @@
 #include "../GOCrossfadeParam.h"
 
 #include <algorithm>
+#include <vector>
+#include <cstdio>
+#include <wx/log.h>
+#include <wx/memory.h>
+#include <wx/string.h>
+#include <fstream>
+#include <sstream>
+#include <chrono>
+#include <iomanip>
+#include <ctime>
 
 
 static inline float sanitize_vol(float vol, float /*lastVol*/) {

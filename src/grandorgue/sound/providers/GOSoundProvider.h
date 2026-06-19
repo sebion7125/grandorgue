@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "sound/playing/GOSoundReleaseAlignTable.h"
 #include "sound/playing/GOSoundToneBalanceFilter.h"
 
 #include "GOBool3.h"
@@ -43,6 +44,7 @@ protected:
 
   unsigned m_MidiKeyNumber;
   float m_MidiPitchFract;
+  unsigned m_HarmonicNumber; // foot length as harmonic number: 8=8', 4=4', 16=16'
   float m_Gain;
   float m_Tuning;
   int8_t m_ToneBalanceValue;
@@ -54,19 +56,23 @@ protected:
   ptr_vector<GOSoundAudioSection> m_Release;
   std::vector<ReleaseSelector> m_ReleaseInfo;
   void ComputeReleaseAlignmentInfo();
+  void RebuildAlignmentPointers();
   float m_VelocityVolumeBase;
   float m_VelocityVolumeIncrement;
   unsigned m_AttackSwitchCrossfadeLength;
 
-  // Debug accessor: owner pipe/rank for rank-specific release gain model
   GOSoundingPipe* m_OwnerPipe = nullptr;
   unsigned m_OwnerRankId = 0;
+  bool m_skipCorrLutCompute = false;
+  float ComputeSampleFreqHz() const;
 
 public:
 
   // Setters and getters for the above mentioned debug solution 
   void SetOwnerPipe(GOSoundingPipe* p) { m_OwnerPipe = p; }
   GOSoundingPipe* GetOwnerPipe() const { return m_OwnerPipe; }
+  void SetSkipCorrLutCompute(bool skip) { m_skipCorrLutCompute = skip; }
+  void SetHarmonicNumber(unsigned n) { m_HarmonicNumber = (n > 0) ? n : 8; }
   void SetOwnerRankId(unsigned id) { m_OwnerRankId = id; } // optional
   unsigned GetOwnerRankId() const { return m_OwnerRankId; } // optional
 
@@ -107,6 +113,34 @@ public:
   }
   unsigned GetReleaseTail() const { return m_ReleaseTail; }
   void SetReleaseTail(unsigned releaseTail) { m_ReleaseTail = releaseTail; }
+
+  unsigned GetReleaseCount() const { return (unsigned)m_Release.size(); }
+  const GOSoundAudioSection *GetReleaseSection(unsigned i) const {
+    return (i < m_Release.size()) ? m_Release[i] : nullptr;
+  }
+
+  // Assign sequential parse indices to all release sections starting at
+  // startIndex.  Returns the next available index (= startIndex + release count).
+  unsigned AssignReleaseParseIndices(unsigned startIndex);
+
+  // LUT computation result: support points plus the period used during
+  // generation, so the caller can store both in the .golut cache.
+  struct LutResult {
+    std::vector<GOSoundReleaseAlignTable::CorrPoint> points;
+    uint32_t period_samples = 0;
+    double   period_float   = 0.0;
+  };
+
+  // Compute a permissive (no quality-guards) LUT for a release.
+  // Used by the non-force generator path for legacy-fallback releases.
+  // Does NOT modify the live in-memory aligner.
+  LutResult TryPermissiveLutForRelease(unsigned releaseIdx) const;
+
+  // Compute an exhaustive LUT for a release: corr_at() for every period
+  // n in [n_start, n_end), no quality guards, no MAX_TOTAL cap.
+  // Used by the force-all generator to produce complete coverage.
+  // Does NOT modify the live in-memory aligner.
+  LutResult TryExhaustiveLutForRelease(unsigned releaseIdx) const;
 
   unsigned GetMidiKeyNumber() const;
   float GetMidiPitchFract() const;

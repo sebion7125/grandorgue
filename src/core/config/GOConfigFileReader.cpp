@@ -10,6 +10,7 @@
 #include <wx/file.h>
 #include <wx/intl.h>
 #include <wx/log.h>
+#include <wx/stopwatch.h>
 
 #include "files/GOStandardFile.h"
 
@@ -60,6 +61,12 @@ bool GOConfigFileReader::Read(wxString filename) {
 
 bool GOConfigFileReader::Read(GOOpenedFile *file) {
   m_Entries.clear();
+  // measure read/decompression/parsing stages
+  wxStopWatch sw_read;
+  sw_read.Start();
+  wxStopWatch sw_decomp;
+  wxStopWatch sw_conv;
+  wxStopWatch sw_parse;
 
   if (!file->Open()) {
     wxLogError(_("Failed to open file '%s'"), file->GetName().c_str());
@@ -80,15 +87,22 @@ bool GOConfigFileReader::Read(GOOpenedFile *file) {
     return false;
   }
   file->Close();
+  // Timing log removed to reduce noisy startup logs
+  // reset read stopwatch for subsequent stages
+  sw_read.Start();
+
   GOHash hash;
   hash.Update(data.get(), data.GetSize());
   m_Hash = hash.getStringHash();
 
   if (isBufferCompressed(data)) {
+    sw_decomp.Start();
     if (!uncompressBuffer(data)) {
       wxLogError(_("Failed to decompress file '%s'"), file->GetName().c_str());
       return false;
     }
+    // Timing log removed to reduce noisy startup logs
+    sw_decomp.Start();
   }
 
   wxMBConv *conv;
@@ -101,8 +115,10 @@ bool GOConfigFileReader::Read(GOOpenedFile *file) {
     length -= 3;
   } else
     conv = &isoConv;
+  sw_conv.Start();
   wxString input((const char *)dataPtr, *conv, length);
   data.free();
+  // Timing log removed to reduce noisy startup logs
   if (length && input.Len() == 0) {
     wxLogError(_("Failed to decode file '%s'"), file->GetName().c_str());
     return false;

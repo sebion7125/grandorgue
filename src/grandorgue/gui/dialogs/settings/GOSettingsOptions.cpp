@@ -128,6 +128,14 @@ GOSettingsOptions::GOSettingsOptions(GOConfig &settings, wxWindow *parent)
     wxEXPAND | wxALL,
     5);
   item6->Add(
+    m_CorrLutDownsampling = new wxCheckBox(
+      this,
+      ID_CORR_LUT_DOWNSAMPLING,
+      _("Correlation LUT: downsample low-pitched pipes (faster loading)")),
+    0,
+    wxEXPAND | wxALL,
+    5);
+  item6->Add(
     m_LoadLastFile = new GOChoice<GOInitialLoadType>(this, ID_LOAD_LAST_FILE),
     0,
     wxEXPAND | wxALL,
@@ -142,6 +150,7 @@ GOSettingsOptions::GOSettingsOptions(GOConfig &settings, wxWindow *parent)
   m_LoadLastFile->SetCurrentValue(m_config.LoadLastFile());
   m_Scale->SetValue(m_config.ScaleRelease());
   m_Random->SetValue(m_config.RandomizeSpeaking());
+  m_CorrLutDownsampling->SetValue(m_config.CorrLutDownsampling());
   m_NewBasMel->SetValue(m_config.NewBasMelBehaviour());
 
   wxFlexGridSizer *grid = new wxFlexGridSizer(2, 5, 5);
@@ -418,6 +427,7 @@ bool GOSettingsOptions::TransferDataFromWindow() {
   m_config.Volume(m_Volume->GetValue());
   m_config.ScaleRelease(m_Scale->IsChecked());
   m_config.RandomizeSpeaking(m_Random->IsChecked());
+  m_config.CorrLutDownsampling(m_CorrLutDownsampling->IsChecked());
   m_config.NewBasMelBehaviour(m_NewBasMel->IsChecked());
   m_config.Concurrency(m_Concurrency->GetSelection() + 1);
   m_config.ReleaseConcurrency(m_ReleaseConcurrency->GetSelection() + 1);

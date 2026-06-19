@@ -96,6 +96,7 @@ gui/dialogs/settings/GOSettingsOrgans.cpp
 gui/dialogs/settings/GOSettingsReverb.cpp
 gui/dialogs/settings/GOSettingsTemperaments.cpp
 gui/dialogs/GOMidiObjectsDialog.cpp
+gui/dialogs/GOLutCacheDlg.cpp
 gui/dialogs/GONewReleaseDialog.cpp
 gui/dialogs/GOProgressDialog.cpp
 gui/dialogs/GOPropertiesDialog.cpp
@@ -209,6 +210,7 @@ sound/buffer/GOSoundBufferManaged.cpp
 sound/playing/GOSoundAudioSection.cpp
 sound/playing/GOSoundFader.cpp
 sound/playing/GOSoundFilter.cpp
+sound/playing/GOLutCacheFile.cpp
 sound/playing/GOSoundReleaseAlignTable.cpp
 sound/playing/GOSoundResample.cpp
 sound/playing/GOSoundSamplerPool.cpp
@@ -256,6 +258,7 @@ if (USE_INTERNAL_ZITACONVOLVER)
 endif()
 
 add_library(golib STATIC ${grandorgue_src})
+
 set(go_libs ${wxWidgets_LIBRARIES} ${YAML_CPP_LIBRARIES} ${RT_LIBRARIES} ${PORTAUDIO_LIBRARIES} ${FFTW_LIBRARIES} ${ZITACONVOLVER_LIBRARIES} CURL::libcurl)
 set(go_libdir ${wxWidgets_LIBRARY_DIRS} ${RT_LIBDIR} ${PORTAUDIO_LIBDIR} ${FFTW_LIBDIR})
 target_include_directories(golib PUBLIC ${YAML_CPP_INCLUDE_DIRS})

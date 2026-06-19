@@ -23,6 +23,7 @@
 
 #include <wx/progdlg.h>
 #include <wx/stopwatch.h>
+#include <wx/log.h>
 
 #define DLG_MAX_VALUE 0x10000
 
@@ -33,6 +34,7 @@ GOProgressDialog::GOProgressDialog()
 GOProgressDialog::~GOProgressDialog() {
   if (m_dlg)
     m_dlg->Destroy();
+  
 }
 
 void GOProgressDialog::Setup(
@@ -82,7 +84,6 @@ bool GOProgressDialog::Update(unsigned value, const wxString &msg) {
     newValue = (int)((DLG_MAX_VALUE - 1) * frac);
   }
 
-  // Monotonic guard — never move bar backwards.
   if (newValue < m_lastReported)
     newValue = m_lastReported;
   m_lastReported = newValue;
@@ -92,5 +93,6 @@ bool GOProgressDialog::Update(unsigned value, const wxString &msg) {
 
   if (!m_dlg->Update(newValue, displayMsg))
     return false;
+
   return true;
 }
