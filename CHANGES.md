@@ -31,3 +31,24 @@ The earlier panic threshold improves responsiveness under overload.
 
 ## Files changed
 - `src/grandorgue/sound/GOSoundOrganEngine.cpp` (ProcessSampler)
+
+---
+
+# Changes: Progress Improvements
+
+## What
+- Smoother, monotone progress bar during ODF loading
+- Fine-grained sub-progress within model build phases:
+  ranks, manuals, stops, couplers and tremulants reported individually
+- Time-based ETA estimation during audio cache loading
+- Typed abort exceptions: `GOLoadAbortedEarly` / `GOLoadAbortedPartial`
+- Progress now uses `GOProgressMonitor` interface (decoupled from GUI)
+- `LOG_TIMING` / `LOG_GUI_GAP` macros for profiling (off by default)
+
+## Why
+The progress bar jumped non-monotonically and showed no progress during
+the model build phase, which can take up to half the total load time on
+large organs. Cancellation was also not possible during that phase.
+
+## Known limitations
+- ETA accuracy during audio loading is still noisy — improvement planned.

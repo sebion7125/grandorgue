@@ -1,4 +1,4 @@
-/*
+ /*
  * GrandOrgue - a free pipe organ simulator
  *
  * Copyright 2006 Milan Digital Audio LLC
@@ -35,6 +35,7 @@ private:
   long m_const;
   long m_value;
   long m_max;
+  int m_lastReported;
 
 public:
   GOProgressDialog();

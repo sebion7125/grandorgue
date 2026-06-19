@@ -12,12 +12,21 @@
 
 #include "GOLoadWorker.h"
 
+#include <atomic>
+#include <exception>
+#include <memory>
+
 class GOLoadThread : private GOLoadWorker, private GOThread {
 private:
   /* the main loading loop. It takes objects from the m_CacheObjects
    * concurrently with other threads loads them
    */
   void Entry() override;
+
+  // Captured exception (if any) from the thread
+  std::exception_ptr m_exception = nullptr;
+  // Flag set when this worker noticed a user abort / cancel token
+  std::atomic_bool m_userAbort{false};
 
 public:
   GOLoadThread(
@@ -34,6 +43,13 @@ public:
    * @return true if any exceptions occurred. Otherwise - false
    */
   bool CheckExceptions();
+
+  // Exception accessors for main thread to inspect and rethrow if needed
+  bool HasException() const { return m_exception != nullptr; }
+  std::exception_ptr GetException() const { return m_exception; }
+
+  // Was this thread terminated due to detected user abort?
+  bool WasUserAbort() const { return m_userAbort.load(); }
 };
 
 #endif
