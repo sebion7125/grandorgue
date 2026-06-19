@@ -15,6 +15,7 @@
 #include <wx/filedlg.h>
 #include <wx/image.h>
 #include <wx/menu.h>
+#include <wx/accel.h>
 #include <wx/msgdlg.h>
 #include <wx/platinfo.h>
 #include <wx/sizer.h>
@@ -22,6 +23,9 @@
 #include <wx/splash.h>
 #include <wx/textctrl.h>
 #include <wx/toolbar.h>
+
+#include <algorithm>
+#include <thread>
 
 #include "archive/GOArchiveManager.h"
 #include "combinations/GOSetter.h"
@@ -43,6 +47,8 @@
 #include "loader/cache/GOCacheCleaner.h"
 #include "midi/GOMidiSystem.h"
 #include "midi/events/GOMidiEvent.h"
+#include "sound/GOCrossfadeParam.h"
+#include "sound/fast_crossfade.h"
 #include "sound/GOSoundSystem.h"
 #include "temperaments/GOTemperament.h"
 #include "threading/GOMutexLocker.h"
@@ -87,6 +93,7 @@ EVT_MENU(ID_MIDI_MONITOR, GOAppWindow::OnMidiMonitor)
 EVT_MENU(ID_AUDIO_PANIC, GOAppWindow::OnAudioPanic)
 EVT_MENU(ID_AUDIO_MEMSET, GOAppWindow::OnAudioMemset)
 EVT_MENU(ID_AUDIO_STATE, GOAppWindow::OnAudioState)
+EVT_MENU_RANGE(ID_Crossfade_Linear, ID_Crossfade_Custom, GOAppWindow::OnSetCrossfade)
 EVT_MENU(ID_SETTINGS, GOAppWindow::OnSettings)
 EVT_MENU(ID_MIDI_LOAD, GOAppWindow::OnMidiLoad)
 EVT_MENU(wxID_HELP, GOAppWindow::OnHelp)
@@ -257,6 +264,44 @@ GOAppWindow::GOAppWindow(
   m_audio_menu->Append(
     ID_MIDI_MONITOR, _("&Log MIDI events"), wxEmptyString, wxITEM_CHECK);
 
+  m_crossfade_menu = new wxMenu;
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Linear,  _("Linear\tF7"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_SinEq,   _("Sinus (equal power)\tF8"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Sin2,    _("Sin^2\tF9"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_SqrtEq,  _("Sqrt (equal power)\tF10"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_X2,      _("x^2\tF11"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Custom,  _("Custom (Placeholder)\tF12"));
+  m_audio_menu->AppendSubMenu(m_crossfade_menu, _("&Crossfade"));
+
+  // Mark the menu radio item that matches the current runtime crossfade mode
+  // (uses GOAudioParams::GetCrossfadeMode())
+  {
+    using namespace GOAudioParams;
+    switch (GetCrossfadeMode()) {
+      case GOCrossfadeMode::Linear:
+        m_crossfade_menu->Check(ID_Crossfade_Linear, true);
+        break;
+      case GOCrossfadeMode::SinEqualPower:
+        m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+        break;
+      case GOCrossfadeMode::Sin2:
+        m_crossfade_menu->Check(ID_Crossfade_Sin2, true);
+        break;
+      case GOCrossfadeMode::SqrtEqualPower:
+        m_crossfade_menu->Check(ID_Crossfade_SqrtEq, true);
+        break;
+      case GOCrossfadeMode::X2:
+        m_crossfade_menu->Check(ID_Crossfade_X2, true);
+        break;
+      case GOCrossfadeMode::Custom:
+        m_crossfade_menu->Check(ID_Crossfade_Custom, true);
+        break;
+      default:
+        m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+        break;
+    }
+  }
+
   wxMenu *help_menu = new wxMenu;
   help_menu->Append(wxID_HELP, _("&Help\tF1"), wxEmptyString, wxITEM_NORMAL);
   help_menu->Append(wxID_ABOUT, _("&About"), wxEmptyString, wxITEM_NORMAL);
@@ -273,6 +318,19 @@ GOAppWindow::GOAppWindow(
   menu_bar->Append(m_panel_menu, _("&Panel"));
   menu_bar->Append(help_menu, _("&Help"));
   SetMenuBar(menu_bar);
+
+  // Accelerator keys for Crossfade menu (F7..F12)
+  {
+    wxAcceleratorEntry entries[6];
+    entries[0].Set(wxACCEL_NORMAL, WXK_F7,  ID_Crossfade_Linear);
+    entries[1].Set(wxACCEL_NORMAL, WXK_F8,  ID_Crossfade_SinEq);
+    entries[2].Set(wxACCEL_NORMAL, WXK_F9,  ID_Crossfade_Sin2);
+    entries[3].Set(wxACCEL_NORMAL, WXK_F10, ID_Crossfade_SqrtEq);
+    entries[4].Set(wxACCEL_NORMAL, WXK_F11, ID_Crossfade_X2);
+    entries[5].Set(wxACCEL_NORMAL, WXK_F12, ID_Crossfade_Custom);
+    wxAcceleratorTable accel(WXSIZEOF(entries), entries);
+    SetAcceleratorTable(accel);
+  }
 
   m_ToolBar = CreateToolBar(wxNO_BORDER | wxTB_HORIZONTAL | wxTB_FLAT);
   m_ToolBar->SetToolBitmapSize(wxSize(16, 16));
@@ -571,8 +629,37 @@ void GOAppWindow::Init(const wxString &filename, bool isGuiOnly) {
 }
 
 void GOAppWindow::AttachDetachOrganController(bool isToAttach) {
-  if (p_OrganController)
+  if (p_OrganController) {
     p_OrganController->SetModificationListener(isToAttach ? this : nullptr);
+
+    // Sync crossfade menu with current runtime value when attaching an organ
+    if (isToAttach && m_crossfade_menu) {
+      using namespace GOAudioParams;
+      switch (GetCrossfadeMode()) {
+        case GOCrossfadeMode::Linear:
+          m_crossfade_menu->Check(ID_Crossfade_Linear, true);
+          break;
+        case GOCrossfadeMode::SinEqualPower:
+          m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+          break;
+        case GOCrossfadeMode::Sin2:
+          m_crossfade_menu->Check(ID_Crossfade_Sin2, true);
+          break;
+        case GOCrossfadeMode::SqrtEqualPower:
+          m_crossfade_menu->Check(ID_Crossfade_SqrtEq, true);
+          break;
+        case GOCrossfadeMode::X2:
+          m_crossfade_menu->Check(ID_Crossfade_X2, true);
+          break;
+        case GOCrossfadeMode::Custom:
+          m_crossfade_menu->Check(ID_Crossfade_Custom, true);
+          break;
+        default:
+          m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+          break;
+      }
+    }
+  }
 }
 
 bool GOAppWindow::CloseOrgan(bool isForce) {
@@ -1197,6 +1284,27 @@ void GOAppWindow::OnSettings(wxCommandEvent &event) {
 
 void GOAppWindow::OnAudioState(wxCommandEvent &WXUNUSED(event)) {
   GOMessageBox(r_SoundSystem.getState(), _("Sound output"), wxOK, this);
+}
+
+void GOAppWindow::OnSetCrossfade(wxCommandEvent &e) {
+  using namespace GOAudioParams;
+  GOCrossfadeMode m = GOCrossfadeMode::SinEqualPower;
+  switch (e.GetId()) {
+    case ID_Crossfade_Linear:  m = GOCrossfadeMode::Linear; break;
+    case ID_Crossfade_SinEq:   m = GOCrossfadeMode::SinEqualPower; break;
+    case ID_Crossfade_Sin2:    m = GOCrossfadeMode::Sin2; break;
+    case ID_Crossfade_SqrtEq:  m = GOCrossfadeMode::SqrtEqualPower; break;
+    case ID_Crossfade_X2:      m = GOCrossfadeMode::X2; break;
+    case ID_Crossfade_Custom:  m = GOCrossfadeMode::Custom; break;
+  }
+  SetCrossfadeMode(m);
+
+  {
+    std::vector<unsigned> buckets = {32, 64, 128, 256, 512, 1024, 2048};
+    std::thread([m, buckets]() {
+      GOAudioParams::FastCrossfadeCache::PrecomputeForMode(m, buckets);
+    }).detach();
+  }
 }
 
 void GOAppWindow::OnOrganSettings(wxCommandEvent &event) {

@@ -8,9 +8,12 @@
 #include "GOSoundOrganEngine.h"
 
 #include <algorithm>
+#include <vector>
 
+#include "GOCrossfadeParam.h"
 #include "buffer/GOSoundBufferMutable.h"
 #include "config/GOConfig.h"
+#include "fast_crossfade.h"
 #include "model/GOOrganModel.h"
 #include "model/GOPipe.h"
 #include "model/GOWindchest.h"
@@ -236,6 +239,14 @@ void GOSoundOrganEngine::Setup(
       new GOSoundWindchestTask(*this, organModel.GetWindchest(i)));
   m_TouchTask
     = std::unique_ptr<GOSoundTouchTask>(new GOSoundTouchTask(memoryPool));
+  // Precompute commonly used fast crossfade templates. Doing this here ensures
+  // templates for typical bucket sizes exist before audio playback starts;
+  // templates are also created on-demand by the fader.
+  {
+    std::vector<unsigned> _xfade_buckets = {32, 64, 128, 256, 512, 1024, 2048};
+    GOAudioParams::FastCrossfadeCache::PrecomputeForMode(
+      GOAudioParams::GetCrossfadeMode(), _xfade_buckets);
+  }
   m_HasBeenSetup.store(true);
   Reset();
 }
@@ -323,16 +334,32 @@ bool GOSoundOrganEngine::ProcessSampler(
     if (!sampler->stream.ReadBlock(temp, n_frames))
       sampler->p_SoundProvider = NULL;
 
-    sampler->fader.Process(n_frames, temp, volume);
-    if (sampler->toneBalanceFilterState.IsToApply())
-      sampler->toneBalanceFilterState.ProcessBuffer(n_frames, temp);
+    // Fused-Fade-Accumulate (compile-time or runtime switchable)
+#ifndef GO_ENABLE_FUSED_FADE_ACCUMULATE
+#define GO_ENABLE_FUSED_FADE_ACCUMULATE 0
+#endif
+    {
+      const bool fuse = GO_ENABLE_FUSED_FADE_ACCUMULATE
+        || GOAudioParams::GetFuseFadeAndAccumulate();
 
-    /* Add these samples to the current output buffer shifting
-     * right by the necessary amount to bring the sample gain back
-     * to unity (this value is computed in GOPipe.cpp)
-     */
-    for (unsigned i = 0; i < n_frames * 2; i++)
-      output_buffer[i] += temp[i];
+      if (fuse && !sampler->toneBalanceFilterState.IsToApply()) {
+        // Fader scales and accumulates directly into output_buffer
+        sampler->fader.ProcessAndAccumulate(
+          n_frames, temp, output_buffer, volume);
+      } else {
+        // Legacy path (no fused accumulation or ToneBalance active)
+        sampler->fader.Process(n_frames, temp, volume);
+        if (sampler->toneBalanceFilterState.IsToApply())
+          sampler->toneBalanceFilterState.ProcessBuffer(n_frames, temp);
+
+        /* Add these samples to the current output buffer shifting
+         * right by the necessary amount to bring the sample gain back
+         * to unity (this value is computed in GOPipe.cpp)
+         */
+        for (unsigned i = 0; i < n_frames * 2; i++)
+          output_buffer[i] += temp[i];
+      }
+    }
 
     if (
       (sampler->stop && sampler->stop <= m_CurrentTime)
