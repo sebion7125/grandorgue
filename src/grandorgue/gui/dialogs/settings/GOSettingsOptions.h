@@ -16,6 +16,9 @@ class GOConfig;
 class wxCheckBox;
 class wxChoice;
 class wxSpinCtrl;
+class wxStaticText;
+class wxSpinEvent;
+class wxCommandEvent;
 
 class GOSettingsOptions : public wxPanel {
   enum {
@@ -69,6 +72,7 @@ private:
   wxChoice *m_Channels;
   wxChoice *m_Interpolation;
   wxSpinCtrl *m_MemoryLimit;
+  wxStaticText *m_MemoryLimitWarn;
   wxChoice *m_Language;
   wxCheckBox *m_CheckForUpdatesAtStartup;
 
@@ -87,6 +91,11 @@ public:
   bool NeedRestart();
 
   virtual bool TransferDataFromWindow() override;
+
+private:
+  void UpdateMemoryLimitWarning();
+  void OnMemoryLimitSpin(wxSpinEvent &);
+  void OnMemoryLimitText(wxCommandEvent &);
 };
 
 #endif
