@@ -31,6 +31,13 @@
 
 #include "GOEvent.h"
 #include "GOSoundRecorder.h"
+#include "GO_Attack_Parameters.h"
+
+// needed for debugging the release model
+#include "GO_DebugRelease.h"
+#include "model/GORank.h"
+#include "model/GOSoundingPipe.h"
+#include <wx/log.h>
 
 GOSoundOrganEngine::GOSoundOrganEngine()
   : m_PolyphonyLimiting(true),
@@ -560,6 +567,27 @@ void GOSoundOrganEngine::SwitchToAnotherAttack(GOSoundSampler *pSampler) {
   }
 }
 
+namespace {
+// Helper functions and types for the release model (internal linkage)
+enum ChannelKind { CK_Unknown, CK_Dry, CK_Front, CK_Rear };
+
+static ChannelKind ChannelFromRankName(const wxString &n) {
+  if (n.Contains("dry"))
+    return CK_Dry;
+  if (n.Contains("rear:"))
+    return CK_Rear;
+  if (n.Contains("front:"))
+    return CK_Front;
+  return CK_Dry;
+}
+
+static bool IsChamade(const wxString &n) {
+  return n.Contains("trompeta batalla 8") || n.Contains("batalla")
+    || n.Contains("cham.");
+}
+
+} // anonymous namespace
+
 void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
   if (!handle->p_SoundProvider)
     return;
@@ -611,13 +639,10 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
         if (m_ScaledReleases) {
           /* Note: "time" is in milliseconds. */
           int time = ((m_CurrentTime - handle->time) * 1000) / m_SampleRate;
-          /* TODO: below code should be replaced by a more accurate model of the
-           * attack to get a better estimate of the amplitude when playing very
-           * short notes; estimating attack duration from pipe MIDI pitch */
           unsigned midikey_frequency = this_pipe->GetMidiKeyNumber();
           /* if MidiKeyNumber is not within the range of organ pipes (64 feet
            * to 1 foot), we assume average pipe (MIDI = 60) */
-          if (midikey_frequency > 133 || midikey_frequency == 0)
+          if (midikey_frequency > 127 || midikey_frequency == 0)
             midikey_frequency = 60;
           /* attack duration is assumed 50 ms above MIDI 96, 800 ms below MIDI
            * 24 and linear in between */
@@ -629,36 +654,63 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
               attack_duration
                 = 500.0f + ((24.0f - (float)midikey_frequency) * 6.25f);
           }
-          /* calculate gain (gain_target) to apply to tail amplitude as a
-           * function of when the note is released during the attack */
-          if (time < (int)attack_duration) {
-            float attack_index = (float)time / attack_duration;
-            float gain_delta
-              = (0.2f + (0.8f * (2.0f * attack_index - (attack_index * attack_index))));
-            gain_target *= gain_delta;
-          }
-          /* calculate the volume decay to be applied to the release to take
-           * into account the fact that reverb is not completely formed during
-           * staccato. Time to full reverb is estimated as a function of release
-           * length: for an organ with a release length of 5 seconds or more,
-           * time_to_full_reverb is around 350 ms; for an organ with a release
-           * length of 1 second or less, time_to_full_reverb is around 100 ms;
-           * time_to_full_reverb is linear in between */
-          int time_to_full_reverb = ((60 * release_section->GetLength())
-                                     / release_section->GetSampleRate())
-            + 40;
-          if (time_to_full_reverb > 350)
-            time_to_full_reverb = 350;
-          if (time_to_full_reverb < 100)
-            time_to_full_reverb = 100;
-          if (time < time_to_full_reverb) {
-            /* as a function of note duration, fading happens between:
-             * 200 ms and 6 s for release with little reverberation e.g. short
-             * release
-             * 700 ms and 6 s for release with large reverberation e.g. long
-             * release */
-            gain_decay_length
-              = time_to_full_reverb + 6000 * time / time_to_full_reverb;
+
+          // Identify rank channel and whether it is a Chamade stop
+          auto *pipe = this_pipe->GetOwnerPipe();
+          GORank *rank = pipe ? pipe->GetRank() : nullptr;
+          const wxString rankName = rank ? rank->GetName().Lower() : wxString();
+
+          const ChannelKind chan = ChannelFromRankName(rankName);
+          const bool chamade = IsChamade(rankName);
+
+          CHAMADE_DEBUG(
+            "Release: Rank: %s , bCham=%i, Type=%i",
+            rankName.mb_str(),
+            chamade,
+            chan);
+
+          float g_0 = 0.1f;
+
+          if (chamade) {
+            switch (chan) {
+            case CK_Dry:
+              attack_duration = tmax_dry_by_midi[midikey_frequency];
+              g_0 = g0_dry_by_midi[midikey_frequency];
+              CHAMADE_DEBUG("Release: Chamade Dry");
+              break;
+            case CK_Front:
+              attack_duration = tmax_front_by_midi[midikey_frequency];
+              g_0 = g0_front_by_midi[midikey_frequency];
+              CHAMADE_DEBUG("Release: Chamade Front");
+              break;
+            case CK_Rear:
+              attack_duration = tmax_rear_by_midi[midikey_frequency];
+              g_0 = g0_rear_by_midi[midikey_frequency];
+              CHAMADE_DEBUG("Release: Chamade Rear");
+              break;
+            default:
+              break;
+            }
+
+            if (time < (int)attack_duration) {
+              float attack_index = (float)time / attack_duration;
+              float gain_delta
+                = (1.0f - attack_index) * g_0 + attack_index * 1.0f;
+              gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
+              gain_target *= gain_delta;
+            }
+          } else {
+            // General pipes: linear ramp from g_0 to 1 over attack_duration
+            attack_duration = 120;
+            g_0 = 0.1f;
+
+            if (time < (int)attack_duration) {
+              float attack_index = (float)time / attack_duration;
+              float gain_delta
+                = (1.0f - attack_index) * g_0 + attack_index * 1.0f;
+              gain_delta = std::clamp(gain_delta, 0.0f, 1.0f);
+              gain_target *= gain_delta;
+            }
           }
         }
       }

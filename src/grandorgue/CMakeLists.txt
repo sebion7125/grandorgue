@@ -237,6 +237,7 @@ sound/GOSoundDevInfo.cpp
 sound/GOSoundOrganEngine.cpp
 sound/GOSoundRecorder.cpp
 sound/GOSoundSystem.cpp
+sound/GO_Attack_Parameters.cpp
 sound/fast_crossfade.cpp
 updater/GOUpdateChecker.cpp
 yaml/GOSaveableToYaml.cpp

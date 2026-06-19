@@ -17,6 +17,9 @@
 #include "GOStatisticCallback.h"
 #include "ptrvector.h"
 
+// forward:
+class GOSoundingPipe;
+
 class GOSoundAudioSection;
 class GOCache;
 class GOCacheWriter;
@@ -55,7 +58,18 @@ protected:
   float m_VelocityVolumeIncrement;
   unsigned m_AttackSwitchCrossfadeLength;
 
+  // Debug accessor: owner pipe/rank for rank-specific release gain model
+  GOSoundingPipe* m_OwnerPipe = nullptr;
+  unsigned m_OwnerRankId = 0;
+
 public:
+
+  // Setters and getters for the above mentioned debug solution 
+  void SetOwnerPipe(GOSoundingPipe* p) { m_OwnerPipe = p; }
+  GOSoundingPipe* GetOwnerPipe() const { return m_OwnerPipe; }
+  void SetOwnerRankId(unsigned id) { m_OwnerRankId = id; } // optional
+  unsigned GetOwnerRankId() const { return m_OwnerRankId; } // optional
+
   static void UpdateCacheHash(GOHash &hash);
 
   GOSoundProvider();
