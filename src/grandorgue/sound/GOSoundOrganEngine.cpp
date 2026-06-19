@@ -293,12 +293,24 @@ bool GOSoundOrganEngine::ProcessSampler(
   const bool process_sampler = (sampler->time <= m_CurrentTime);
 
   if (process_sampler) {
+    // panic mode load dropping, if Soft limit gets exceeded
     if (sampler->is_release &&
         ((m_PolyphonyLimiting &&
           m_SamplerPool.UsedSamplerCount() >= m_PolyphonySoftLimit &&
-          m_CurrentTime - sampler->time > 172 * 16) ||
+          m_CurrentTime - sampler->time > 2000) ||
          sampler->drop_counter > 1))
-      sampler->fader.StartDecreasingVolume(MsToSamples(370));
+      // Random jitter time to prevent concurrent drops from synchronizing.
+      sampler->fader.StartDecreasingVolume(MsToSamples(
+        20 + (rand() % 5) - 10));
+    // normal randomized load dropping
+    else if (sampler->is_release &&
+      ((m_PolyphonyLimiting &&
+        m_SamplerPool.UsedSamplerCount() * 5 >= m_PolyphonySoftLimit * 4 &&
+        m_CurrentTime - sampler->time > 48000) ||
+        sampler->drop_counter > 1))
+      // Random jitter time to prevent concurrent drops from synchronizing.
+      sampler->fader.StartDecreasingVolume(MsToSamples(
+        1000 + (rand() % 1000) - 500));
 
     /* The decoded sampler frame will contain values containing
      * sampler->pipe_section->sample_bits worth of significant bits.
