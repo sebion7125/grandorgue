@@ -24,34 +24,30 @@
 
 #include <wx/string.h>
 
+#include "loader/GOProgressMonitor.h"
+
 class wxProgressDialog;
 
-class GOProgressDialog {
+class GOProgressDialog : public GOProgressMonitor {
 private:
   wxProgressDialog *m_dlg;
   long m_last;
   long m_const;
   long m_value;
   long m_max;
-  // Percent-range mode for segmented progress reporting
-  int m_rangeStartPct;
-  int m_rangeEndPct;
-  long m_segmentMaxUnits;
-  bool m_usePercentRange;
-  long m_lastReportedValue;
+  int m_lastReported;
 
 public:
   GOProgressDialog();
   ~GOProgressDialog();
 
   void Setup(
-    long max, const wxString &title, const wxString &msg = wxEmptyString);
-  void Reset(long max, const wxString &msg = wxEmptyString);
-  // Reset a progress segment that will be reported into the percent range
-  // [start_pct .. end_pct]. 'max' is the number of units in this segment.
-  void ResetRange(long max, int start_pct, int end_pct, const wxString &msg = wxEmptyString);
+    long max,
+    const wxString &title,
+    const wxString &msg = wxEmptyString) override;
+  void Reset(long max, const wxString &msg = wxEmptyString) override;
 
-  bool Update(unsigned value, const wxString &msg);
+  bool Update(unsigned value, const wxString &msg) override;
 };
 
 #endif

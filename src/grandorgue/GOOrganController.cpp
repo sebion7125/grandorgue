@@ -39,7 +39,7 @@
 #include "files/GOOpenedFile.h"
 #include "files/GOStdFileName.h"
 #include "files/GOStandardFile.h"
-#include "gui/dialogs/GOProgressDialog.h"
+#include "loader/GOProgressMonitor.h"
 #include "gui/dialogs/go-message-boxes.h"
 #include "gui/panels/GOGUIBankedGeneralsPanel.h"
 #include "gui/panels/GOGUICouplerManualsAndVolumePanel.h"
@@ -231,7 +231,7 @@ static inline void ThrowGOLoadAborted(const char *where) {
   ThrowGOLoadAbortedEarly(__func__);
 }
 
-void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg) {
+void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressMonitor &monitor) {
   /* load church info */
   cfg.ReadString(
     ODFSetting, WX_ORGAN, wxT("HauptwerkOrganFileFormatVersion"), false);
@@ -359,64 +359,45 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg
     __sw_panels.Start();
     m_panels[0]->Load(cfg, wxT(""));
     wxString buffer;
-    unsigned totalPanels = NumberOfPanels;
-    // Panels occupy measured window.
-    if (dlg) dlg->ResetRange(totalPanels, 30, 43, _("Loading panels"));
+    unsigned totalPanels = NumberOfPanels ? NumberOfPanels : 1;
     for (unsigned i = 0; i < NumberOfPanels; i++) {
       buffer.Printf(wxT("Panel%03d"), i + 1);
       m_panels.push_back(new GOGUIPanel(this));
-      // load the panel first so we can use its real display name in progress
       m_panels[m_panels.size() - 1]->Load(cfg, buffer);
-      // update progress dialog with current panel name/count if available,
-      // otherwise fall back to log entry
-      if (dlg) {
-        wxString panelName = m_panels[m_panels.size() - 1]->GetName();
-        wxString msg = _("Loading panel: ");
-        msg += panelName;
-        msg += wxString::Format(_(" (%u/%u)"), (unsigned)m_panels.size(), totalPanels);
-        if (!dlg->Update(i + 1, msg))
-          ThrowGOLoadAborted(__func__);
-      } else {
-        wxString __panelLog = wxString::Format("Progress: Loading panel \"%s\" (%u/%u)", m_panels[m_panels.size() - 1]->GetName().c_str(), (unsigned)m_panels.size(), totalPanels);
-        LOG_GUI_GAP("%s", __panelLog);
-        wxLog::FlushActive();
-      }
+      wxString panelName = m_panels[m_panels.size() - 1]->GetName();
+      wxString msg = wxString::Format(
+        _("Loading panel: %s (%u/%u)"), panelName, (unsigned)m_panels.size(), totalPanels);
+      // 30-43%: panels phase
+      unsigned pct = 30 + (i + 1) * 13 / totalPanels;
+      if (!monitor.Update(pct, msg))
+        ThrowGOLoadAborted(__func__);
+      LOG_GUI_GAP("%s", msg);
     }
-    
+
     __tim_panels_ms = __sw_panels.Time();
     { wxString __log = wxString::Format("GUI.Panels.Load total_ms=%ld panels=%u", __go_panelsload_sw.Time(), (unsigned)m_panels.size()); LOG_GUI_GAP("%s", __log); }
   }
 #else
   {
-    // Measure panels loading also in non-tracer builds to ensure we record
-    // panel load time (was previously only measured under GUI_GAP_TRACER).
     wxStopWatch __go_panelsload_sw;
     __go_panelsload_sw.Start();
 
     m_panels[0]->Load(cfg, wxT(""));
     wxString buffer;
-    unsigned totalPanels = NumberOfPanels;
-    if (dlg) dlg->ResetRange(totalPanels, 35, 40, _("Loading panels"));
+    unsigned totalPanels = NumberOfPanels ? NumberOfPanels : 1;
     for (unsigned i = 0; i < NumberOfPanels; i++) {
       buffer.Printf(wxT("Panel%03d"), i + 1);
       m_panels.push_back(new GOGUIPanel(this));
-      // load panel first to get its name
       m_panels[m_panels.size() - 1]->Load(cfg, buffer);
-      if (dlg) {
-        wxString panelName = m_panels[m_panels.size() - 1]->GetName();
-        wxString msg = _("Loading panel: ");
-        msg += panelName;
-        msg += wxString::Format(_(" (%u/%u)"), (unsigned)m_panels.size(), totalPanels);
-        if (!dlg->Update(i + 1, msg))
-          ThrowGOLoadAborted(__func__);
-      } else {
-        wxString __panelLog = wxString::Format("Progress: Loading panel \"%s\" (%u/%u)", m_panels[m_panels.size() - 1]->GetName().c_str(), (unsigned)m_panels.size(), totalPanels);
-        LOG_GUI_GAP("%s", __panelLog);
-        wxLog::FlushActive();
-      }
+      wxString panelName = m_panels[m_panels.size() - 1]->GetName();
+      wxString msg = wxString::Format(
+        _("Loading panel: %s (%u/%u)"), panelName, (unsigned)m_panels.size(), totalPanels);
+      // 30-43%: panels phase
+      unsigned pct = 30 + (i + 1) * 13 / totalPanels;
+      if (!monitor.Update(pct, msg))
+        ThrowGOLoadAborted(__func__);
     }
 
-    // store measured panel time into the member variable for final summary
     __tim_panels_ms = __go_panelsload_sw.Time();
     LOG_TIMING(wxString::Format("GUI.Panels.Load total_ms=%ld panels=%u", __go_panelsload_sw.Time(), (unsigned)m_panels.size()));
   }
@@ -481,10 +462,10 @@ wxString GOOrganController::GenerateCacheFileName() {
 
  
 wxString GOOrganController::Load(
-  GOProgressDialog *dlg,
   const GOOrgan &organ,
   const wxString &file2,
-  bool isGuiOnly) {
+  bool isGuiOnly,
+  GOProgressMonitor &monitor) {
   GOBuffer<char> dummy;
   wxString errMsg;
   // timing variables are now class members; initialize them here so Load
@@ -509,7 +490,7 @@ wxString GOOrganController::Load(
 
     m_ArchiveID = organ.GetArchiveID();
     if (m_ArchiveID != wxEmptyString) {
-      dlg->Setup(1, _("Loading sample set"), _("Parsing organ packages"));
+      monitor.Setup(100, _("Loading sample set"), _("Parsing organ packages"));
 
       wxString errMsg1;
 
@@ -530,8 +511,7 @@ wxString GOOrganController::Load(
       m_FileStore.SetDirectory(go_get_path(m_odf));
     }
     m_hash = organ.GetOrganHash();
-    dlg->Setup(
-      1, _("Loading sample set"), _("Parsing sample set definition file"));
+    monitor.Setup(100, _("Loading sample set"), _("Parsing sample set definition file"));
     m_SettingFilename = GenerateSettingFileName();
     m_CacheFilename = GenerateCacheFileName();
     m_Cacheable = false;
@@ -545,26 +525,19 @@ wxString GOOrganController::Load(
       // We will use ResetRange before each major phase so Update() receives
       // values appropriate for the current segment (e.g. 0..100 for percent,
       // or n objects for object lists).
-      SetProgressSink([dlg](unsigned pc, const wxString &msg) {
-        // If the user cancelled via the dialog, Update returns false.
-        // Propagate a cooperative abort so the surrounding load logic can
-        // stop promptly and consistently.
-        if (!dlg->Update(pc, msg))
+      SetProgressSink([&monitor](unsigned pc, const wxString &msg) {
+        if (!monitor.Update(3 + pc * 27 / 100, msg))
           ThrowGOLoadAbortedEarly(__func__);
       });
-      // Parsing is a percent-based phase (0..100). Use measured window.
-      if (dlg) dlg->ResetRange(100, 0, 1, _("Parsing sample set definition file"));
-
       // measure parsing time
       wxStopWatch __sw_parse;
       __sw_parse.Start();
       bool ok = odf_ini_file.ReadWithProgress(
         opened.get(),
         _("Parsing sample set definition file"),
-        [dlg](unsigned pc, const wxString &msg) {
-          // Forward percent directly (0..100). ResetRange above maps this
-          // into the 0..3% window.
-          if (!dlg->Update(pc, msg))
+        [&monitor](unsigned pc, const wxString &msg) {
+          // ODF parsing: 0-1% of total
+          if (!monitor.Update(pc / 100, msg))
             ThrowGOLoadAbortedEarly(__func__);
         });
       __tim_parse_ms = __sw_parse.Time();
@@ -604,9 +577,7 @@ wxString GOOrganController::Load(
 
       if (!setting_file.IsEmpty()) {
       GOConfigFileReader extra_odf_config;
-      // Read organ settings (.cmb). Use measured window.
-      if (dlg) dlg->ResetRange(100, 1, 3, _("Reading organ settings (.cmb)"));
-      // measure cmb read time
+      // CMB reading: 1-3% of total
       wxStopWatch __sw_cmb;
       __sw_cmb.Start();
       if (can_read_cmb_directly) {
@@ -615,11 +586,8 @@ wxString GOOrganController::Load(
           !extra_odf_config.ReadWithProgress(
             &cmbFile,
             _("Reading organ settings (.cmb)"),
-            [dlg](unsigned pc, const wxString &msg) {
-              // .cmb is small but treat it as percent-based and map into the
-              // model percent window (3..19%). ResetRange will be set before
-              // calling this block.
-              if (!dlg->Update(pc, msg))
+            [&monitor](unsigned pc, const wxString &msg) {
+              if (!monitor.Update(1 + pc * 2 / 100, msg))
                 ThrowGOLoadAborted(__func__);
             }))
           throw wxString::Format(_("Unable to read '%s'"), setting_file);
@@ -630,8 +598,8 @@ wxString GOOrganController::Load(
           !extra_odf_config.ReadWithProgress(
             cmbFromArchive,
             _("Reading organ settings (.cmb)"),
-            [dlg](unsigned pc, const wxString &msg) {
-              if (!dlg->Update(pc, msg))
+            [&monitor](unsigned pc, const wxString &msg) {
+              if (!monitor.Update(1 + pc * 2 / 100, msg))
                 ThrowGOLoadAborted(__func__);
             }))
           throw wxString::Format(_("Unable to read '%s'"), setting_file);
@@ -684,12 +652,10 @@ wxString GOOrganController::Load(
     cfg.ReadString(CMBSetting, WX_ORGAN, wxT("ODFPath"), false);
     cfg.ReadString(CMBSetting, WX_ORGAN, wxT("ODFHash"), false);
     cfg.ReadString(CMBSetting, WX_ORGAN, wxT("ArchiveID"), false);
-    // Model progress sink already set earlier; set model percent window then call ReadOrganFile.
-    // Map entire model (ranks + rest) into measured window.
-    if (dlg) dlg->ResetRange(100, 3, 30, _("Building model"));
+    // Model build: 3-30%. SetProgressSink callback scales 0-100 → 3-30.
     wxStopWatch __sw_readorgan;
     __sw_readorgan.Start();
-    ReadOrganFile(cfg, dlg);
+    ReadOrganFile(cfg, monitor);
     __tim_readorgan_ms = __sw_readorgan.Time();
     // obtain model sub-step timings measured inside GOOrganModel::Load
     __tim_ranks_ms = GetModelRanksMs();
@@ -712,7 +678,7 @@ wxString GOOrganController::Load(
         wxStopWatch __go_postmodel_sw;
         __go_postmodel_sw.Start();
 
-        dlg->Reset(1, _("Resolving object references"));
+        monitor.Update(43, _("Resolving object references"));
         ResolveReferences();
 
         // Time from end of model -> end of ResolveReferences
@@ -727,19 +693,11 @@ wxString GOOrganController::Load(
 #ifdef GO_PROFILE_ODFLOAD
         LOG_TIMING("Timing: Preparing audio objects…");
 #endif
-        dlg->Reset(1, _("Preparing audio objects"));
+        monitor.Update(43, _("Preparing audio objects"));
         GOCacheObjectDistributor objectDistributor(GetCacheObjects());
 
-        // Audio loading occupies the remaining portion (mapped to objects).
-        // Each object contributes one unit; total units = object count.
-        // Defensive: callers may report positions in range [0..N], ensure the
-        // progress dialog uses a unit count that prevents off-by-one producing
-        // intermediate values > 100% in some environments.
-        unsigned __objUnits = objectDistributor.GetNObjects() ? objectDistributor.GetNObjects() : 1;
-        // Use the reported object count directly here; GOProgressDialog now maps
-        // value/units defensively. For non-GUI (no dlg) use the same units.
-        if (dlg) dlg->ResetRange(__objUnits, 43, 100, _("Loading audio data (cache/disk)"));
-        else dlg->Reset(__objUnits, _("Loading audio data (cache/disk)"));
+        // Audio loading: 43-100%. Scale pos/N → 43+pos*57/N.
+        unsigned __objN = objectDistributor.GetNObjects() ? objectDistributor.GetNObjects() : 1;
 
         wxStopWatch __sw_cache;
         __sw_cache.Start();
@@ -807,7 +765,7 @@ wxString GOOrganController::Load(
 
               // Time-based progress estimation (on-the-fly)
               unsigned __processed = __go_cache_objects;
-              unsigned __total = __objUnits;
+              unsigned __total = __objN;
               unsigned __syntheticUnit = __processed; // fallback to count
               if (__processed > 0 && __total > 0) {
                 double avg_ms = (double)__go_cache_total_ms / (double)__processed;
@@ -829,7 +787,7 @@ wxString GOOrganController::Load(
                 __syntheticUnit = (unsigned)rounded;
               }
 
-              if (!dlg->Update(__syntheticUnit, obj->GetLoadTitle()))
+              if (!monitor.Update(43 + __syntheticUnit * 57 / __objN, obj->GetLoadTitle()))
                 ThrowGOLoadAbortedPartial(__func__); // Skip the rest of the loading code
             }
 
@@ -894,7 +852,7 @@ wxString GOOrganController::Load(
                 break;
 
               // show the progress and process possible Cancel
-              if (!dlg->Update(objectDistributor.GetPos(), obj->GetLoadTitle()))
+              if (!monitor.Update(43 + objectDistributor.GetPos() * 57 / __objN, obj->GetLoadTitle()))
                 ThrowGOLoadAbortedPartial(__func__); // skip the rest loading code
             }
 
@@ -936,7 +894,7 @@ wxString GOOrganController::Load(
             if (objectDistributor.IsComplete())
               m_Cacheable = true;
             if (m_config.ManageCache() && m_Cacheable)
-              UpdateCache(dlg, m_config.CompressCache());
+              UpdateCache(m_config.CompressCache(), monitor);
           }
 
           // Despite a possible exception automatic calling ~GOLoadThread from
@@ -1095,7 +1053,7 @@ void GOOrganController::LoadCombination(const wxString &file) {
   }
 }
 
-bool GOOrganController::UpdateCache(GOProgressDialog *dlg, bool compress) {
+bool GOOrganController::UpdateCache(bool compress, GOProgressMonitor &monitor) {
   bool isOk = false;
 
   DeleteCache();
@@ -1103,7 +1061,7 @@ bool GOOrganController::UpdateCache(GOProgressDialog *dlg, bool compress) {
   /* Figure out the list of pipes to save */
   GOCacheObjectDistributor objectDistributor(GetCacheObjects());
 
-  dlg->Setup(objectDistributor.GetNObjects(), _("Creating sample cache"));
+  monitor.Setup(objectDistributor.GetNObjects(), _("Creating sample cache"));
 
   wxFileOutputStream file(m_CacheFilename);
 
@@ -1127,7 +1085,7 @@ bool GOOrganController::UpdateCache(GOProgressDialog *dlg, bool compress) {
         wxLogError(
           _("Save of %s to the cache failed"), obj->GetLoadTitle().c_str());
       }
-      if (!dlg->Update(objectDistributor.GetPos(), obj->GetLoadTitle())) {
+      if (!monitor.Update(objectDistributor.GetPos(), obj->GetLoadTitle())) {
         writer.Close();
         DeleteCache();
         isOk = false;
