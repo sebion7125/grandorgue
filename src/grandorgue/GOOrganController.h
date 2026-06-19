@@ -20,6 +20,7 @@
 #include "gui/frames/GOMainWindowData.h"
 #include "gui/panels/GOGUIMouseState.h"
 #include "loader/GOFileStore.h"
+#include "loader/GOProgressMonitor.h"
 #include "model/GOOrganModel.h"
 #include "modification/GOModificationProxy.h"
 
@@ -43,7 +44,6 @@ class GOMidiEvent;
 class GOMidiPlayer;
 class GOMidiRecorder;
 class GOOrgan;
-class GOProgressDialog;
 class GOSetter;
 class GOConfig;
 class GOTemperament;
@@ -124,7 +124,7 @@ private:
   // if modified then sets m_IsOrganModified
   void OnIsModifiedChanged(bool modified);
 
-  void ReadOrganFile(GOConfigReader &cfg, GOProgressDialog *dlg = nullptr);
+  void ReadOrganFile(GOConfigReader &cfg, GOProgressMonitor &monitor);
   GOHashType GenerateCacheHash();
   wxString GenerateSettingFileName();
   wxString GenerateCacheFileName();
@@ -159,10 +159,10 @@ public:
   }
 
   wxString Load(
-    GOProgressDialog *dlg,
     const GOOrgan &organ,
     const wxString &cmb,
-    bool isGuiOnly);
+    bool isGuiOnly,
+    GOProgressMonitor &monitor);
   /**
    * Exports organ combinations in the yaml file
    * @param fileName - the path to the yaml file to export
@@ -174,7 +174,7 @@ public:
   bool Export(const wxString &cmb);
   bool CachePresent() const { return wxFileExists(m_CacheFilename); }
   bool IsCacheable() const { return m_Cacheable; }
-  bool UpdateCache(GOProgressDialog *dlg, bool compress);
+  bool UpdateCache(bool compress, GOProgressMonitor &monitor);
   void DeleteCache();
   void DeleteSettings();
   void Abort();
