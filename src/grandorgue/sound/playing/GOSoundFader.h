@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -8,10 +8,10 @@
 #ifndef GOSOUNDFADER_H_
 #define GOSOUNDFADER_H_
 
-#include <assert.h>
-#include <cmath>
 #include "GOCrossfadeMode.h"
 #include "GOCrossfadeParam.h"
+#include <assert.h>
+#include <cmath>
 
 /**
  * This class is responsible for smoothly changing a volume of samples.
@@ -37,7 +37,7 @@
  * totalVol = targetVolume * externalVolume
  * This volume is applied in the Process() call
  */
- 
+
 #if 0
 // Sinus fade mode
 enum class FadeMode { None, Linear, Sinus };
@@ -45,7 +45,6 @@ enum class FadeMode { None, Linear, Sinus };
 // Legacy FadeMode is replaced by GOCrossfadeMode (see GOCrossfadeMode.h).
 // The enum above is retained in an #if 0 block to preserve reference until
 // all uses are migrated to the new GOCrossfadeMode and GOAudioParams.
-
 
 class GOSoundFader {
 private:
@@ -63,7 +62,7 @@ private:
   // Last volume points are the volumes at the end of previous Process()
   float m_LastTargetVolumePoint;
   float m_LastExternalVolumePoint;
-  
+
   GOCrossfadeMode m_CurrentFadeMode = GOCrossfadeMode::SinEqualPower;
 
   // for sinus-fade
@@ -73,6 +72,7 @@ private:
 
   // global progress
   unsigned m_CurrentSampleCounter = 0;
+
 public:
   /**
    * Setup the fader for constant volume or for increasing from 0 to
@@ -119,7 +119,8 @@ public:
   inline void SetVelocityVolume(float volume) { m_VelocityVolume = volume; }
 
   void Process(unsigned nFrames, float *buffer, float externalVolume);
-  void ProcessNonLinearFade(unsigned nFrames, float *buffer, float externalVolume);
+  void ProcessNonLinearFade(
+    unsigned nFrames, float *buffer, float externalVolume);
 
   bool IsSilent() const { return (m_LastTargetVolumePoint <= 0.0f); }
   /*bool IsSilent() const {

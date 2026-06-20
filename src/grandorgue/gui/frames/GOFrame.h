@@ -32,7 +32,6 @@ enum {
   ID_Crossfade_Custom
 };
 
-
 class GOApp;
 class GOAudioGauge;
 class GOConfig;

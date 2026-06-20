@@ -9,13 +9,13 @@
 
 #include <algorithm>
 
+#include <wx/accel.h>
 #include <wx/choice.h>
 #include <wx/display.h>
 #include <wx/fileconf.h>
 #include <wx/filedlg.h>
 #include <wx/image.h>
 #include <wx/menu.h>
-#include <wx/accel.h>
 #include <wx/msgdlg.h>
 #include <wx/platinfo.h>
 #include <wx/sizer.h>
@@ -42,8 +42,8 @@
 #include "loader/cache/GOCacheCleaner.h"
 #include "midi/GOMidiSystem.h"
 #include "midi/events/GOMidiEvent.h"
-#include "sound/GOSoundSystem.h"
 #include "sound/GOCrossfadeParam.h"
+#include "sound/GOSoundSystem.h"
 #include "temperaments/GOTemperament.h"
 #include "threading/GOMutexLocker.h"
 
@@ -89,7 +89,8 @@ EVT_MENU(ID_MIDI_MONITOR, GOFrame::OnMidiMonitor)
 EVT_MENU(ID_AUDIO_PANIC, GOFrame::OnAudioPanic)
 EVT_MENU(ID_AUDIO_MEMSET, GOFrame::OnAudioMemset)
 EVT_MENU(ID_AUDIO_STATE, GOFrame::OnAudioState)
-EVT_MENU_RANGE(ID_Crossfade_Linear, ID_Crossfade_Custom, GOFrame::OnSetCrossfade)
+EVT_MENU_RANGE(
+  ID_Crossfade_Linear, ID_Crossfade_Custom, GOFrame::OnSetCrossfade)
 EVT_MENU(ID_SETTINGS, GOFrame::OnSettings)
 EVT_MENU(ID_MIDI_LOAD, GOFrame::OnMidiLoad)
 EVT_MENU(wxID_HELP, GOFrame::OnHelp)
@@ -258,12 +259,15 @@ GOFrame::GOFrame(
     ID_MIDI_MONITOR, _("&Log MIDI events"), wxEmptyString, wxITEM_CHECK);
 
   m_crossfade_menu = new wxMenu;
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Linear,  _("Linear\tF7"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_SinEq,   _("Sinus (equal power)\tF8"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Sin2,    _("Sin^2\tF9"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_SqrtEq,  _("Sqrt (equal power)\tF10"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_X2,      _("x^2\tF11"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Custom,  _("Custom (Placeholder)\tF12"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Linear, _("Linear\tF7"));
+  m_crossfade_menu->AppendRadioItem(
+    ID_Crossfade_SinEq, _("Sinus (equal power)\tF8"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Sin2, _("Sin^2\tF9"));
+  m_crossfade_menu->AppendRadioItem(
+    ID_Crossfade_SqrtEq, _("Sqrt (equal power)\tF10"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_X2, _("x^2\tF11"));
+  m_crossfade_menu->AppendRadioItem(
+    ID_Crossfade_Custom, _("Custom (Placeholder)\tF12"));
   m_audio_menu->AppendSubMenu(m_crossfade_menu, _("&Crossfade"));
 
   // Mark the menu radio item that matches the current runtime crossfade mode
@@ -271,27 +275,27 @@ GOFrame::GOFrame(
   {
     using namespace GOAudioParams;
     switch (GetCrossfadeMode()) {
-      case GOCrossfadeMode::Linear:
-        m_crossfade_menu->Check(ID_Crossfade_Linear, true);
-        break;
-      case GOCrossfadeMode::SinEqualPower:
-        m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
-        break;
-      case GOCrossfadeMode::Sin2:
-        m_crossfade_menu->Check(ID_Crossfade_Sin2, true);
-        break;
-      case GOCrossfadeMode::SqrtEqualPower:
-        m_crossfade_menu->Check(ID_Crossfade_SqrtEq, true);
-        break;
-      case GOCrossfadeMode::X2:
-        m_crossfade_menu->Check(ID_Crossfade_X2, true);
-        break;
-      case GOCrossfadeMode::Custom:
-        m_crossfade_menu->Check(ID_Crossfade_Custom, true);
-        break;
-      default:
-        m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
-        break;
+    case GOCrossfadeMode::Linear:
+      m_crossfade_menu->Check(ID_Crossfade_Linear, true);
+      break;
+    case GOCrossfadeMode::SinEqualPower:
+      m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+      break;
+    case GOCrossfadeMode::Sin2:
+      m_crossfade_menu->Check(ID_Crossfade_Sin2, true);
+      break;
+    case GOCrossfadeMode::SqrtEqualPower:
+      m_crossfade_menu->Check(ID_Crossfade_SqrtEq, true);
+      break;
+    case GOCrossfadeMode::X2:
+      m_crossfade_menu->Check(ID_Crossfade_X2, true);
+      break;
+    case GOCrossfadeMode::Custom:
+      m_crossfade_menu->Check(ID_Crossfade_Custom, true);
+      break;
+    default:
+      m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+      break;
     }
   }
 
@@ -315,9 +319,9 @@ GOFrame::GOFrame(
   // Accelerator keys for Crossfade menu (F7..F12)
   {
     wxAcceleratorEntry entries[6];
-    entries[0].Set(wxACCEL_NORMAL, WXK_F7,  ID_Crossfade_Linear);
-    entries[1].Set(wxACCEL_NORMAL, WXK_F8,  ID_Crossfade_SinEq);
-    entries[2].Set(wxACCEL_NORMAL, WXK_F9,  ID_Crossfade_Sin2);
+    entries[0].Set(wxACCEL_NORMAL, WXK_F7, ID_Crossfade_Linear);
+    entries[1].Set(wxACCEL_NORMAL, WXK_F8, ID_Crossfade_SinEq);
+    entries[2].Set(wxACCEL_NORMAL, WXK_F9, ID_Crossfade_Sin2);
     entries[3].Set(wxACCEL_NORMAL, WXK_F10, ID_Crossfade_SqrtEq);
     entries[4].Set(wxACCEL_NORMAL, WXK_F11, ID_Crossfade_X2);
     entries[5].Set(wxACCEL_NORMAL, WXK_F12, ID_Crossfade_Custom);
@@ -627,27 +631,27 @@ void GOFrame::AttachDetachOrganController(bool isToAttach) {
     if (isToAttach && m_crossfade_menu) {
       using namespace GOAudioParams;
       switch (GetCrossfadeMode()) {
-        case GOCrossfadeMode::Linear:
-          m_crossfade_menu->Check(ID_Crossfade_Linear, true);
-          break;
-        case GOCrossfadeMode::SinEqualPower:
-          m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
-          break;
-        case GOCrossfadeMode::Sin2:
-          m_crossfade_menu->Check(ID_Crossfade_Sin2, true);
-          break;
-        case GOCrossfadeMode::SqrtEqualPower:
-          m_crossfade_menu->Check(ID_Crossfade_SqrtEq, true);
-          break;
-        case GOCrossfadeMode::X2:
-          m_crossfade_menu->Check(ID_Crossfade_X2, true);
-          break;
-        case GOCrossfadeMode::Custom:
-          m_crossfade_menu->Check(ID_Crossfade_Custom, true);
-          break;
-        default:
-          m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
-          break;
+      case GOCrossfadeMode::Linear:
+        m_crossfade_menu->Check(ID_Crossfade_Linear, true);
+        break;
+      case GOCrossfadeMode::SinEqualPower:
+        m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+        break;
+      case GOCrossfadeMode::Sin2:
+        m_crossfade_menu->Check(ID_Crossfade_Sin2, true);
+        break;
+      case GOCrossfadeMode::SqrtEqualPower:
+        m_crossfade_menu->Check(ID_Crossfade_SqrtEq, true);
+        break;
+      case GOCrossfadeMode::X2:
+        m_crossfade_menu->Check(ID_Crossfade_X2, true);
+        break;
+      case GOCrossfadeMode::Custom:
+        m_crossfade_menu->Check(ID_Crossfade_Custom, true);
+        break;
+      default:
+        m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+        break;
       }
     }
   }
@@ -1278,12 +1282,24 @@ void GOFrame::OnSetCrossfade(wxCommandEvent &e) {
   using namespace GOAudioParams;
   GOCrossfadeMode m = GOCrossfadeMode::SinEqualPower;
   switch (e.GetId()) {
-    case ID_Crossfade_Linear:  m = GOCrossfadeMode::Linear; break;
-    case ID_Crossfade_SinEq:   m = GOCrossfadeMode::SinEqualPower; break;
-    case ID_Crossfade_Sin2:    m = GOCrossfadeMode::Sin2; break;
-    case ID_Crossfade_SqrtEq:  m = GOCrossfadeMode::SqrtEqualPower; break;
-    case ID_Crossfade_X2:      m = GOCrossfadeMode::X2; break;
-    case ID_Crossfade_Custom:  m = GOCrossfadeMode::Custom; break;
+  case ID_Crossfade_Linear:
+    m = GOCrossfadeMode::Linear;
+    break;
+  case ID_Crossfade_SinEq:
+    m = GOCrossfadeMode::SinEqualPower;
+    break;
+  case ID_Crossfade_Sin2:
+    m = GOCrossfadeMode::Sin2;
+    break;
+  case ID_Crossfade_SqrtEq:
+    m = GOCrossfadeMode::SqrtEqualPower;
+    break;
+  case ID_Crossfade_X2:
+    m = GOCrossfadeMode::X2;
+    break;
+  case ID_Crossfade_Custom:
+    m = GOCrossfadeMode::Custom;
+    break;
   }
   SetCrossfadeMode(m);
 }

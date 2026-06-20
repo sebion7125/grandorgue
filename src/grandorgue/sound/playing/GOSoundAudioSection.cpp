@@ -17,21 +17,22 @@
 #include "model/GOCacheObject.h"
 
 #include "GOAlloc.h"
+#include "GOCrossfadeParam.h"
 #include "GOMemoryPool.h"
 #include "GOSampleStatistic.h"
 #include "GOSoundCompressionCache.h"
 #include "GOSoundReleaseAlignTable.h"
 #include "GOSoundResample.h"
-#include "GOCrossfadeParam.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
- // maximal readahead is necessary for polyphase resampling
+// maximal readahead is necessary for polyphase resampling
 static constexpr unsigned MAX_READAHEAD = GOSoundResample::POLYPHASE_POINTS;
 static constexpr unsigned DEFAULT_END_SEG_LENGTH = MAX_READAHEAD * 2;
-static constexpr bool kForceLegacyLoopCrossfade = true; // when true, cached loop crossfades keep legacy cosine method
+static constexpr bool kForceLegacyLoopCrossfade
+  = true; // when true, cached loop crossfades keep legacy cosine method
 
 const unsigned GOSoundAudioSection::getMaxReadAhead() { return MAX_READAHEAD; }
 
@@ -317,7 +318,8 @@ void GOSoundAudioSection::DoCrossfade(
           SetSampleData(dest, pos + dest_offset, j, (int)result);
         }
       } else {
-        // runtime-configurable crossfade (uses current mode). kept ready for future switching.
+        // runtime-configurable crossfade (uses current mode). kept ready for
+        // future switching.
         using namespace GOAudioParams;
         const auto mode = GetCrossfadeMode();
         const auto g = go_crossfade_eval(mode, t);

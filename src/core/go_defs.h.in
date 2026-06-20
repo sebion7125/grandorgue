@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -10,9 +10,9 @@
 
 #define GITHUB_PROJECT "@GITHUB_PROJECT@"
 #define APP_VERSION "v@FULL_VERSION@"
-#define APP_WIN_VERSION @NUM_WIN_VERSION@
+#define APP_WIN_VERSION @NUM_WIN_VERSION @
 
-/* Value which is used to identify a valid cached organ data file. 
+/* Value which is used to identify a valid cached organ data file.
   It must be changed every time when the cache structure is modefied
 */
 #define GRANDORGUE_CACHE_MAGIC 0x12341236

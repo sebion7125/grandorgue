@@ -58,16 +58,19 @@ protected:
   float m_VelocityVolumeIncrement;
   unsigned m_AttackSwitchCrossfadeLength;
 
-  // Debug Sollution for retrieving the rank/pipe, that is associated with the sound provider. Needed to test Rank specific Release gain model
-  GOSoundingPipe* m_OwnerPipe = nullptr;
-  unsigned m_OwnerRankId = 0; // optionally, the sound provider can be associated with a rank, that is used to retrieve the rank/pipe, that is associated with the sound provider. Needed to test Rank specific Release gain model
+  // Debug Sollution for retrieving the rank/pipe, that is associated with the
+  // sound provider. Needed to test Rank specific Release gain model
+  GOSoundingPipe *m_OwnerPipe = nullptr;
+  unsigned m_OwnerRankId
+    = 0; // optionally, the sound provider can be associated with a rank, that
+         // is used to retrieve the rank/pipe, that is associated with the sound
+         // provider. Needed to test Rank specific Release gain model
 
 public:
-
-  // Setters and getters for the above mentioned debug solution 
-  void SetOwnerPipe(GOSoundingPipe* p) { m_OwnerPipe = p; }
-  GOSoundingPipe* GetOwnerPipe() const { return m_OwnerPipe; }
-  void SetOwnerRankId(unsigned id) { m_OwnerRankId = id; } // optional
+  // Setters and getters for the above mentioned debug solution
+  void SetOwnerPipe(GOSoundingPipe *p) { m_OwnerPipe = p; }
+  GOSoundingPipe *GetOwnerPipe() const { return m_OwnerPipe; }
+  void SetOwnerRankId(unsigned id) { m_OwnerRankId = id; }  // optional
   unsigned GetOwnerRankId() const { return m_OwnerRankId; } // optional
 
   static void UpdateCacheHash(GOHash &hash);

@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <cstdio>
 
-
 // backup old version of setup:
 /*void GOSoundFader::Setup(
   float targetVolume, float velocityVolume, unsigned nFramesToIncreaseIn) {
@@ -34,19 +33,19 @@ void GOSoundFader::Setup(
   float targetVolume, float velocityVolume, unsigned nFramesToIncreaseIn) {
 
   m_CurrentFadeMode = GOCrossfadeMode::SinEqualPower;
-  
+
   /*FILE* f = fopen("debug.txt", "a");
 fprintf(f, "[FADER] Setup: target=%f, velocity=%f, nFrames=%u\n",
   targetVolume, velocityVolume, nFramesToIncreaseIn);
 fclose(f);*/
-  
+
   m_TargetVolume = targetVolume;
   m_VelocityVolume = velocityVolume;
-  m_DecreasingDeltaPerFrame = 0.0f;  // no FadeOut active
+  m_DecreasingDeltaPerFrame = 0.0f; // no FadeOut active
   m_LastExternalVolumePoint = -1.0f;
 
   m_CurrentSampleCounter = 0;
-  
+
   if (nFramesToIncreaseIn == 0) {
     // Immediately set to target volume
     m_LastTargetVolumePoint = targetVolume;
@@ -64,9 +63,9 @@ fclose(f);*/
       fprintf(f, "[FADER] Sinus-Fade aktiv: Sample %u / %u\n",
         m_CurrentSampleCounter, m_FadeLengthSamples);
       fclose(f);*/
-              
+
       m_FadeStartVolume = 0.0f;
-      m_IncreasingDeltaPerFrame = 1.0f;  // Marker: sinus-fade active
+      m_IncreasingDeltaPerFrame = 1.0f; // Marker: sinus-fade active
       m_FadeStartSample = m_CurrentSampleCounter = 0;
     } else {
       /*FILE* f = fopen("debug.txt", "a");
@@ -82,7 +81,7 @@ fclose(f);*/
 // if the external volume is changed, do it smoothly in this number of frames
 static constexpr unsigned EXTERNAL_VOLUME_CHANGE_FRAMES = 1024;
 
-void GOSoundFader::Process(  
+void GOSoundFader::Process(
   unsigned nFrames, float *buffer, float externalVolume) {
   // setup process
 
@@ -182,8 +181,9 @@ void GOSoundFader::Process(
   }
 }
 
- // non-linear fade processing
-void GOSoundFader::ProcessNonLinearFade(unsigned nFrames, float* buffer, float externalVolume) {
+// non-linear fade processing
+void GOSoundFader::ProcessNonLinearFade(
+  unsigned nFrames, float *buffer, float externalVolume) {
   if (nFrames == 0)
     return;
 
@@ -195,8 +195,7 @@ void GOSoundFader::ProcessNonLinearFade(unsigned nFrames, float* buffer, float e
   float startExternalVolume = m_LastExternalVolumePoint;
 
   if (targetExternalVolume != startExternalVolume) {
-    m_LastExternalVolumePoint +=
-      (targetExternalVolume - startExternalVolume)
+    m_LastExternalVolumePoint += (targetExternalVolume - startExternalVolume)
       * std::max(nFrames, EXTERNAL_VOLUME_CHANGE_FRAMES)
       / EXTERNAL_VOLUME_CHANGE_FRAMES;
   }
@@ -208,22 +207,26 @@ void GOSoundFader::ProcessNonLinearFade(unsigned nFrames, float* buffer, float e
 
   float volume = 0.0f;
 
-  for (unsigned i = 0; i < nFrames; ++i, buffer += 2, ++m_CurrentSampleCounter) {
+  for (unsigned i = 0; i < nFrames;
+       ++i, buffer += 2, ++m_CurrentSampleCounter) {
     // interpolate current external volume
     float currentExternal = startExternalVolume + i * externalDelta;
     float baseVolume = m_TargetVolume * currentExternal;
 
     // fade position x in [0,1]
-    float x = m_FadeLengthSamples ? float(m_CurrentSampleCounter) / float(m_FadeLengthSamples) : 1.0f;
-    if (x > 1.0f) x = 1.0f;
+    float x = m_FadeLengthSamples
+      ? float(m_CurrentSampleCounter) / float(m_FadeLengthSamples)
+      : 1.0f;
+    if (x > 1.0f)
+      x = 1.0f;
 
     float fadeFactor = 1.0f;
 
-    // Choose curve based on runtime crossfade mode; keep linear fast-path for legacy
+    // Choose curve based on runtime crossfade mode; keep linear fast-path for
+    // legacy
     using namespace GOAudioParams;
     const auto mode = GetCrossfadeMode();
 
-    
     // Use go_crossfade_eval for non-linear curves.
     const auto g = go_crossfade_eval(mode, x);
     if (m_IncreasingDeltaPerFrame > 0.0f) {
@@ -235,7 +238,6 @@ void GOSoundFader::ProcessNonLinearFade(unsigned nFrames, float* buffer, float e
     } else {
       fadeFactor = 1.0f;
     }
-    
 
     volume = baseVolume * fadeFactor;
     buffer[0] *= volume;

@@ -55,7 +55,7 @@ public:
 
   // Debug sollution to retrieve the associated rank
   // TODO: remove this in the next release
-  GORank* GetRank() const { return m_Rank; }
+  GORank *GetRank() const { return m_Rank; }
 };
 
 #endif

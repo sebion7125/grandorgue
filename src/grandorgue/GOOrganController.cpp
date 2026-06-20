@@ -61,9 +61,9 @@
 #include "model/GOSoundingPipe.h"
 #include "model/GOSwitch.h"
 #include "model/GOTremulant.h"
+#include "sound/GOCrossfadeParam.h"
 #include "sound/GOSoundOrganEngine.h"
 #include "sound/playing/GOSoundReleaseAlignTable.h"
-#include "sound/GOCrossfadeParam.h"
 #include "temperaments/GOTemperament.h"
 #include "yaml/GOYamlModel.h"
 
@@ -252,14 +252,16 @@ void GOOrganController::ReadOrganFile(GOConfigReader &cfg) {
   // Backwards compatibility: older organ files that do not contain a
   // CrossfadeMode entry should keep the legacy Linear behaviour.
   {
-    // Check presence by attempting to read the entry as a string (non-required).
+    // Check presence by attempting to read the entry as a string
+    // (non-required).
     const wxString cf_entry = cfg.ReadString(
       CMBSetting, WX_ORGAN, wxT("CrossfadeMode"), false, wxEmptyString);
     if (cf_entry.IsEmpty()) {
       // Old organ file: keep legacy default (Linear)
       GOAudioParams::SetCrossfadeMode(GOCrossfadeMode::Linear);
     } else {
-      // Newer files: parse stored integer (fall back to SinEqualPower if parse fails)
+      // Newer files: parse stored integer (fall back to SinEqualPower if parse
+      // fails)
       long cf = static_cast<long>(GOCrossfadeMode::SinEqualPower);
       cf = cfg.ReadInteger(
         CMBSetting, WX_ORGAN, wxT("CrossfadeMode"), 0, 10, false, cf);
