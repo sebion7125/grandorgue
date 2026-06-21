@@ -320,8 +320,7 @@ bool GOSoundOrganEngine::ProcessSampler(
           m_CurrentTime - sampler->time > 2000) ||
          sampler->drop_counter > 1))
       // Random jitter time to prevent concurrent drops from synchronizing.
-      sampler->fader.StartDecreasingVolume(MsToSamples(
-        20 + (rand() % 5) - 10));
+      sampler->fader.StartDecreasingVolume(MsToSamples(20 + (rand() % 5) - 10));
     // normal randomized load dropping
     else if (sampler->is_release &&
       ((m_PolyphonyLimiting &&
@@ -329,8 +328,8 @@ bool GOSoundOrganEngine::ProcessSampler(
         m_CurrentTime - sampler->time > 48000) ||
         sampler->drop_counter > 1))
       // Random jitter time to prevent concurrent drops from synchronizing.
-      sampler->fader.StartDecreasingVolume(MsToSamples(
-        1000 + (rand() % 1000) - 500));
+      sampler->fader.StartDecreasingVolume(
+        MsToSamples(1000 + (rand() % 1000) - 500));
 
     /* The decoded sampler frame will contain values containing
      * sampler->pipe_section->sample_bits worth of significant bits.
@@ -343,7 +342,7 @@ bool GOSoundOrganEngine::ProcessSampler(
     if (!sampler->stream.ReadBlock(temp, n_frames))
       sampler->p_SoundProvider = NULL;
 
-    // Fused-Fade-Accumulate (compile-time or runtime switchable)
+      // Fused-Fade-Accumulate (compile-time or runtime switchable)
 #ifndef GO_ENABLE_FUSED_FADE_ACCUMULATE
 #define GO_ENABLE_FUSED_FADE_ACCUMULATE 0
 #endif
@@ -739,25 +738,31 @@ void GOSoundOrganEngine::CreateReleaseSampler(GOSoundSampler *handle) {
       if (
         m_ReleaseAlignmentEnabled
         && release_section->SupportsStreamAlignment()) {
-#if __has_include("playing/GOLogReleaseAlignEnable.h") \
+#if __has_include(                                                             \
+  "playing/GOLogReleaseAlignEnable.h")                                         \
   && __has_include("playing/GOLogReleaseAlignVerbose.h")
         {
-          auto *dbgPipe  = this_pipe->GetOwnerPipe();
-          auto *dbgRank  = dbgPipe ? dbgPipe->GetRank() : nullptr;
+          auto *dbgPipe = this_pipe->GetOwnerPipe();
+          auto *dbgRank = dbgPipe ? dbgPipe->GetRank() : nullptr;
           const wxString dbgRankName
             = dbgRank ? dbgRank->GetName().Lower() : wxString();
           const ChannelKind dbgChan = ChannelFromRankName(dbgRankName);
           const char *dbgChanStr = (dbgChan == CK_Front) ? "front"
-                                 : (dbgChan == CK_Rear)  ? "rear" : "dry";
+            : (dbgChan == CK_Rear)                       ? "rear"
+                                                         : "dry";
           // GetKeyMidiNumber() = ODF key position (pressed key).
-          // GetMidiKeyNumber() = smpl-chunk pitch (recording pitch) — wrong here.
-          const unsigned dbgKeyMidi
-            = dbgPipe ? dbgPipe->GetKeyMidiNumber() : this_pipe->GetMidiKeyNumber();
+          // GetMidiKeyNumber() = smpl-chunk pitch (recording pitch) — wrong
+          // here.
+          const unsigned dbgKeyMidi = dbgPipe ? dbgPipe->GetKeyMidiNumber()
+                                              : this_pipe->GetMidiKeyNumber();
           char dbgLabel[64];
           std::snprintf(
-            dbgLabel, sizeof(dbgLabel), "%s|midi=%u|%s",
+            dbgLabel,
+            sizeof(dbgLabel),
+            "%s|midi=%u|%s",
             dbgRankName.utf8_str().data(),
-            dbgKeyMidi, dbgChanStr);
+            dbgKeyMidi,
+            dbgChanStr);
           new_sampler->stream.InitAlignedStream(
             release_section, m_interpolation, &handle->stream, dbgLabel);
         }

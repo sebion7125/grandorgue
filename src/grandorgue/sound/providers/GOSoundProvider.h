@@ -44,7 +44,8 @@ protected:
 
   unsigned m_MidiKeyNumber;
   float m_MidiPitchFract;
-  unsigned m_HarmonicNumber; // foot length as harmonic number: 8=8', 4=4', 16=16'
+  unsigned
+    m_HarmonicNumber; // foot length as harmonic number: 8=8', 4=4', 16=16'
   float m_Gain;
   float m_Tuning;
   int8_t m_ToneBalanceValue;
@@ -61,19 +62,18 @@ protected:
   float m_VelocityVolumeIncrement;
   unsigned m_AttackSwitchCrossfadeLength;
 
-  GOSoundingPipe* m_OwnerPipe = nullptr;
+  GOSoundingPipe *m_OwnerPipe = nullptr;
   unsigned m_OwnerRankId = 0;
   bool m_skipCorrLutCompute = false;
   float ComputeSampleFreqHz() const;
 
 public:
-
-  // Setters and getters for the above mentioned debug solution 
-  void SetOwnerPipe(GOSoundingPipe* p) { m_OwnerPipe = p; }
-  GOSoundingPipe* GetOwnerPipe() const { return m_OwnerPipe; }
+  // Setters and getters for the above mentioned debug solution
+  void SetOwnerPipe(GOSoundingPipe *p) { m_OwnerPipe = p; }
+  GOSoundingPipe *GetOwnerPipe() const { return m_OwnerPipe; }
   void SetSkipCorrLutCompute(bool skip) { m_skipCorrLutCompute = skip; }
   void SetHarmonicNumber(unsigned n) { m_HarmonicNumber = (n > 0) ? n : 8; }
-  void SetOwnerRankId(unsigned id) { m_OwnerRankId = id; } // optional
+  void SetOwnerRankId(unsigned id) { m_OwnerRankId = id; }  // optional
   unsigned GetOwnerRankId() const { return m_OwnerRankId; } // optional
 
   static void UpdateCacheHash(GOHash &hash);
@@ -120,7 +120,8 @@ public:
   }
 
   // Assign sequential parse indices to all release sections starting at
-  // startIndex.  Returns the next available index (= startIndex + release count).
+  // startIndex.  Returns the next available index (= startIndex + release
+  // count).
   unsigned AssignReleaseParseIndices(unsigned startIndex);
 
   // LUT computation result: support points plus the period used during
@@ -128,7 +129,7 @@ public:
   struct LutResult {
     std::vector<GOSoundReleaseAlignTable::CorrPoint> points;
     uint32_t period_samples = 0;
-    double   period_float   = 0.0;
+    double period_float = 0.0;
   };
 
   // Compute a permissive (no quality-guards) LUT for a release.

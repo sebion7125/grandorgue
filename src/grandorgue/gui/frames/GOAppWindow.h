@@ -21,7 +21,6 @@
 #include "threading/GOMutex.h"
 #include "updater/GOUpdateChecker.h"
 
-
 #include "GOEvent.h"
 
 enum {
@@ -36,7 +35,6 @@ enum {
   ID_LUT_CACHE_GENERATE,
   ID_LUT_CACHE_DELETE,
 };
-
 
 class GOAudioGauge;
 class GOConfig;

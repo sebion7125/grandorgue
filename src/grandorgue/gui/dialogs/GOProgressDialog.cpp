@@ -2,7 +2,7 @@
  * GrandOrgue - a free pipe organ simulator
  *
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -21,20 +21,23 @@
 
 #include "GOProgressDialog.h"
 
+#include <wx/log.h>
 #include <wx/progdlg.h>
 #include <wx/stopwatch.h>
-#include <wx/log.h>
 
 #define DLG_MAX_VALUE 0x10000
 
 GOProgressDialog::GOProgressDialog()
-  : m_dlg(NULL), m_last(0), m_const(0), m_value(0), m_max(0),
+  : m_dlg(NULL),
+    m_last(0),
+    m_const(0),
+    m_value(0),
+    m_max(0),
     m_lastReported(0) {}
 
 GOProgressDialog::~GOProgressDialog() {
   if (m_dlg)
     m_dlg->Destroy();
-  
 }
 
 void GOProgressDialog::Setup(
@@ -79,8 +82,10 @@ bool GOProgressDialog::Update(unsigned value, const wxString &msg) {
   int newValue = 0;
   if (m_max > 0) {
     double frac = (double)(m_value + m_const) / (double)m_max;
-    if (frac < 0.0) frac = 0.0;
-    if (frac > 1.0) frac = 1.0;
+    if (frac < 0.0)
+      frac = 0.0;
+    if (frac > 1.0)
+      frac = 1.0;
     newValue = (int)((DLG_MAX_VALUE - 1) * frac);
   }
 

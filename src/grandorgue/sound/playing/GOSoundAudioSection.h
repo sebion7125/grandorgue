@@ -231,11 +231,12 @@ public:
     return latest;
   }
 
-  // Returns the sample position of the first sustain loop end (inclusive, 0-based),
-  // matching Python's loops[0][1] from the SMPL chunk.
-  // Finds the EndSegment whose next_start_segment_index == 1
+  // Returns the sample position of the first sustain loop end (inclusive,
+  // 0-based), matching Python's loops[0][1] from the SMPL chunk. Finds the
+  // EndSegment whose next_start_segment_index == 1
   // (= m_StartSegments[1], the first loop start).
-  // Falls back to GetLatestLoopEnd() for single-loop pipes or unusual orderings.
+  // Falls back to GetLatestLoopEnd() for single-loop pipes or unusual
+  // orderings.
   inline unsigned GetFirstLoopEnd() const {
     for (const auto &seg : m_EndSegments)
       if (seg.next_start_segment_index == 1 && seg.end_pos > 0)
@@ -317,21 +318,22 @@ public:
 
   inline bool SupportsStreamAlignment() const { return (m_ReleaseAligner); }
 
-  void     SetReleaseParseIndex(unsigned idx) { m_releaseParseIndex = idx; }
+  void SetReleaseParseIndex(unsigned idx) { m_releaseParseIndex = idx; }
   unsigned GetReleaseParseIndex() const { return m_releaseParseIndex; }
 
   void SetupStreamAlignment(
     const std::vector<const GOSoundAudioSection *> &joinables,
     unsigned start_index,
-    float    sample_freq_hz    = 440.f,
-    unsigned harmonic_number   = 8,
-    unsigned min_key_press_ms  = 0,
-    unsigned max_key_press_ms  = 0,
-    bool     skipCorrLut       = false
+    float sample_freq_hz = 440.f,
+    unsigned harmonic_number = 8,
+    unsigned min_key_press_ms = 0,
+    unsigned max_key_press_ms = 0,
+    bool skipCorrLut = false
 #if __has_include("GOLogReleaseAlignEnable.h")
-    , const char *label        = nullptr
+    ,
+    const char *label = nullptr
 #endif
-    );
+  );
 
   void AssignAttackLutPointers(
     const std::vector<const GOSoundAudioSection *> &attacks);

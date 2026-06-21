@@ -2,8 +2,6 @@
 
 // Lookup tables for attack/transient behaviour per MIDI note (C0 to G9)
 
-
-
 // Dry
 extern const float g0_dry_by_midi[128];
 extern const float tmax_dry_by_midi[128];

@@ -222,7 +222,8 @@ void GOSoundSystem::AssureSoundIsClosed() {
   }
 }
 
-void GOSoundSystem::WithOrganEngineQuiesced(const std::function<void()> &action) {
+void GOSoundSystem::WithOrganEngineQuiesced(
+  const std::function<void()> &action) {
   GOMutexLocker locker(m_lock);
   GOMultiMutexLocker multi;
   for (unsigned i = 0; i < m_AudioOutputs.size(); i++)

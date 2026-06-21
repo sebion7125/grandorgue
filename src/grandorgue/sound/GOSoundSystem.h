@@ -128,7 +128,6 @@ private:
 public:
   void WithOrganEngineQuiesced(const std::function<void()> &action);
 
-
   static void FillDeviceNamePattern(
     const GOSoundDevInfo &deviceInfo, GODeviceNamePattern &pattern);
 

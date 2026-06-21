@@ -21,18 +21,18 @@ class wxStaticText;
 class GOLutCacheDlg : public wxDialog {
 public:
   GOLutCacheDlg(
-    wxWindow          *parent,
+    wxWindow *parent,
     GOOrganController *controller,
-    GOSoundSystem     &soundSystem);
+    GOSoundSystem &soundSystem);
 
 private:
   GOOrganController *p_controller;
-  GOSoundSystem     &r_soundSystem;
-  wxStaticText      *m_cacheStatusLabel; // shows current .golut file state
-  wxStaticText      *m_statusLabel;      // shows result of last action
-  wxCheckBox        *m_cbForceAll;       // force generation for all releases
+  GOSoundSystem &r_soundSystem;
+  wxStaticText *m_cacheStatusLabel; // shows current .golut file state
+  wxStaticText *m_statusLabel;      // shows result of last action
+  wxCheckBox *m_cbForceAll;         // force generation for all releases
 
-  void UpdateCacheStatus();             // refresh m_cacheStatusLabel from disk
+  void UpdateCacheStatus(); // refresh m_cacheStatusLabel from disk
   void OnGenerate(wxCommandEvent &event);
   void OnDelete(wxCommandEvent &event);
 

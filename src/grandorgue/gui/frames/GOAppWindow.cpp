@@ -9,13 +9,13 @@
 
 #include <algorithm>
 
+#include <wx/accel.h>
 #include <wx/choice.h>
 #include <wx/display.h>
 #include <wx/fileconf.h>
 #include <wx/filedlg.h>
 #include <wx/image.h>
 #include <wx/menu.h>
-#include <wx/accel.h>
 #include <wx/msgdlg.h>
 #include <wx/platinfo.h>
 #include <wx/sizer.h>
@@ -49,8 +49,8 @@
 #include "midi/GOMidiSystem.h"
 #include "midi/events/GOMidiEvent.h"
 #include "sound/GOCrossfadeParam.h"
-#include "sound/fast_crossfade.h"
 #include "sound/GOSoundSystem.h"
+#include "sound/fast_crossfade.h"
 #include "temperaments/GOTemperament.h"
 #include "threading/GOMutexLocker.h"
 
@@ -94,12 +94,16 @@ EVT_MENU(ID_MIDI_MONITOR, GOAppWindow::OnMidiMonitor)
 EVT_MENU(ID_AUDIO_PANIC, GOAppWindow::OnAudioPanic)
 EVT_MENU(ID_AUDIO_MEMSET, GOAppWindow::OnAudioMemset)
 EVT_MENU(ID_AUDIO_STATE, GOAppWindow::OnAudioState)
-EVT_MENU_RANGE(ID_Crossfade_Linear, ID_Crossfade_Custom, GOAppWindow::OnSetCrossfade)
-EVT_MENU_RANGE(ID_ReleaseAlign_Legacy, ID_ReleaseAlign_Correlation, GOAppWindow::OnSetReleaseAlign)
+EVT_MENU_RANGE(
+  ID_Crossfade_Linear, ID_Crossfade_Custom, GOAppWindow::OnSetCrossfade)
+EVT_MENU_RANGE(
+  ID_ReleaseAlign_Legacy,
+  ID_ReleaseAlign_Correlation,
+  GOAppWindow::OnSetReleaseAlign)
 EVT_MENU(ID_LUT_CACHE_GENERATE, GOAppWindow::OnLutCacheGenerate)
-EVT_MENU(ID_LUT_CACHE_DELETE,   GOAppWindow::OnLutCacheDelete)
+EVT_MENU(ID_LUT_CACHE_DELETE, GOAppWindow::OnLutCacheDelete)
 EVT_UPDATE_UI(ID_LUT_CACHE_GENERATE, GOAppWindow::OnUpdateLutCache)
-EVT_UPDATE_UI(ID_LUT_CACHE_DELETE,   GOAppWindow::OnUpdateLutCache)
+EVT_UPDATE_UI(ID_LUT_CACHE_DELETE, GOAppWindow::OnUpdateLutCache)
 EVT_MENU(ID_SETTINGS, GOAppWindow::OnSettings)
 EVT_MENU(ID_MIDI_LOAD, GOAppWindow::OnMidiLoad)
 EVT_MENU(wxID_HELP, GOAppWindow::OnHelp)
@@ -271,24 +275,30 @@ GOAppWindow::GOAppWindow(
     ID_MIDI_MONITOR, _("&Log MIDI events"), wxEmptyString, wxITEM_CHECK);
 
   m_crossfade_menu = new wxMenu;
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Linear,  _("Linear\tF7"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_SinEq,   _("Sinus (equal power)\tF8"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Sin2,    _("Sin^2\tF9"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_SqrtEq,  _("Sqrt (equal power)\tF10"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_X2,      _("x^2\tF11"));
-  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Custom,  _("Custom (Placeholder)\tF12"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Linear, _("Linear\tF7"));
+  m_crossfade_menu->AppendRadioItem(
+    ID_Crossfade_SinEq, _("Sinus (equal power)\tF8"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_Sin2, _("Sin^2\tF9"));
+  m_crossfade_menu->AppendRadioItem(
+    ID_Crossfade_SqrtEq, _("Sqrt (equal power)\tF10"));
+  m_crossfade_menu->AppendRadioItem(ID_Crossfade_X2, _("x^2\tF11"));
+  m_crossfade_menu->AppendRadioItem(
+    ID_Crossfade_Custom, _("Custom (Placeholder)\tF12"));
   m_audio_menu->AppendSubMenu(m_crossfade_menu, _("&Crossfade"));
 
   m_releasealign_menu = new wxMenu;
   m_releasealign_menu->AppendRadioItem(
-    ID_ReleaseAlign_Legacy,      _("Legacy (instantaneous values)\tF2"));
+    ID_ReleaseAlign_Legacy, _("Legacy (instantaneous values)\tF2"));
   m_releasealign_menu->AppendRadioItem(
     ID_ReleaseAlign_Correlation, _("Correlation (new)\tF3"));
   m_releasealign_menu->AppendSeparator();
   m_releasealign_menu->Append(
-    ID_LUT_CACHE_GENERATE, _("Generate LUT Cache..."), wxEmptyString, wxITEM_NORMAL);
+    ID_LUT_CACHE_GENERATE,
+    _("Generate LUT Cache..."),
+    wxEmptyString,
+    wxITEM_NORMAL);
   m_releasealign_menu->Append(
-    ID_LUT_CACHE_DELETE,   _("Delete LUT Cache"),    wxEmptyString, wxITEM_NORMAL);
+    ID_LUT_CACHE_DELETE, _("Delete LUT Cache"), wxEmptyString, wxITEM_NORMAL);
   m_audio_menu->AppendSubMenu(m_releasealign_menu, _("&Release Alignment"));
 
   {
@@ -299,33 +309,32 @@ GOAppWindow::GOAppWindow(
       m_releasealign_menu->Check(ID_ReleaseAlign_Legacy, true);
   }
 
-
   // Mark the menu radio item that matches the current runtime crossfade mode
   // (uses GOAudioParams::GetCrossfadeMode())
   {
     using namespace GOAudioParams;
     switch (GetCrossfadeMode()) {
-      case GOCrossfadeMode::Linear:
-        m_crossfade_menu->Check(ID_Crossfade_Linear, true);
-        break;
-      case GOCrossfadeMode::SinEqualPower:
-        m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
-        break;
-      case GOCrossfadeMode::Sin2:
-        m_crossfade_menu->Check(ID_Crossfade_Sin2, true);
-        break;
-      case GOCrossfadeMode::SqrtEqualPower:
-        m_crossfade_menu->Check(ID_Crossfade_SqrtEq, true);
-        break;
-      case GOCrossfadeMode::X2:
-        m_crossfade_menu->Check(ID_Crossfade_X2, true);
-        break;
-      case GOCrossfadeMode::Custom:
-        m_crossfade_menu->Check(ID_Crossfade_Custom, true);
-        break;
-      default:
-        m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
-        break;
+    case GOCrossfadeMode::Linear:
+      m_crossfade_menu->Check(ID_Crossfade_Linear, true);
+      break;
+    case GOCrossfadeMode::SinEqualPower:
+      m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+      break;
+    case GOCrossfadeMode::Sin2:
+      m_crossfade_menu->Check(ID_Crossfade_Sin2, true);
+      break;
+    case GOCrossfadeMode::SqrtEqualPower:
+      m_crossfade_menu->Check(ID_Crossfade_SqrtEq, true);
+      break;
+    case GOCrossfadeMode::X2:
+      m_crossfade_menu->Check(ID_Crossfade_X2, true);
+      break;
+    case GOCrossfadeMode::Custom:
+      m_crossfade_menu->Check(ID_Crossfade_Custom, true);
+      break;
+    default:
+      m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+      break;
     }
   }
 
@@ -348,11 +357,11 @@ GOAppWindow::GOAppWindow(
 
   {
     wxAcceleratorEntry entries[8];
-    entries[0].Set(wxACCEL_NORMAL, WXK_F2,  ID_ReleaseAlign_Legacy);
-    entries[1].Set(wxACCEL_NORMAL, WXK_F3,  ID_ReleaseAlign_Correlation);
-    entries[2].Set(wxACCEL_NORMAL, WXK_F7,  ID_Crossfade_Linear);
-    entries[3].Set(wxACCEL_NORMAL, WXK_F8,  ID_Crossfade_SinEq);
-    entries[4].Set(wxACCEL_NORMAL, WXK_F9,  ID_Crossfade_Sin2);
+    entries[0].Set(wxACCEL_NORMAL, WXK_F2, ID_ReleaseAlign_Legacy);
+    entries[1].Set(wxACCEL_NORMAL, WXK_F3, ID_ReleaseAlign_Correlation);
+    entries[2].Set(wxACCEL_NORMAL, WXK_F7, ID_Crossfade_Linear);
+    entries[3].Set(wxACCEL_NORMAL, WXK_F8, ID_Crossfade_SinEq);
+    entries[4].Set(wxACCEL_NORMAL, WXK_F9, ID_Crossfade_Sin2);
     entries[5].Set(wxACCEL_NORMAL, WXK_F10, ID_Crossfade_SqrtEq);
     entries[6].Set(wxACCEL_NORMAL, WXK_F11, ID_Crossfade_X2);
     entries[7].Set(wxACCEL_NORMAL, WXK_F12, ID_Crossfade_Custom);
@@ -668,32 +677,31 @@ void GOAppWindow::AttachDetachOrganController(bool isToAttach) {
         m_releasealign_menu->Check(ID_ReleaseAlign_Legacy, true);
     }
 
-
     // Sync crossfade menu with current runtime value when attaching an organ
     if (isToAttach && m_crossfade_menu) {
       using namespace GOAudioParams;
       switch (GetCrossfadeMode()) {
-        case GOCrossfadeMode::Linear:
-          m_crossfade_menu->Check(ID_Crossfade_Linear, true);
-          break;
-        case GOCrossfadeMode::SinEqualPower:
-          m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
-          break;
-        case GOCrossfadeMode::Sin2:
-          m_crossfade_menu->Check(ID_Crossfade_Sin2, true);
-          break;
-        case GOCrossfadeMode::SqrtEqualPower:
-          m_crossfade_menu->Check(ID_Crossfade_SqrtEq, true);
-          break;
-        case GOCrossfadeMode::X2:
-          m_crossfade_menu->Check(ID_Crossfade_X2, true);
-          break;
-        case GOCrossfadeMode::Custom:
-          m_crossfade_menu->Check(ID_Crossfade_Custom, true);
-          break;
-        default:
-          m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
-          break;
+      case GOCrossfadeMode::Linear:
+        m_crossfade_menu->Check(ID_Crossfade_Linear, true);
+        break;
+      case GOCrossfadeMode::SinEqualPower:
+        m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+        break;
+      case GOCrossfadeMode::Sin2:
+        m_crossfade_menu->Check(ID_Crossfade_Sin2, true);
+        break;
+      case GOCrossfadeMode::SqrtEqualPower:
+        m_crossfade_menu->Check(ID_Crossfade_SqrtEq, true);
+        break;
+      case GOCrossfadeMode::X2:
+        m_crossfade_menu->Check(ID_Crossfade_X2, true);
+        break;
+      case GOCrossfadeMode::Custom:
+        m_crossfade_menu->Check(ID_Crossfade_Custom, true);
+        break;
+      default:
+        m_crossfade_menu->Check(ID_Crossfade_SinEq, true);
+        break;
       }
     }
   }
@@ -1327,12 +1335,24 @@ void GOAppWindow::OnSetCrossfade(wxCommandEvent &e) {
   using namespace GOAudioParams;
   GOCrossfadeMode m = GOCrossfadeMode::SinEqualPower;
   switch (e.GetId()) {
-    case ID_Crossfade_Linear:  m = GOCrossfadeMode::Linear; break;
-    case ID_Crossfade_SinEq:   m = GOCrossfadeMode::SinEqualPower; break;
-    case ID_Crossfade_Sin2:    m = GOCrossfadeMode::Sin2; break;
-    case ID_Crossfade_SqrtEq:  m = GOCrossfadeMode::SqrtEqualPower; break;
-    case ID_Crossfade_X2:      m = GOCrossfadeMode::X2; break;
-    case ID_Crossfade_Custom:  m = GOCrossfadeMode::Custom; break;
+  case ID_Crossfade_Linear:
+    m = GOCrossfadeMode::Linear;
+    break;
+  case ID_Crossfade_SinEq:
+    m = GOCrossfadeMode::SinEqualPower;
+    break;
+  case ID_Crossfade_Sin2:
+    m = GOCrossfadeMode::Sin2;
+    break;
+  case ID_Crossfade_SqrtEq:
+    m = GOCrossfadeMode::SqrtEqualPower;
+    break;
+  case ID_Crossfade_X2:
+    m = GOCrossfadeMode::X2;
+    break;
+  case ID_Crossfade_Custom:
+    m = GOCrossfadeMode::Custom;
+    break;
   }
   SetCrossfadeMode(m);
 
@@ -1357,17 +1377,18 @@ void GOAppWindow::OnUpdateLutCache(wxUpdateUIEvent &event) {
 }
 
 void GOAppWindow::OnLutCacheGenerate(wxCommandEvent &) {
-  if (!p_OrganController) return;
+  if (!p_OrganController)
+    return;
   GOLutCacheDlg dlg(this, p_OrganController, r_SoundSystem);
   dlg.ShowModal();
 }
 
 void GOAppWindow::OnLutCacheDelete(wxCommandEvent &) {
-  if (!p_OrganController) return;
+  if (!p_OrganController)
+    return;
   p_OrganController->DeleteLutCache();
-  r_SoundSystem.WithOrganEngineQuiesced([this]() {
-    p_OrganController->ClearAllCachedLuts();
-  });
+  r_SoundSystem.WithOrganEngineQuiesced(
+    [this]() { p_OrganController->ClearAllCachedLuts(); });
 }
 
 void GOAppWindow::OnOrganSettings(wxCommandEvent &event) {

@@ -183,11 +183,13 @@ public:
   bool UpdateCache(bool compress, GOProgressMonitor &monitor);
   unsigned GetLutReleaseCount() const { return m_lutReleaseCount; }
   const wxString &GetOdfHash() const { return m_ODFHash; }
-  wxString        GetLutCachePath() const;
+  wxString GetLutCachePath() const;
   unsigned EnumerateReleaseParseIndices();
-  bool GenerateLutCache(wxString &errorMsg, bool forceAll = false,
-                        std::atomic<unsigned> *p_progress = nullptr,
-                        std::atomic<bool>     *p_cancel   = nullptr);
+  bool GenerateLutCache(
+    wxString &errorMsg,
+    bool forceAll = false,
+    std::atomic<unsigned> *p_progress = nullptr,
+    std::atomic<bool> *p_cancel = nullptr);
   void DeleteLutCache();
   void ClearAllCachedLuts();
   bool ApplyLutCacheNow();

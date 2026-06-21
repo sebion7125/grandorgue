@@ -300,8 +300,8 @@ void GOSoundProviderWave::LoadFromOneFile(
       // Explicit 0 in ODF = "no crossfade / traktur noise" → respect it (0).
       const unsigned effectiveCrossfade
         = (releaseCrossfadeLength == (unsigned)-1u)
-          ? midiKeyCrossfadeLength     // not specified → use key-based default
-          : releaseCrossfadeLength;    // explicit (including 0 = no crossfade)
+        ? midiKeyCrossfadeLength  // not specified → use key-based default
+        : releaseCrossfadeLength; // explicit (including 0 = no crossfade)
       AddReleaseSection(
         pool,
         loaderFilename,

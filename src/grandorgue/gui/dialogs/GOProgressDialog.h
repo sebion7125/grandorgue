@@ -1,4 +1,4 @@
- /*
+/*
  * GrandOrgue - a free pipe organ simulator
  *
  * Copyright 2006 Milan Digital Audio LLC
