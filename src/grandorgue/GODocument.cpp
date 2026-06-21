@@ -12,6 +12,7 @@
 #include "config/GOConfig.h"
 #include "document-base/GOView.h"
 #include "gui/dialogs/GOMidiObjectstDialog.h"
+#include "gui/dialogs/GOProgressDialog.h"
 #include "gui/dialogs/midi-event/GOMidiEventDialog.h"
 #include "gui/dialogs/organ-settings/GOOrganSettingsDialog.h"
 #include "gui/frames/GOFrame.h"
@@ -56,7 +57,7 @@ GOOrganController *GODocument::LoadOrgan(
 
   CloseOrgan();
   m_OrganController = new GOOrganController(cfg, true);
-  wxString error = m_OrganController->Load(dlg, organ, cmb, isGuiOnly);
+  wxString error = m_OrganController->Load(organ, cmb, isGuiOnly, *dlg);
 
   if (error.IsEmpty()) {
     cfg.AddOrgan(m_OrganController->GetOrganInfo());
@@ -101,7 +102,7 @@ GOOrganController *GODocument::LoadOrgan(
 bool GODocument::UpdateCache(GOProgressDialog *dlg, bool compress) {
   if (!m_OrganController)
     return false;
-  return m_OrganController->UpdateCache(dlg, compress);
+  return m_OrganController->UpdateCache(compress, *dlg);
 }
 
 void GODocument::ShowPanel(unsigned id) {

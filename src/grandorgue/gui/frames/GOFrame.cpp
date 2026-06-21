@@ -1018,7 +1018,7 @@ void GOFrame::OnCache(wxCommandEvent &event) {
   GOProgressDialog dlg;
 
   if (p_OrganController)
-    res = p_OrganController->UpdateCache(&dlg, r_config.CompressCache());
+    res = p_OrganController->UpdateCache(r_config.CompressCache(), dlg);
   if (!res) {
     wxLogError(_("Creating the cache failed"));
     GOMessageBox(
