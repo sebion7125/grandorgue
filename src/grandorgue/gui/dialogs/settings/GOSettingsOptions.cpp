@@ -15,10 +15,10 @@
 #include <wx/spinctrl.h>
 #include <wx/stattext.h>
 
+#include "GOMemoryPool.h"
 #include "config/GOConfig.h"
 #include "gui/wxcontrols/GOChoice.h"
 #include "sound/GOSoundDefs.h"
-#include "GOMemoryPool.h"
 
 #include "go_limits.h"
 
@@ -343,7 +343,8 @@ GOSettingsOptions::GOSettingsOptions(GOConfig &settings, wxWindow *parent)
     0,
     wxALL);
   m_MemoryLimit->SetRange(0, 1024 * 1024);
-  m_MemoryLimit->Bind(wxEVT_SPINCTRL, &GOSettingsOptions::OnMemoryLimitSpin, this);
+  m_MemoryLimit->Bind(
+    wxEVT_SPINCTRL, &GOSettingsOptions::OnMemoryLimitSpin, this);
   m_MemoryLimit->Bind(wxEVT_TEXT, &GOSettingsOptions::OnMemoryLimitText, this);
   m_MemoryLimitWarn = new wxStaticText(this, wxID_ANY, wxEmptyString);
   item6->Add(m_MemoryLimitWarn, 0, wxLEFT | wxRIGHT | wxBOTTOM, 5);
@@ -454,7 +455,8 @@ bool GOSettingsOptions::NeedRestart() {
 }
 
 void GOSettingsOptions::UpdateMemoryLimitWarning() {
-  if (!m_MemoryLimitWarn || !m_MemoryLimit) return;
+  if (!m_MemoryLimitWarn || !m_MemoryLimit)
+    return;
 
   const int cfgMB = m_MemoryLimit->GetValue(); // 0 = unlimited
   const size_t sysMB = GOMemoryPool::GetSystemMemoryLimit();
@@ -463,7 +465,8 @@ void GOSettingsOptions::UpdateMemoryLimitWarning() {
   wxColour col = *wxBLACK;
 
   if (cfgMB <= 0) {
-    txt = _("0 = unlimited. This may cause swapping and audio dropouts on low-RAM systems.");
+    txt = _("0 = unlimited. This may cause swapping and audio dropouts on "
+            "low-RAM systems.");
     col = *wxRED;
   } else if (sysMB > 0) {
     const unsigned pct = (unsigned)((uint64_t)cfgMB * 100 / sysMB);
@@ -471,12 +474,16 @@ void GOSettingsOptions::UpdateMemoryLimitWarning() {
       txt = wxString::Format(
         _("Warning: Memory limit uses %u%% of system RAM (%d/%lu MB). "
           "This may trigger swapping and stuttering (especially in VMs)."),
-        pct, cfgMB, (unsigned long)sysMB);
+        pct,
+        cfgMB,
+        (unsigned long)sysMB);
       col = *wxRED;
     } else {
       txt = wxString::Format(
         _("System RAM: %lu MB. Recommended <= 80%%. Current: %d MB (%u%%)."),
-        (unsigned long)sysMB, cfgMB, pct);
+        (unsigned long)sysMB,
+        cfgMB,
+        pct);
     }
   } else {
     txt = _("System RAM unknown; set a conservative value to avoid swapping.");
