@@ -42,11 +42,12 @@ export PATH="$MINGW_DIR/bin:$PATH"
 # Export WX_CONFIG (now that MINGW_DIR is defined)
 WX_CONFIG="$MINGW_DIR/bin/wx-config"; export WX_CONFIG
 
-# ⚠️ Verhindert unnötige Debug-Infos
 # Set GO_LOG_RELEASE_ALIGN=1 before calling this script to enable release-align logging.
+# Note: keep debug info enabled here (no -g0/-s) — cv2pdb needs CodeView/DWARF
+# entries in the linked exe to split out the .pdb (see BuildExecutable.cmake).
 LOG_RELEASE_ALIGN_FLAG="${GO_LOG_RELEASE_ALIGN:+-DGO_LOG_RELEASE_ALIGN}"
-export CXXFLAGS="-O3 -DNDEBUG -g0 $LOG_RELEASE_ALIGN_FLAG"
-export CFLAGS="-O3 -DNDEBUG -g0"
+export CXXFLAGS="-O3 -DNDEBUG $LOG_RELEASE_ALIGN_FLAG"
+export CFLAGS="-O3 -DNDEBUG"
 
 cmake "$SRC_DIR" \
   $CMAKE_MINGW_PRMS \
@@ -57,10 +58,6 @@ cmake "$SRC_DIR" \
   -DINSTALL_DEPEND=ON \
   -DMSYS=1 -DSTATIC=0 \
   -DRTAUDIO_USE_ASIO=ON \
-  -DCMAKE_BUILD_TYPE=Release \
-  "-DCMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG -g0" \
-  "-DCMAKE_CXX_FLAGS_RELEASE:STRING=-O3 -DNDEBUG -g0" \
-  "-DCMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=-s" \
   -DVC_PATH=/usr/local/share/wine/msvc/VC/Tools/MSVC/14.29.30133/bin/Hostx86/x86
 
 CMAKE_APP_PRMS="-DGO_USE_JACK=ON $CMAKE_VERSION_PRMS $CMAKE_RELEASE_FLAG_PRM"
