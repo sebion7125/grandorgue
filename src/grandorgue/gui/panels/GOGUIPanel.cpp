@@ -6,7 +6,7 @@
  */
 
 #include "GOGUIPanel.h"
- 
+
 #include <wx/image.h>
 
 #include "combinations/GOSetter.h"
@@ -722,26 +722,30 @@ void GOGUIPanel::Load(GOConfigReader &cfg, const wxString &group) {
   }
 }
 
-// Create a lightweight snapshot of the panel config that can be stored on the heap.
-// This intentionally only captures a small subset of values that are safe to read
-// without keeping a reference to the underlying config DB.
+// Create a lightweight snapshot of the panel config that can be stored on the
+// heap. This intentionally only captures a small subset of values that are safe
+// to read without keeping a reference to the underlying config DB.
 std::shared_ptr<GOGUIPanel::LoadSnapshot> GOGUIPanel::CreateLoadSnapshot(
-  GOConfigReader &cfg,
-  const wxString &group) {
+  GOConfigReader &cfg, const wxString &group) {
   auto snap = std::make_shared<LoadSnapshot>();
   snap->group = group;
   snap->is_main_panel = group.IsEmpty();
   // Read a few common integer values; defaults used if not present.
-  snap->NumberOfImages = cfg.ReadInteger(ODFSetting, group, wxT("NumberOfImages"), 0, 999, false, 0);
-  snap->NumberOfGUIElements = cfg.ReadInteger(ODFSetting, group, wxT("NumberOfGUIElements"), 0, 999, false, 0);
-  snap->NumberOfLabels = cfg.ReadInteger(ODFSetting, group, wxT("NumberOfLabels"), 0, 999, false, 0);
-  snap->NumberOfManuals = cfg.ReadInteger(ODFSetting, group, wxT("NumberOfManuals"), 0, 999, false, 0);
+  snap->NumberOfImages = cfg.ReadInteger(
+    ODFSetting, group, wxT("NumberOfImages"), 0, 999, false, 0);
+  snap->NumberOfGUIElements = cfg.ReadInteger(
+    ODFSetting, group, wxT("NumberOfGUIElements"), 0, 999, false, 0);
+  snap->NumberOfLabels = cfg.ReadInteger(
+    ODFSetting, group, wxT("NumberOfLabels"), 0, 999, false, 0);
+  snap->NumberOfManuals = cfg.ReadInteger(
+    ODFSetting, group, wxT("NumberOfManuals"), 0, 999, false, 0);
   return snap;
 }
 
 void GOGUIPanel::LoadFromSnapshot(std::shared_ptr<LoadSnapshot> snap) {
-  // Minimal, safe deferred handler: set identifying fields and perform lightweight actions.
-  // Full reconstruction of controls from snapshot is a follow-up task.
+  // Minimal, safe deferred handler: set identifying fields and perform
+  // lightweight actions. Full reconstruction of controls from snapshot is a
+  // follow-up task.
   if (!snap)
     return;
   // Use snapshot values to set basic metadata so logs remain useful.

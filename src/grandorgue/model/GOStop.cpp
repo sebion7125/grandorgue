@@ -106,10 +106,13 @@ void GOStop::Load(GOConfigReader &cfg, const wxString &group) {
         cfg,
         group,
         m_FirstMidiNoteNumber - info.FirstPipeNumber
-          + info.FirstAccessibleKeyNumber + m_FirstAccessiblePipeLogicalKeyNumber
-          - 1);
+          + info.FirstAccessibleKeyNumber
+          + m_FirstAccessiblePipeLogicalKeyNumber - 1);
       long __go_rank_from_stop_ms = __go_rank_from_stop_sw.Time();
-      LOG_TIMING(wxString::Format("Timing: GOStop %s created Rank Load %ld ms", group.c_str(), __go_rank_from_stop_ms));
+      LOG_TIMING(wxString::Format(
+        "Timing: GOStop %s created Rank Load %ld ms",
+        group.c_str(),
+        __go_rank_from_stop_ms));
     }
     info.StopID = info.Rank->RegisterStop(this);
     m_RankInfo.push_back(info);
@@ -118,7 +121,8 @@ void GOStop::Load(GOConfigReader &cfg, const wxString &group) {
   m_KeyVelocities.resize(m_NumberOfAccessiblePipes);
   std::fill(m_KeyVelocities.begin(), m_KeyVelocities.end(), 0);
   // Log total stop load time
-  LOG_TIMING(wxString::Format("Timing: GOStop %s Load total %ld ms", group.c_str(), __go_stop_sw.Time()));
+  LOG_TIMING(wxString::Format(
+    "Timing: GOStop %s Load total %ld ms", group.c_str(), __go_stop_sw.Time()));
   GODrawstop::Load(cfg, group);
 }
 

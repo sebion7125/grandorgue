@@ -1,8 +1,8 @@
- /*
+/*
  * GrandOrgue - a free pipe organ simulator
  *
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2023 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -49,7 +49,8 @@ public:
   void Reset(long max, const wxString &msg = wxEmptyString);
   // Reset a progress segment that will be reported into the percent range
   // [start_pct .. end_pct]. 'max' is the number of units in this segment.
-  void ResetRange(long max, int start_pct, int end_pct, const wxString &msg = wxEmptyString);
+  void ResetRange(
+    long max, int start_pct, int end_pct, const wxString &msg = wxEmptyString);
 
   bool Update(unsigned value, const wxString &msg);
 };

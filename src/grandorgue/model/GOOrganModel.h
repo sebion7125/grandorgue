@@ -8,8 +8,8 @@
 #ifndef GOORGANMODEL_H
 #define GOORGANMODEL_H
 
-#include <set>
 #include <functional>
+#include <set>
 
 #include "ptrvector.h"
 
@@ -123,7 +123,8 @@ public:
   // Report progress from subcomponents. Accepts percent [0..100] relative to
   // the whole model build. Subcomponents (e.g. GOManual) should call this to
   // forward local progress to the global sink.
-  // Implemented inline to avoid possible link-order issues when cross-compiling.
+  // Implemented inline to avoid possible link-order issues when
+  // cross-compiling.
   void ReportProgress(unsigned pct, const wxString &label) {
     if (m_onProgress)
       m_onProgress(pct, label);

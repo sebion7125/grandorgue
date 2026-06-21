@@ -57,18 +57,18 @@ GOSoundingPipe::GOSoundingPipe(
     m_SoundProvider(this),
     m_PipeConfigNode(
       &rank->GetPipeConfig(), *pOrganModel, this, &m_SoundProvider) {
-        m_SoundProvider.SetOwnerPipe(this);
+  m_SoundProvider.SetOwnerPipe(this);
 
-        // Optional: pass through the rank ID (if needed)
-        if (m_Rank) {
+  // Optional: pass through the rank ID (if needed)
+  if (m_Rank) {
 
-          // There is no official GetId() call in the rank header; so either:
-          //  - define/maintain a rank ID yourself, or
-          //  - use name/pointer. For now we only store the info
-          //    that this provider belongs to *this* pipe/rank:
-          //m_SoundProvider.SetOwnerRankId(<your_desired_id>);
-        }
-      }
+    // There is no official GetId() call in the rank header; so either:
+    //  - define/maintain a rank ID yourself, or
+    //  - use name/pointer. For now we only store the info
+    //    that this provider belongs to *this* pipe/rank:
+    // m_SoundProvider.SetOwnerRankId(<your_desired_id>);
+  }
+}
 
 void GOSoundingPipe::Init(
   GOConfigReader &cfg,
@@ -114,7 +114,6 @@ void GOSoundingPipe::LoadAttackFileInfo(
   GOConfigReader &cfg, const wxString &group, const wxString &prefix) {
   GOSoundProviderWave::AttackFileInfo ainfo;
 
-  
   ainfo.filename.Assign(cfg.ReadFileName(ODFSetting, group, prefix));
   ainfo.m_WaveTremulantStateFor = cfg.ReadBool3FromInt(
     ODFSetting, group, prefix + wxT("IsTremulant"), false);
@@ -186,7 +185,13 @@ void GOSoundingPipe::LoadAttackFileInfo(
     // UINT_MAX = "not specified" sentinel → fall back to MIDI-key default.
     // Explicit 0 in ODF = "no crossfade / traktur noise" → respect it (0).
     const int rawXfade = cfg.ReadInteger(
-      ODFSetting, group, prefix + wxT("ReleaseCrossfadeLength"), 0, 3000, false, -1);
+      ODFSetting,
+      group,
+      prefix + wxT("ReleaseCrossfadeLength"),
+      0,
+      3000,
+      false,
+      -1);
     ainfo.m_ReleaseCrossfadeLength
       = (rawXfade >= 0) ? (unsigned)rawXfade : (unsigned)-1u;
   } else
@@ -220,13 +225,19 @@ void GOSoundingPipe::LoadReleaseFileInfo(
     MAX_SAMPLE_LENGTH,
     false,
     -1);
-  // -1 default = key absent in ODF (ReadInteger does not range-check the default).
-  // UINT_MAX = "not set" sentinel → midiKeyCrossfadeLength fallback at load time.
-  // Explicit 0 in ODF = "no crossfade" (traktur noise / key click) → no LUT.
+  // -1 default = key absent in ODF (ReadInteger does not range-check the
+  // default). UINT_MAX = "not set" sentinel → midiKeyCrossfadeLength fallback
+  // at load time. Explicit 0 in ODF = "no crossfade" (traktur noise / key
+  // click) → no LUT.
   {
     const int rawXfade = cfg.ReadInteger(
-      ODFSetting, group, prefix + wxT("ReleaseCrossfadeLength"),
-      0, 3000, false, -1);
+      ODFSetting,
+      group,
+      prefix + wxT("ReleaseCrossfadeLength"),
+      0,
+      3000,
+      false,
+      -1);
     rinfo.m_ReleaseCrossfadeLength
       = (rawXfade >= 0) ? (unsigned)rawXfade : (unsigned)-1u;
   }
@@ -309,8 +320,11 @@ void GOSoundingPipe::LoadData(
   if (m_Rank) {
     char lbl[128];
     std::snprintf(
-      lbl, sizeof(lbl), "%s|midi=%u",
-      m_Rank->GetName().Lower().utf8_str().data(), m_MidiKeyNumber);
+      lbl,
+      sizeof(lbl),
+      "%s|midi=%u",
+      m_Rank->GetName().Lower().utf8_str().data(),
+      m_MidiKeyNumber);
     m_SoundProvider.SetLabel(lbl);
   }
 #endif

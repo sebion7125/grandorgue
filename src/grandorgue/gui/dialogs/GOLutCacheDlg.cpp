@@ -32,20 +32,19 @@ enum {
 
 wxBEGIN_EVENT_TABLE(GOLutCacheDlg, wxDialog)
   EVT_BUTTON(ID_BTN_GENERATE, GOLutCacheDlg::OnGenerate)
-  EVT_BUTTON(ID_BTN_DELETE,   GOLutCacheDlg::OnDelete)
-wxEND_EVENT_TABLE()
+    EVT_BUTTON(ID_BTN_DELETE, GOLutCacheDlg::OnDelete) wxEND_EVENT_TABLE()
 
-GOLutCacheDlg::GOLutCacheDlg(
-  wxWindow          *parent,
-  GOOrganController *controller,
-  GOSoundSystem     &soundSystem)
+      GOLutCacheDlg::GOLutCacheDlg(
+        wxWindow *parent,
+        GOOrganController *controller,
+        GOSoundSystem &soundSystem)
   : wxDialog(
-      parent,
-      wxID_ANY,
-      _("Release Alignment LUT Cache"),
-      wxDefaultPosition,
-      wxDefaultSize,
-      wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
+    parent,
+    wxID_ANY,
+    _("Release Alignment LUT Cache"),
+    wxDefaultPosition,
+    wxDefaultSize,
+    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
     p_controller(controller),
     r_soundSystem(soundSystem),
     m_cacheStatusLabel(nullptr),
@@ -57,7 +56,9 @@ GOLutCacheDlg::GOLutCacheDlg(
   // ── Current cache status ──────────────────────────────────────────────────
   topSizer->Add(
     new wxStaticText(this, wxID_ANY, _("Current cache status:")),
-    0, wxLEFT | wxTOP | wxRIGHT, 10);
+    0,
+    wxLEFT | wxTOP | wxRIGHT,
+    10);
   m_cacheStatusLabel = new wxStaticText(this, wxID_ANY, wxEmptyString);
   topSizer->Add(m_cacheStatusLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
   UpdateCacheStatus();
@@ -67,24 +68,30 @@ GOLutCacheDlg::GOLutCacheDlg(
   // ── Info text ─────────────────────────────────────────────────────────────
   topSizer->Add(
     new wxStaticText(
-      this, wxID_ANY,
+      this,
+      wxID_ANY,
       _("Generates a pre-computed LUT cache for release alignment.\n\n"
         "Default: only releases that passed quality checks during the last\n"
         "organ load are cached (recommended for most organs).\n\n"
         "Force all: also includes releases that normally use the legacy\n"
         "fallback path (drift, low coherence, mixtures). The resulting LUT\n"
         "may be imperfect but avoids recomputation on every load.")),
-    0, wxALL, 10);
+    0,
+    wxALL,
+    10);
 
   // ── Force-all checkbox ────────────────────────────────────────────────────
   m_cbForceAll = new wxCheckBox(
-    this, wxID_ANY,
-    _("Force generation for all releases (including legacy-fallback releases)"));
+    this,
+    wxID_ANY,
+    _("Force generation for all releases (including legacy-fallback "
+      "releases)"));
   topSizer->Add(m_cbForceAll, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
 
   // ── CPU hint ──────────────────────────────────────────────────────────────
   wxStaticText *hint = new wxStaticText(
-    this, wxID_ANY,
+    this,
+    wxID_ANY,
     _("Cache generation is CPU intensive.\n"
       "Audio playback remains available during generation\n"
       "but may stutter on slower systems."));
@@ -98,15 +105,11 @@ GOLutCacheDlg::GOLutCacheDlg(
   // ── Buttons ───────────────────────────────────────────────────────────────
   wxBoxSizer *btnSizer = new wxBoxSizer(wxHORIZONTAL);
   btnSizer->Add(
-    new wxButton(this, ID_BTN_GENERATE, _("Generate")),
-    0, wxRIGHT, 6);
+    new wxButton(this, ID_BTN_GENERATE, _("Generate")), 0, wxRIGHT, 6);
   btnSizer->Add(
-    new wxButton(this, ID_BTN_DELETE, _("Delete Cache")),
-    0, wxRIGHT, 6);
+    new wxButton(this, ID_BTN_DELETE, _("Delete Cache")), 0, wxRIGHT, 6);
   btnSizer->AddStretchSpacer();
-  btnSizer->Add(
-    new wxButton(this, wxID_CLOSE, _("Close")),
-    0);
+  btnSizer->Add(new wxButton(this, wxID_CLOSE, _("Close")), 0);
   topSizer->Add(btnSizer, 0, wxEXPAND | wxALL, 10);
 
   SetSizerAndFit(topSizer);
@@ -114,7 +117,8 @@ GOLutCacheDlg::GOLutCacheDlg(
 }
 
 void GOLutCacheDlg::UpdateCacheStatus() {
-  if (!m_cacheStatusLabel || !p_controller) return;
+  if (!m_cacheStatusLabel || !p_controller)
+    return;
 
   const wxString path = p_controller->GetLutCachePath();
 
@@ -129,7 +133,9 @@ void GOLutCacheDlg::UpdateCacheStatus() {
   // just for the status display.  The LUT data is already in RAM from Load().
   GOLutCacheReader reader;
   const bool valid = reader.Load(
-    path, p_controller->GetOdfHash(), p_controller->GetLutReleaseCount(),
+    path,
+    p_controller->GetOdfHash(),
+    p_controller->GetLutReleaseCount(),
     /*headerOnly=*/true);
 
   if (!valid) {
@@ -149,7 +155,8 @@ void GOLutCacheDlg::UpdateCacheStatus() {
 }
 
 void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
-  if (!p_controller) return;
+  if (!p_controller)
+    return;
 
   const bool forceAll = m_cbForceAll && m_cbForceAll->IsChecked();
   const unsigned total = p_controller->GetLutReleaseCount();
@@ -168,20 +175,21 @@ void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
   wxProgressDialog prog(
     _("Release Alignment LUT Cache"),
     _("Initialising..."),
-    (int)total, this,
-    wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_CAN_ABORT |
-    wxPD_ELAPSED_TIME | wxPD_REMAINING_TIME);
+    (int)total,
+    this,
+    wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME
+      | wxPD_REMAINING_TIME);
 
   std::atomic<unsigned> doneCount{0};
-  std::atomic<bool>     cancelled{false};
-  std::atomic<bool>     workerDone{false};
+  std::atomic<bool> cancelled{false};
+  std::atomic<bool> workerDone{false};
   wxString errorMsg;
-  bool     ok = false;
+  bool ok = false;
 
   // Run computation + file write in a background thread.
   std::thread worker([&]() {
-    ok = p_controller->GenerateLutCache(errorMsg, forceAll,
-                                        &doneCount, &cancelled);
+    ok = p_controller->GenerateLutCache(
+      errorMsg, forceAll, &doneCount, &cancelled);
     workerDone.store(true, std::memory_order_release);
   });
 
@@ -211,9 +219,8 @@ void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
 
   if (ok) {
     bool applied = false;
-    r_soundSystem.WithOrganEngineQuiesced([this, &applied]() {
-      applied = p_controller->ApplyLutCacheNow();
-    });
+    r_soundSystem.WithOrganEngineQuiesced(
+      [this, &applied]() { applied = p_controller->ApplyLutCacheNow(); });
     const wxString status = applied
       ? _("Cache generated and activated immediately.")
       : _("Cache generated. Will be used on next organ load.");
@@ -226,21 +233,24 @@ void GOLutCacheDlg::OnGenerate(wxCommandEvent &) {
     m_statusLabel->SetForegroundColour(*wxRED);
     GOMessageBox(
       wxString::Format(_("Cache generation failed:\n%s"), errorMsg),
-      _("LUT Cache"), wxOK | wxICON_ERROR, this);
+      _("LUT Cache"),
+      wxOK | wxICON_ERROR,
+      this);
   }
   Layout();
 }
 
 void GOLutCacheDlg::OnDelete(wxCommandEvent &) {
-  if (!p_controller) return;
+  if (!p_controller)
+    return;
   // Only delete the file.  Do NOT clear in-memory aligners: after
   // OverrideCorrLutsFromCache() the live-computed LUTs are gone and clearing
   // the injected LUT would leave empty aligners (legacy fallback, not
   // correlation).  Correct behaviour: current session keeps its alignment
   // state; the deletion takes effect on the next organ load.
   p_controller->DeleteLutCache();
-  m_statusLabel->SetLabel(
-    _("Cache file deleted. Current alignment state unchanged until next reload."));
+  m_statusLabel->SetLabel(_("Cache file deleted. Current alignment state "
+                            "unchanged until next reload."));
   m_statusLabel->SetForegroundColour(*wxBLACK);
   UpdateCacheStatus();
   Layout();

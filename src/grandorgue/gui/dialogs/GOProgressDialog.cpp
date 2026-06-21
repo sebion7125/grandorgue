@@ -2,7 +2,7 @@
  * GrandOrgue - a free pipe organ simulator
  *
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -22,9 +22,9 @@
 #include "GOProgressDialog.h"
 #include "gui/wxcontrols/go_gui_utils.h"
 
+#include <wx/log.h>
 #include <wx/progdlg.h>
 #include <wx/stopwatch.h>
-#include <wx/log.h>
 
 #define DLG_MAX_VALUE 0x10000
 
@@ -34,7 +34,6 @@ GOProgressDialog::GOProgressDialog()
 GOProgressDialog::~GOProgressDialog() {
   if (m_dlg)
     m_dlg->Destroy();
-  
 }
 
 void GOProgressDialog::Setup(
@@ -47,7 +46,6 @@ void GOProgressDialog::Setup(
   wxString paddedMsg = msg;
   const int padSpaces = 80; // larger padding to increase visible width
   paddedMsg += wxString(padSpaces, wxChar(0x00A0));
-
 
   m_dlg = new wxProgressDialog(
     title,
@@ -83,7 +81,8 @@ void GOProgressDialog::Reset(long max, const wxString &msg) {
   // compute current displayed percent from lastReportedValue
   double currentPct = 0.0;
   if (m_lastReportedValue > 0)
-    currentPct = (double)m_lastReportedValue * 100.0 / double(DLG_MAX_VALUE - 1);
+    currentPct
+      = (double)m_lastReportedValue * 100.0 / double(DLG_MAX_VALUE - 1);
 
   // new total max after adding this segment
   long newMax = m_max + (max ? max : 1);
@@ -101,17 +100,22 @@ void GOProgressDialog::Reset(long max, const wxString &msg) {
   m_last--;
 }
 
-void GOProgressDialog::ResetRange(long max, int start_pct, int end_pct, const wxString &msg) {
+void GOProgressDialog::ResetRange(
+  long max, int start_pct, int end_pct, const wxString &msg) {
   // Enable percent-range mode for the next segment.
-  if (start_pct < 0) start_pct = 0;
-  if (end_pct > 100) end_pct = 100;
-  if (end_pct <= start_pct) end_pct = std::min(100, start_pct + 1);
+  if (start_pct < 0)
+    start_pct = 0;
+  if (end_pct > 100)
+    end_pct = 100;
+  if (end_pct <= start_pct)
+    end_pct = std::min(100, start_pct + 1);
 
   // Prevent new segment from starting below the currently displayed percent
   // to avoid visible backward jumps.
   int currentDisplayedPct = 0;
   if (m_lastReportedValue > 0)
-    currentDisplayedPct = (int)((double)m_lastReportedValue * 100.0 / double(DLG_MAX_VALUE - 1));
+    currentDisplayedPct
+      = (int)((double)m_lastReportedValue * 100.0 / double(DLG_MAX_VALUE - 1));
   if (start_pct < currentDisplayedPct)
     start_pct = currentDisplayedPct;
 
@@ -145,13 +149,17 @@ bool GOProgressDialog::Update(unsigned value, const wxString &msg) {
     // Map value to percent range [m_rangeStartPct..m_rangeEndPct].
     // Two supported caller conventions:
     //  - percent-mode: callers pass values in 0..100 (percent)
-    //  - units-mode: callers pass values in 0..m_segmentMaxUnits (unit count/pos)
-    // Use a strict detection rule to avoid misinterpreting unit positions as percents:
-    //   If m_segmentMaxUnits == 100 => percent-mode; otherwise treat as units-mode.
+    //  - units-mode: callers pass values in 0..m_segmentMaxUnits (unit
+    //  count/pos)
+    // Use a strict detection rule to avoid misinterpreting unit positions as
+    // percents:
+    //   If m_segmentMaxUnits == 100 => percent-mode; otherwise treat as
+    //   units-mode.
     double frac = 0.0;
 
     if (m_segmentMaxUnits <= 1) {
-      // No granular units; treat any non-zero value as completion of the segment.
+      // No granular units; treat any non-zero value as completion of the
+      // segment.
       frac = (m_value > 0) ? 1.0 : 0.0;
     } else {
       if ((unsigned)m_segmentMaxUnits == 100) {
@@ -173,7 +181,8 @@ bool GOProgressDialog::Update(unsigned value, const wxString &msg) {
 
     double pct = m_rangeStartPct + frac * (m_rangeEndPct - m_rangeStartPct);
 
-    // Clamp pct defensively to [m_rangeStartPct..m_rangeEndPct] and overall [0..100]
+    // Clamp pct defensively to [m_rangeStartPct..m_rangeEndPct] and overall
+    // [0..100]
     if (pct < (double)m_rangeStartPct)
       pct = (double)m_rangeStartPct;
     if (pct > (double)m_rangeEndPct)

@@ -181,7 +181,8 @@ void GOManual::Load(GOConfigReader &cfg, const wxString &group) {
     }
   }
 
-  unsigned localTotalParts = nb_stops + m_ODFCouplerCount + nb_tremulants + extraPipeParts;
+  unsigned localTotalParts
+    = nb_stops + m_ODFCouplerCount + nb_tremulants + extraPipeParts;
   if (localTotalParts == 0)
     localTotalParts = 1;
   unsigned localProcessed = 0;
@@ -214,14 +215,16 @@ void GOManual::Load(GOConfigReader &cfg, const wxString &group) {
     // heavy pStop->Load execution. Use the same manual slice mapping.
     {
       unsigned aboutIndex = localProcessed + 1;
-      unsigned aboutPct = baseStart + (unsigned)((uint64_t)aboutIndex * (baseEnd - baseStart) / localTotalParts);
-    r_OrganModel.ReportProgress(
-      aboutPct,
-      wxString::Format(
-        _("Building: manual %d stops (%u/%u) - starting").c_str(),
-        m_manual_number,
-        aboutIndex > nb_stops ? nb_stops : aboutIndex,
-        nb_stops));
+      unsigned aboutPct = baseStart
+        + (unsigned)((uint64_t)aboutIndex * (baseEnd - baseStart)
+                     / localTotalParts);
+      r_OrganModel.ReportProgress(
+        aboutPct,
+        wxString::Format(
+          _("Building: manual %d stops (%u/%u) - starting").c_str(),
+          m_manual_number,
+          aboutIndex > nb_stops ? nb_stops : aboutIndex,
+          nb_stops));
     }
 
 #ifdef GO_PROFILE_ODFLOAD
@@ -232,21 +235,23 @@ void GOManual::Load(GOConfigReader &cfg, const wxString &group) {
 #ifdef GO_PROFILE_ODFLOAD
     {
       long __go_ms = __go_stopwatch.Time();
-      wxLogMessage(
-        wxString::Format(
-          "Timing: GOManual %d Stop %u Load %ld ms",
-          m_manual_number,
-          localNumber,
-          __go_ms));
+      wxLogMessage(wxString::Format(
+        "Timing: GOManual %d Stop %u Load %ld ms",
+        m_manual_number,
+        localNumber,
+        __go_ms));
     }
 #endif
     pStop->SetElementId(r_OrganModel.GetRecorderElementID(
       wxString::Format(wxT("M%dS%d"), m_manual_number, i)));
     m_stops.push_back(pStop);
 
-    // report local progress mapped into model progress window (finished this stop)
+    // report local progress mapped into model progress window (finished this
+    // stop)
     localProcessed++;
-    unsigned subPct = baseStart + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart) / localTotalParts);
+    unsigned subPct = baseStart
+      + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart)
+                   / localTotalParts);
     r_OrganModel.ReportProgress(
       subPct,
       wxString::Format(
@@ -269,7 +274,9 @@ void GOManual::Load(GOConfigReader &cfg, const wxString &group) {
       wxString::Format(wxT("M%dC%d"), m_manual_number, i)));
     // report local progress
     localProcessed++;
-    unsigned subPct = baseStart + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart) / localTotalParts);
+    unsigned subPct = baseStart
+      + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart)
+                   / localTotalParts);
     r_OrganModel.ReportProgress(
       subPct,
       wxString::Format(
@@ -294,7 +301,9 @@ void GOManual::Load(GOConfigReader &cfg, const wxString &group) {
 
     // report local progress
     localProcessed++;
-    unsigned subPct = baseStart + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart) / localTotalParts);
+    unsigned subPct = baseStart
+      + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart)
+                   / localTotalParts);
     r_OrganModel.ReportProgress(
       subPct,
       wxString::Format(
@@ -362,7 +371,9 @@ void GOManual::LoadDivisionals(GOConfigReader &cfg) {
 
     // report divisional progress mapped to model (use same manual range)
     unsigned partIndex = i + 1;
-    unsigned subPct = baseStart + (unsigned)((uint64_t)partIndex * (baseEnd - baseStart) / localTotalParts);
+    unsigned subPct = baseStart
+      + (unsigned)((uint64_t)partIndex * (baseEnd - baseStart)
+                   / localTotalParts);
     r_OrganModel.ReportProgress(
       subPct,
       wxString::Format(

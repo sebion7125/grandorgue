@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -34,19 +34,23 @@ public:
   // Public so callers (LUT cache loader, generator) can build point lists
   // without going through ComputeCorrelationLut.
   struct CorrPoint {
-    uint32_t loop_pos; // absolute sample position in loop (= n * period_samples)
-    uint16_t best_r;   // best release offset r* in samples, in [0, T)
-    uint8_t  flags;    // bit0=approach_up, bit1=is_jump, bit2=valid (v2 algorithm)
-    uint8_t  _pad;     // padding for 8-byte struct size
+    uint32_t
+      loop_pos;      // absolute sample position in loop (= n * period_samples)
+    uint16_t best_r; // best release offset r* in samples, in [0, T)
+    uint8_t flags; // bit0=approach_up, bit1=is_jump, bit2=valid (v2 algorithm)
+    uint8_t _pad;  // padding for 8-byte struct size
 
     // Flag constants
-    static constexpr uint8_t kFlagApproachUp = 0x01; // travel direction to this point is forward
-    static constexpr uint8_t kFlagIsJump     = 0x02; // circ dist/dn > T/16 → step, don't interpolate
-    static constexpr uint8_t kFlagValid      = 0x04; // flags computed by v2 algorithm (else: legacy)
+    static constexpr uint8_t kFlagApproachUp
+      = 0x01; // travel direction to this point is forward
+    static constexpr uint8_t kFlagIsJump
+      = 0x02; // circ dist/dn > T/16 → step, don't interpolate
+    static constexpr uint8_t kFlagValid
+      = 0x04; // flags computed by v2 algorithm (else: legacy)
 
     bool IsApproachUp() const { return (flags & kFlagApproachUp) != 0; }
-    bool IsJump()       const { return (flags & kFlagIsJump)     != 0; }
-    bool IsValid()      const { return (flags & kFlagValid)      != 0; }
+    bool IsJump() const { return (flags & kFlagIsJump) != 0; }
+    bool IsValid() const { return (flags & kFlagValid) != 0; }
   };
 
 private:
@@ -64,7 +68,7 @@ private:
   };
   std::vector<AttackLut> m_CorrLuts;
   uint32_t m_CorrPeriodSamples; // period length in samples (rounded integer)
-  double   m_CorrPeriodFloat;   // exact float period: sample_rate / freq_hz
+  double m_CorrPeriodFloat;     // exact float period: sample_rate / freq_hz
   uint32_t m_CorrCrossfadeLen;  // crossfade window length in samples
 
   const std::vector<CorrPoint> *FindLut(
@@ -100,16 +104,17 @@ public:
     const GOSoundAudioSection &release,
     unsigned crossfade_len,
     unsigned sample_rate,
-    float    sample_freq_hz,
+    float sample_freq_hz,
     unsigned harmonic_number,
     unsigned min_key_press_ms = 0,
     unsigned max_key_press_ms = 0,
-    bool     permissive       = false,
-    bool     exhaustive       = false
+    bool permissive = false,
+    bool exhaustive = false
 #if __has_include("GOLogReleaseAlignEnable.h")
-    , const char *label       = nullptr
+    ,
+    const char *label = nullptr
 #endif
-    );
+  );
 
   // Restore runtime attack pointers after cache load (in joinable order).
   void AssignAttackPointers(
@@ -118,17 +123,20 @@ public:
   unsigned GetPositionForCorrelation(
     unsigned loop_pos, const GOSoundAudioSection *p_Attack = nullptr) const;
 
-  unsigned GetPeriodSamples()    const { return m_CorrPeriodSamples; }
-  double   GetPeriodFloat()      const { return m_CorrPeriodFloat; }
+  unsigned GetPeriodSamples() const { return m_CorrPeriodSamples; }
+  double GetPeriodFloat() const { return m_CorrPeriodFloat; }
   unsigned GetCorrCrossfadeLen() const { return m_CorrCrossfadeLen; }
 
   // Set the period from the pitch formula only (no audio scan).
   // Used when ComputeCorrelationLut is skipped due to a pre-loaded LUT cache:
   // OverrideCorrLutsFromCache requires a non-zero period to apply the cache.
   void InitPeriodFromFormula(unsigned sample_rate, float sample_freq_hz) {
-    if (sample_freq_hz <= 0.f) return;
-    const unsigned T = (unsigned)((double)sample_rate / (double)sample_freq_hz + 0.5);
-    if (T >= 16) m_CorrPeriodSamples = T;
+    if (sample_freq_hz <= 0.f)
+      return;
+    const unsigned T
+      = (unsigned)((double)sample_rate / (double)sample_freq_hz + 0.5);
+    if (T >= 16)
+      m_CorrPeriodSamples = T;
   }
 
   // Returns true if at least one correlation LUT is present.
@@ -152,11 +160,12 @@ public:
   // No-op if m_CorrPeriodSamples ends up 0 or points is empty.
   void OverrideCorrLutsFromCache(
     std::vector<CorrPoint> points,
-    uint32_t               period_samples = 0,
-    double                 period_float   = 0.0);
+    uint32_t period_samples = 0,
+    double period_float = 0.0);
 
-  // If this aligner holds a cache-injected LUT (single entry, p_Attack=nullptr),
-  // remove it so that Legacy alignment is used until the next organ load.
+  // If this aligner holds a cache-injected LUT (single entry,
+  // p_Attack=nullptr), remove it so that Legacy alignment is used until the
+  // next organ load.
   void ClearCachedLut();
 
 #if __has_include("GOLogReleaseAlignVerbose.h")
@@ -169,7 +178,7 @@ public:
     const GOSoundAudioSection *p_Attack,
     uint32_t *out_pos,
     uint16_t *out_r,
-    unsigned  max_points) const;
+    unsigned max_points) const;
 #endif
 };
 

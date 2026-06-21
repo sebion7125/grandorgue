@@ -43,7 +43,8 @@ protected:
 
   unsigned m_MidiKeyNumber;
   float m_MidiPitchFract;
-  unsigned m_HarmonicNumber; // foot length as harmonic number: 8=8', 4=4', 16=16'
+  unsigned
+    m_HarmonicNumber; // foot length as harmonic number: 8=8', 4=4', 16=16'
   float m_Gain;
   float m_Tuning;
   int8_t m_ToneBalanceValue;
@@ -65,9 +66,13 @@ protected:
   std::string m_label;
 #endif
 
-  // Debug Sollution for retrieving the rank/pipe, that is associated with the sound provider. Needed to test Rank specific Release gain model
-  GOSoundingPipe* m_OwnerPipe = nullptr;
-  unsigned m_OwnerRankId = 0; // optionally, the sound provider can be associated with a rank, that is used to retrieve the rank/pipe, that is associated with the sound provider. Needed to test Rank specific Release gain model
+  // Debug Sollution for retrieving the rank/pipe, that is associated with the
+  // sound provider. Needed to test Rank specific Release gain model
+  GOSoundingPipe *m_OwnerPipe = nullptr;
+  unsigned m_OwnerRankId
+    = 0; // optionally, the sound provider can be associated with a rank, that
+         // is used to retrieve the rank/pipe, that is associated with the sound
+         // provider. Needed to test Rank specific Release gain model
 
   // When true, SetupStreamAlignment() skips ComputeCorrelationLut() because a
   // valid LUT cache will be applied afterwards (avoids redundant computation).
@@ -79,17 +84,16 @@ protected:
   float ComputeSampleFreqHz() const;
 
 public:
-
-  // Setters and getters for the above mentioned debug solution 
-  void SetOwnerPipe(GOSoundingPipe* p) { m_OwnerPipe = p; }
-  GOSoundingPipe* GetOwnerPipe() const { return m_OwnerPipe; }
+  // Setters and getters for the above mentioned debug solution
+  void SetOwnerPipe(GOSoundingPipe *p) { m_OwnerPipe = p; }
+  GOSoundingPipe *GetOwnerPipe() const { return m_OwnerPipe; }
 #if __has_include("sound/playing/GOLogReleaseAlignEnable.h")
   void SetLabel(const std::string &label) { m_label = label; }
   const std::string &GetLabel() const { return m_label; }
 #endif
   void SetSkipCorrLutCompute(bool skip) { m_skipCorrLutCompute = skip; }
   void SetHarmonicNumber(unsigned n) { m_HarmonicNumber = (n > 0) ? n : 8; }
-  void SetOwnerRankId(unsigned id) { m_OwnerRankId = id; } // optional
+  void SetOwnerRankId(unsigned id) { m_OwnerRankId = id; }  // optional
   unsigned GetOwnerRankId() const { return m_OwnerRankId; } // optional
 
   static void UpdateCacheHash(GOHash &hash);
@@ -136,7 +140,8 @@ public:
   }
 
   // Assign sequential parse indices to all release sections starting at
-  // startIndex.  Returns the next available index (= startIndex + release count).
+  // startIndex.  Returns the next available index (= startIndex + release
+  // count).
   unsigned AssignReleaseParseIndices(unsigned startIndex);
 
   // LUT computation result: support points plus the period used during
@@ -144,7 +149,7 @@ public:
   struct LutResult {
     std::vector<GOSoundReleaseAlignTable::CorrPoint> points;
     uint32_t period_samples = 0;
-    double   period_float   = 0.0;
+    double period_float = 0.0;
   };
 
   // Compute a permissive (no quality-guards) LUT for a release.

@@ -17,22 +17,23 @@
 #include "loader/GOLoaderFilename.h"
 #include "model/GOCacheObject.h"
 
+#include "../GOCrossfadeParam.h"
 #include "GOAlloc.h"
 #include "GOMemoryPool.h"
 #include "GOSampleStatistic.h"
 #include "GOSoundCompressionCache.h"
 #include "GOSoundReleaseAlignTable.h"
 #include "GOSoundResample.h"
-#include "../GOCrossfadeParam.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
- // maximal readahead is necessary for polyphase resampling
+// maximal readahead is necessary for polyphase resampling
 static constexpr unsigned MAX_READAHEAD = GOSoundResample::POLYPHASE_POINTS;
 static constexpr unsigned DEFAULT_END_SEG_LENGTH = MAX_READAHEAD * 2;
-static constexpr bool kForceLegacyLoopCrossfade = true; // when true, cached loop crossfades keep legacy cosine method
+static constexpr bool kForceLegacyLoopCrossfade
+  = true; // when true, cached loop crossfades keep legacy cosine method
 
 const unsigned GOSoundAudioSection::getMaxReadAhead() { return MAX_READAHEAD; }
 
@@ -320,7 +321,8 @@ void GOSoundAudioSection::DoCrossfade(
           SetSampleData(dest, pos + dest_offset, j, (int)result);
         }
       } else {
-        // runtime-configurable crossfade (uses current mode). kept ready for future switching.
+        // runtime-configurable crossfade (uses current mode). kept ready for
+        // future switching.
         using namespace GOAudioParams;
         const auto mode = GetCrossfadeMode();
         const auto g = go_crossfade_eval(mode, t);
@@ -360,7 +362,7 @@ void GOSoundAudioSection::Setup(
   m_loaderBasename[0] = '\0';
   if (pLoaderFilename) {
     wxFileName fn(pLoaderFilename->GetPath());
-    fn.SetPath(wxEmptyString);  // keep only name+ext
+    fn.SetPath(wxEmptyString); // keep only name+ext
     strncpy(
       m_loaderBasename,
       fn.GetFullName().utf8_str(),
@@ -610,15 +612,16 @@ void GOSoundAudioSection::AssignAttackLutPointers(
 void GOSoundAudioSection::SetupStreamAlignment(
   const std::vector<const GOSoundAudioSection *> &joinables,
   unsigned start_index,
-  float    sample_freq_hz,
+  float sample_freq_hz,
   unsigned harmonic_number,
   unsigned min_key_press_ms,
   unsigned max_key_press_ms,
-  bool     skipCorrLut
+  bool skipCorrLut
 #if __has_include("GOLogReleaseAlignEnable.h")
-  , const char *label
+  ,
+  const char *label
 #endif
-  ) {
+) {
   if (m_ReleaseAligner) {
     delete m_ReleaseAligner;
     m_ReleaseAligner = NULL;
@@ -647,15 +650,26 @@ void GOSoundAudioSection::SetupStreamAlignment(
       m_SampleRate,
       m_StartSegments[m_ReleaseStartSegment].start_offset);
 
-    if (start_index == 0 && !joinables.empty() && m_ReleaseCrossfadeLength > 0) {
+    if (
+      start_index == 0 && !joinables.empty() && m_ReleaseCrossfadeLength > 0) {
       if (!skipCorrLut) {
-        unsigned crossfade_samples = m_ReleaseCrossfadeLength * m_SampleRate / 1000;
+        unsigned crossfade_samples
+          = m_ReleaseCrossfadeLength * m_SampleRate / 1000;
         for (const GOSoundAudioSection *pAttack : joinables)
           m_ReleaseAligner->ComputeCorrelationLut(
-            *pAttack, *this, crossfade_samples, m_SampleRate, sample_freq_hz,
-            harmonic_number, min_key_press_ms, max_key_press_ms
+            *pAttack,
+            *this,
+            crossfade_samples,
+            m_SampleRate,
+            sample_freq_hz,
+            harmonic_number,
+            min_key_press_ms,
+            max_key_press_ms
 #if __has_include("GOLogReleaseAlignEnable.h")
-            , false, false, label
+            ,
+            false,
+            false,
+            label
 #endif
           );
       } else {

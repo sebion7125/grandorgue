@@ -1,14 +1,14 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2023 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
 
 #include "GOLoadThread.h"
 
-#include "model/GOCacheObject.h"
 #include "loader/GOLoadExceptions.h"
+#include "model/GOCacheObject.h"
 
 #include <wx/log.h>
 
@@ -47,9 +47,9 @@ void GOLoadThread::Entry() {
       // and handles its own per-object exceptions where possible.
     }
   } catch (const GOLoadAbortedPartial &) {
-    // Cooperative user abort observed in worker thread (partial abort during cache/WAV).
-    // Mark the flag so main thread can detect a user abort without producing
-    // a noisy "std::exception" log entry.
+    // Cooperative user abort observed in worker thread (partial abort during
+    // cache/WAV). Mark the flag so main thread can detect a user abort without
+    // producing a noisy "std::exception" log entry.
     m_userAbort.store(true);
   } catch (const GOLoadAbortedEarly &) {
     // Early aborts observed inside worker are unexpected but should be treated

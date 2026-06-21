@@ -163,18 +163,21 @@ float GOSoundProvider::ComputeSampleFreqHz() const {
     const unsigned keyMidi = m_OwnerPipe->GetKeyMidiNumber();
     if (m_MidiKeyNumber != keyMidi) {
       return 440.f
-        * std::pow(2.f, ((float)m_MidiKeyNumber + m_MidiPitchFract / 100.f - 69.f)
-                          / 12.f);
+        * std::pow(
+               2.f,
+               ((float)m_MidiKeyNumber + m_MidiPitchFract / 100.f - 69.f)
+                 / 12.f);
     } else {
       return 440.f
-        * std::pow(2.f, ((float)keyMidi + m_MidiPitchFract / 100.f - 69.f)
-                          / 12.f)
+        * std::pow(
+               2.f, ((float)keyMidi + m_MidiPitchFract / 100.f - 69.f) / 12.f)
         * ((float)m_HarmonicNumber / 8.f);
     }
   }
   return 440.f
-    * std::pow(2.f, ((float)m_MidiKeyNumber + m_MidiPitchFract / 100.f - 69.f)
-                      / 12.f)
+    * std::pow(
+           2.f,
+           ((float)m_MidiKeyNumber + m_MidiPitchFract / 100.f - 69.f) / 12.f)
     * ((float)m_HarmonicNumber / 8.f);
 }
 
@@ -191,8 +194,8 @@ void GOSoundProvider::ComputeReleaseAlignmentInfo() {
       if (m_ReleaseInfo[i].m_WaveTremulantStateFor != k)
         continue;
       const unsigned my_max = m_ReleaseInfo[i].max_playback_time;
-      // min_ms = highest max_playback_time in this group that is strictly below my_max.
-      // This works regardless of release sort order.
+      // min_ms = highest max_playback_time in this group that is strictly below
+      // my_max. This works regardless of release sort order.
       unsigned min_ms = 0;
       for (unsigned j = 0; j < m_Release.size(); j++) {
         if (j == i || m_ReleaseInfo[j].m_WaveTremulantStateFor != k)
@@ -204,10 +207,16 @@ void GOSoundProvider::ComputeReleaseAlignmentInfo() {
       // max_key_press_ms=0 signals "no limit" (unlimited release).
       const unsigned max_ms = (my_max == (unsigned)-1) ? 0u : my_max;
       m_Release[i]->SetupStreamAlignment(
-        sections, 0, sample_freq_hz, m_HarmonicNumber, min_ms, max_ms,
+        sections,
+        0,
+        sample_freq_hz,
+        m_HarmonicNumber,
+        min_ms,
+        max_ms,
         m_skipCorrLutCompute
 #if __has_include("sound/playing/GOLogReleaseAlignEnable.h")
-        , m_label.empty() ? nullptr : m_label.c_str()
+        ,
+        m_label.empty() ? nullptr : m_label.c_str()
 #endif
       );
     }
@@ -218,7 +227,8 @@ void GOSoundProvider::ComputeReleaseAlignmentInfo() {
         sections.push_back(m_Attack[i]);
     for (unsigned i = 0; i < m_Attack.size(); i++)
       if (m_AttackInfo[i].m_WaveTremulantStateFor == k)
-        m_Attack[i]->SetupStreamAlignment(sections, 1, sample_freq_hz, m_HarmonicNumber);
+        m_Attack[i]->SetupStreamAlignment(
+          sections, 1, sample_freq_hz, m_HarmonicNumber);
   }
 
   for (unsigned i = 1; i < m_Attack.size(); i++)
@@ -395,13 +405,15 @@ unsigned GOSoundProvider::AssignReleaseParseIndices(unsigned startIndex) {
   return startIndex + (unsigned)m_Release.size();
 }
 
-GOSoundProvider::LutResult
-GOSoundProvider::TryPermissiveLutForRelease(unsigned releaseIdx) const {
-  if (releaseIdx >= m_Release.size()) return {};
+GOSoundProvider::LutResult GOSoundProvider::TryPermissiveLutForRelease(
+  unsigned releaseIdx) const {
+  if (releaseIdx >= m_Release.size())
+    return {};
 
   const GOSoundAudioSection *rel = m_Release[releaseIdx];
   const unsigned crossfade_len = rel->GetReleaseCrossfadeLength();
-  if (crossfade_len < 2) return {};
+  if (crossfade_len < 2)
+    return {};
 
   const unsigned sample_rate = rel->GetSampleRate();
   const float sample_freq_hz = ComputeSampleFreqHz();
@@ -414,7 +426,8 @@ GOSoundProvider::TryPermissiveLutForRelease(unsigned releaseIdx) const {
   for (unsigned i = 0; i < m_Attack.size(); i++)
     if (m_AttackInfo[i].m_WaveTremulantStateFor == k)
       attacks.push_back(m_Attack[i]);
-  if (attacks.empty()) return {};
+  if (attacks.empty())
+    return {};
 
   // Determine key-press time window for this release.
   const unsigned my_max = m_ReleaseInfo[releaseIdx].max_playback_time;
@@ -432,21 +445,31 @@ GOSoundProvider::TryPermissiveLutForRelease(unsigned releaseIdx) const {
   GOSoundReleaseAlignTable tmp;
   for (const GOSoundAudioSection *att : attacks)
     tmp.ComputeCorrelationLut(
-      *att, *rel, crossfade_len, sample_rate, sample_freq_hz,
-      m_HarmonicNumber, min_ms, max_ms, /*permissive=*/true);
+      *att,
+      *rel,
+      crossfade_len,
+      sample_rate,
+      sample_freq_hz,
+      m_HarmonicNumber,
+      min_ms,
+      max_ms,
+      /*permissive=*/true);
 
   const auto *pts = tmp.GetFirstLutPoints();
-  if (!pts || pts->empty()) return {};
+  if (!pts || pts->empty())
+    return {};
   return {*pts, tmp.GetPeriodSamples(), tmp.GetPeriodFloat()};
 }
 
-GOSoundProvider::LutResult
-GOSoundProvider::TryExhaustiveLutForRelease(unsigned releaseIdx) const {
-  if (releaseIdx >= m_Release.size()) return {};
+GOSoundProvider::LutResult GOSoundProvider::TryExhaustiveLutForRelease(
+  unsigned releaseIdx) const {
+  if (releaseIdx >= m_Release.size())
+    return {};
 
   const GOSoundAudioSection *rel = m_Release[releaseIdx];
   const unsigned crossfade_len = rel->GetReleaseCrossfadeLength();
-  if (crossfade_len < 2) return {};
+  if (crossfade_len < 2)
+    return {};
 
   const unsigned sample_rate = rel->GetSampleRate();
   const float sample_freq_hz = ComputeSampleFreqHz();
@@ -457,7 +480,8 @@ GOSoundProvider::TryExhaustiveLutForRelease(unsigned releaseIdx) const {
   for (unsigned i = 0; i < m_Attack.size(); i++)
     if (m_AttackInfo[i].m_WaveTremulantStateFor == k)
       attacks.push_back(m_Attack[i]);
-  if (attacks.empty()) return {};
+  if (attacks.empty())
+    return {};
 
   const unsigned my_max = m_ReleaseInfo[releaseIdx].max_playback_time;
   unsigned min_ms = 0;
@@ -474,11 +498,19 @@ GOSoundProvider::TryExhaustiveLutForRelease(unsigned releaseIdx) const {
   GOSoundReleaseAlignTable tmp;
   for (const GOSoundAudioSection *att : attacks)
     tmp.ComputeCorrelationLut(
-      *att, *rel, crossfade_len, sample_rate, sample_freq_hz,
-      m_HarmonicNumber, min_ms, max_ms,
-      /*permissive=*/true, /*exhaustive=*/true);
+      *att,
+      *rel,
+      crossfade_len,
+      sample_rate,
+      sample_freq_hz,
+      m_HarmonicNumber,
+      min_ms,
+      max_ms,
+      /*permissive=*/true,
+      /*exhaustive=*/true);
 
   const auto *pts = tmp.GetFirstLutPoints();
-  if (!pts || pts->empty()) return {};
+  if (!pts || pts->empty())
+    return {};
   return {*pts, tmp.GetPeriodSamples(), tmp.GetPeriodFloat()};
 }

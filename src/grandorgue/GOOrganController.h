@@ -116,7 +116,7 @@ private:
   long long __tim_panels_ms;
   long long __tim_ranks_ms;
   long long __tim_modelrest_ms;
-  
+
   GOImageCache *mp_ImageCache;
   GOLabelControl m_PitchLabel;
   GOLabelControl m_TemperamentLabel;
@@ -181,7 +181,7 @@ public:
   unsigned GetLutReleaseCount() const { return m_lutReleaseCount; }
   // Public accessors for LUT cache support.
   const wxString &GetOdfHash() const { return m_ODFHash; }
-  wxString        GetLutCachePath() const;
+  wxString GetLutCachePath() const;
   // Assign sequential parse indices to all release sections of all pipes.
   // Returns the total count (stored in m_lutReleaseCount).
   unsigned EnumerateReleaseParseIndices();
@@ -193,9 +193,11 @@ public:
   // p_progress: optional atomic counter incremented per completed release.
   // p_cancel:   optional flag; worker threads stop early when set to true.
   // Returns true on success, sets errorMsg on failure or cancellation.
-  bool GenerateLutCache(wxString &errorMsg, bool forceAll = false,
-                        std::atomic<unsigned> *p_progress = nullptr,
-                        std::atomic<bool>     *p_cancel   = nullptr);
+  bool GenerateLutCache(
+    wxString &errorMsg,
+    bool forceAll = false,
+    std::atomic<unsigned> *p_progress = nullptr,
+    std::atomic<bool> *p_cancel = nullptr);
 
   // Delete the .golut cache file for the current organ (if present).
   void DeleteLutCache();

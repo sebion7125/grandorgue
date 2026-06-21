@@ -21,7 +21,6 @@
 #include "threading/GOMutex.h"
 #include "updater/GOUpdateChecker.h"
 
-
 #include "GOEvent.h"
 
 enum {
