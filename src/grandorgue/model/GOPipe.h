@@ -53,7 +53,8 @@ public:
   unsigned RegisterReference(GOPipe *pipe);
   virtual void SetTemperament(const GOTemperament &temperament);
 
-  // Debug accessor: retrieve the associated rank (TODO: remove before upstream PR)
+  // Debug accessor: retrieve the associated rank (TODO: remove before upstream
+  // PR)
   GORank *GetRank() const { return m_Rank; }
 };
 

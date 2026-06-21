@@ -57,18 +57,18 @@ GOSoundingPipe::GOSoundingPipe(
     m_SoundProvider(this),
     m_PipeConfigNode(
       &rank->GetPipeConfig(), *pOrganModel, this, &m_SoundProvider) {
-        m_SoundProvider.SetOwnerPipe(this);
+  m_SoundProvider.SetOwnerPipe(this);
 
-        // Optional: pass through the rank ID (if needed)
-        if (m_Rank) {
+  // Optional: pass through the rank ID (if needed)
+  if (m_Rank) {
 
-          // There is no official GetId() call in the rank header; so either:
-          //  - define/maintain a rank ID yourself, or
-          //  - use name/pointer. For now we only store the info
-          //    that this provider belongs to *this* pipe/rank:
-          //m_SoundProvider.SetOwnerRankId(<your_desired_id>);
-        }
-      }
+    // There is no official GetId() call in the rank header; so either:
+    //  - define/maintain a rank ID yourself, or
+    //  - use name/pointer. For now we only store the info
+    //    that this provider belongs to *this* pipe/rank:
+    // m_SoundProvider.SetOwnerRankId(<your_desired_id>);
+  }
+}
 
 void GOSoundingPipe::Init(
   GOConfigReader &cfg,
@@ -109,7 +109,6 @@ void GOSoundingPipe::LoadAttackFileInfo(
   GOConfigReader &cfg, const wxString &group, const wxString &prefix) {
   GOSoundProviderWave::AttackFileInfo ainfo;
 
-  
   ainfo.filename.Assign(cfg.ReadFileName(ODFSetting, group, prefix));
   ainfo.m_WaveTremulantStateFor = cfg.ReadBool3FromInt(
     ODFSetting, group, prefix + wxT("IsTremulant"), false);
