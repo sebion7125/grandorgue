@@ -1,6 +1,6 @@
 /*
  * Copyright 2006 Milan Digital Audio LLC
- * Copyright 2009-2024 GrandOrgue contributors (see AUTHORS)
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
  * License GPL-2.0 or later
  * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
  */
@@ -8,25 +8,23 @@
 #ifndef GOSOUNDFADER_H_
 #define GOSOUNDFADER_H_
 
- // Enable runtime trace dump for fast crossfade diagnosis.
- // Produces a short trace file when a non-linear crossfade block is first processed.
- // Comment out to disable.
- // #define GO_FAST_XFADE_RUNTIME_DUMP 1
- // Use precomputed templates for runtime gains (exact, cache-backed).
- // Comment out to fallback to steppers only.
- #define GO_XFADE_USE_TEMPLATES 1
+// Enable runtime trace dump for fast crossfade diagnosis.
+// Produces a short trace file when a non-linear crossfade block is first
+// processed. Comment out to disable. #define GO_FAST_XFADE_RUNTIME_DUMP 1 Use
+// precomputed templates for runtime gains (exact, cache-backed). Comment out to
+// fallback to steppers only.
+#define GO_XFADE_USE_TEMPLATES 1
 
- // Enable reference evaluator in the hotloop (bypasses steppers) to validate mapping.
- // Comment out to re-enable stepper-based evaluation.
- // #define GO_XFADE_RUNTIME_USE_REF 1
- // Verify Template vs Reference per Block (cheap precheck, auto-fallback on mismatch)
- // #define GO_XFADE_VERIFY_REF 1
+// Enable reference evaluator in the hotloop (bypasses steppers) to validate
+// mapping. Comment out to re-enable stepper-based evaluation. #define
+// GO_XFADE_RUNTIME_USE_REF 1 Verify Template vs Reference per Block (cheap
+// precheck, auto-fallback on mismatch) #define GO_XFADE_VERIFY_REF 1
 
-#include <assert.h>
-#include <cmath>
 #include "../GOCrossfadeMode.h"
 #include "../GOCrossfadeParam.h"
 #include "../fast_crossfade.h"
+#include <assert.h>
+#include <cmath>
 
 // log stuff:
 #include <wx/log.h>
@@ -57,7 +55,7 @@
  * totalVol = targetVolume * externalVolume
  * This volume is applied in the Process() call
  */
- 
+
 #if 0
 // Sinus fade mode
 enum class FadeMode { None, Linear, Sinus };
@@ -65,7 +63,6 @@ enum class FadeMode { None, Linear, Sinus };
 // Legacy FadeMode is replaced by GOCrossfadeMode (see GOCrossfadeMode.h).
 // The enum above is retained in an #if 0 block to preserve reference until
 // all uses are migrated to the new GOCrossfadeMode and GOAudioParams.
-
 
 class GOSoundFader {
 private:
@@ -83,7 +80,7 @@ private:
   // Last volume points are the volumes at the end of previous Process()
   float m_LastTargetVolumePoint;
   float m_LastExternalVolumePoint;
-  
+
   GOCrossfadeMode m_CurrentFadeMode = GOCrossfadeMode::Linear;
 
   // for sinus-fade
@@ -96,33 +93,32 @@ private:
   unsigned m_CurrentSampleCounter = 0;
 
   // separate, independent envelopes
-  bool     m_InActive   = false;
-  unsigned m_InLen      = 0;
-  unsigned m_InPos      = 0;
+  bool m_InActive = false;
+  unsigned m_InLen = 0;
+  unsigned m_InPos = 0;
 
-  bool     m_OutActive  = false;
-  unsigned m_OutLen     = 0;
-  unsigned m_OutPos     = 0;
+  bool m_OutActive = false;
+  unsigned m_OutLen = 0;
+  unsigned m_OutPos = 0;
 
   // fast_crossfade steppers (per-fader instances; cheap)
-  GOAudioParams::CFLinear   m_InLin, m_OutLin;
-  GOAudioParams::CFSinEP    m_InSin, m_OutSin;
-  GOAudioParams::CFSin2     m_InSin2, m_OutSin2;
-  GOAudioParams::CFX2       m_InX2, m_OutX2;
-  GOAudioParams::CFSqrtEP   m_InSqrt, m_OutSqrt;
+  GOAudioParams::CFLinear m_InLin, m_OutLin;
+  GOAudioParams::CFSinEP m_InSin, m_OutSin;
+  GOAudioParams::CFSin2 m_InSin2, m_OutSin2;
+  GOAudioParams::CFX2 m_InX2, m_OutX2;
+  GOAudioParams::CFSqrtEP m_InSqrt, m_OutSqrt;
 
   // Optional precomputed templates (safe, exact, cache-backed)
   std::shared_ptr<GOAudioParams::FastXfadeTemplate> m_TplIn;
   std::shared_ptr<GOAudioParams::FastXfadeTemplate> m_TplOut;
 
-  GOCrossfadeMode           m_ModeCached = GOCrossfadeMode::Linear;
+  GOCrossfadeMode m_ModeCached = GOCrossfadeMode::Linear;
   // runtime dump guard: set true after a single runtime trace has been emitted
-  bool                      m_RuntimeDumpDone = false;
+  bool m_RuntimeDumpDone = false;
 
   // Non-linear fader: accumulate into output (internal helper).
-  void ProcessNonLinearFadeAndAccumulate(unsigned nFrames,
-                                         const float* in, float* out,
-                                         float externalVolume);
+  void ProcessNonLinearFadeAndAccumulate(
+    unsigned nFrames, const float *in, float *out, float externalVolume);
 
 public:
   /**
@@ -147,12 +143,15 @@ public:
     /*if(IsSilent())
     {    return; wxLogInfo("This Sample is already silent!"); }*/ // <- got you removed :P you little bug!
 
-    // Use current runtime crossfade mode (don't rely on a per-fader cached copy).
+    // Use current runtime crossfade mode (don't rely on a per-fader cached
+    // copy).
     using namespace GOAudioParams;
     const auto mode = GetCrossfadeMode();
     if (mode != GOCrossfadeMode::Linear) {
-      if (m_OutActive && (m_OutPos < m_OutLen) && ((m_OutLen - m_OutPos) < nFrames))
-        return;   // ignore Fade Out when shorter fade is already active
+      if (
+        m_OutActive && (m_OutPos < m_OutLen)
+        && ((m_OutLen - m_OutPos) < nFrames))
+        return; // ignore Fade Out when shorter fade is already active
 
       m_OutActive = true;
       m_OutLen = (nFrames ? nFrames : 1);
@@ -168,14 +167,15 @@ public:
     }
 
     // --- Legacy Linear behavior (keep exact semantics) ---
-    m_DecreasingDeltaPerFrame = (nFrames ? (m_TargetVolume / nFrames) : m_TargetVolume);
+    m_DecreasingDeltaPerFrame
+      = (nFrames ? (m_TargetVolume / nFrames) : m_TargetVolume);
 
     if (m_IncreasingDeltaPerFrame > 0.0f) {
       // Interrupt an ongoing fade-in (legacy overlap formula)
       assert(m_LastTargetVolumePoint < m_TargetVolume);
       m_TargetVolume = (m_TargetVolume - m_LastTargetVolumePoint)
-        * m_IncreasingDeltaPerFrame
-        / (m_IncreasingDeltaPerFrame + m_DecreasingDeltaPerFrame)
+          * m_IncreasingDeltaPerFrame
+          / (m_IncreasingDeltaPerFrame + m_DecreasingDeltaPerFrame)
         + m_LastTargetVolumePoint;
     }
   }
@@ -189,10 +189,10 @@ public:
   // Does NOT modify 'in'. 'out' is incremented by (in * gain(t)).
   // Semantically equivalent to: Process(n, temp, extVol) + for(...) out += temp
   // — but in a single loop (perf).
-  void ProcessAndAccumulate(unsigned nFrames,
-                            const float* in, float* out,
-                            float externalVolume);
-  void ProcessNonLinearFade(unsigned nFrames, float *buffer, float externalVolume);
+  void ProcessAndAccumulate(
+    unsigned nFrames, const float *in, float *out, float externalVolume);
+  void ProcessNonLinearFade(
+    unsigned nFrames, float *buffer, float externalVolume);
 
   bool IsSilent() const {
     // If an Out envelope is present, consider the sampler silent when the

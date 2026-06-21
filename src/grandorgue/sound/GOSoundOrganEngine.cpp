@@ -320,7 +320,7 @@ bool GOSoundOrganEngine::ProcessSampler(
     if (!sampler->stream.ReadBlock(temp, n_frames))
       sampler->p_SoundProvider = NULL;
 
-    // Fused-Fade-Accumulate (compile-time or runtime switchable)
+      // Fused-Fade-Accumulate (compile-time or runtime switchable)
 #ifndef GO_ENABLE_FUSED_FADE_ACCUMULATE
 #define GO_ENABLE_FUSED_FADE_ACCUMULATE 0
 #endif
