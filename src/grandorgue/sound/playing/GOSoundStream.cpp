@@ -594,13 +594,15 @@ void GOSoundStream::InitAlignedStream(
   const GOSoundStream *existing_stream,
   const char *debugLabel) {
   const unsigned releaseStartSegment = pSection->GetReleaseStartSegment();
-  const GOSoundAudioSection::StartSegment &start
-    = pSection->GetStartSegment(releaseStartSegment);
-  const GOSoundAudioSection::EndSegment &end
-    = pSection->GetEndSegment(pSection->PickEndSegment(releaseStartSegment));
   GOSoundReleaseAlignTable *releaseAligner = pSection->GetReleaseAligner();
 
-  unsigned startIndex;
+  resample = existing_stream->resample;
+
+  // InitFromSection sets: audio_section, decode_call, end_decode_call,
+  // and via GoToStartSegment: ptr, cache, transition_position, end_ptr,
+  // end_pos, m_NextStartSegmentIndex.
+  unsigned startIndex = InitFromSection(pSection, releaseStartSegment, interpolation);
+
   if (releaseAligner) {
     using namespace GOAudioParams;
     unsigned loop_pos = existing_stream->m_ResamplingPos.GetIndex();
@@ -632,15 +634,8 @@ void GOSoundStream::InitAlignedStream(
       startIndex = releaseAligner->GetPositionFor(history);
     }
 #endif
-  } else
-    startIndex = start.start_offset;
+  }
 
-  audio_section = pSection;
-  ptr = audio_section->GetData();
-  transition_position = end.transition_offset;
-  m_NextStartSegmentIndex = end.next_start_segment_index;
-  end_ptr = end.end_ptr;
-  resample = existing_stream->resample;
   m_ResamplingPos.Init(
     (float)pSection->GetSampleRate()
       / existing_stream->audio_section->GetSampleRate(),

@@ -97,7 +97,12 @@ void GOSoundingPipe::Init(
   ainfo.attack_start = 0;
   ainfo.release_end = -1;
   ainfo.m_LoopCrossfadeLength = 0;
-  ainfo.m_ReleaseCrossfadeLength = 0;
+  // UINT_MAX = "not specified" sentinel → fall back to MIDI-key default
+  // crossfade length. This simple pipe format never had a
+  // ReleaseCrossfadeLength ODF key to read, so it must not be treated as an
+  // explicit "no crossfade" request (see LoadFromOneFile in
+  // GOSoundProviderWave.cpp).
+  ainfo.m_ReleaseCrossfadeLength = (unsigned)-1u;
   m_AttackFileInfos.push_back(ainfo);
 
   m_SoundProvider.SetVelocityParameter(m_MinVolume, m_MaxVolume);
@@ -177,15 +182,15 @@ void GOSoundingPipe::LoadAttackFileInfo(
   }
   ainfo.m_LoopCrossfadeLength = cfg.ReadInteger(
     ODFSetting, group, prefix + wxT("LoopCrossfadeLength"), 0, 3000, false, 0);
-  ainfo.m_ReleaseCrossfadeLength = ainfo.load_release ? cfg.ReadInteger(
-                                     ODFSetting,
-                                     group,
-                                     prefix + wxT("ReleaseCrossfadeLength"),
-                                     0,
-                                     3000,
-                                     false,
-                                     0)
-                                                      : 0;
+  if (ainfo.load_release) {
+    // UINT_MAX = "not specified" sentinel → fall back to MIDI-key default.
+    // Explicit 0 in ODF = "no crossfade / traktur noise" → respect it (0).
+    const int rawXfade = cfg.ReadInteger(
+      ODFSetting, group, prefix + wxT("ReleaseCrossfadeLength"), 0, 3000, false, -1);
+    ainfo.m_ReleaseCrossfadeLength
+      = (rawXfade >= 0) ? (unsigned)rawXfade : (unsigned)-1u;
+  } else
+    ainfo.m_ReleaseCrossfadeLength = (unsigned)-1u;
 
   m_AttackFileInfos.push_back(ainfo);
 }
