@@ -112,7 +112,7 @@ private:
   long long __tim_panels_ms;
   long long __tim_ranks_ms;
   long long __tim_modelrest_ms;
-  
+
   GOImageCache *mp_ImageCache;
   GOLabelControl m_PitchLabel;
   GOLabelControl m_TemperamentLabel;
