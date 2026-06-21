@@ -85,20 +85,3 @@ else
 fi
 
 popd
-
-# === Ergebnis in gemeinsamen Zielordner kopieren ===
-
-BUILD_BIN_DIR="$BUILD_ROOT/win64/bin"
-EXPORT_DIR="/media/sf_Code_Exchange/GrandOrgue Dev/bin"
-
-# Sicherstellen, dass Zielverzeichnis existiert
-mkdir -p "$EXPORT_DIR"
-
-echo "Kopiere gesamten Inhalt von \"$BUILD_BIN_DIR\" nach \"$EXPORT_DIR\" …"
-
-cp -v "$BUILD_BIN_DIR/"* "$EXPORT_DIR/" || {
-    echo "FEHLER: Kopieren nach \"$EXPORT_DIR\" fehlgeschlagen."
-    exit 1
-}
-
-echo "Kopie abgeschlossen."
