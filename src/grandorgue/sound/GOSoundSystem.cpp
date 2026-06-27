@@ -126,16 +126,16 @@ GOSoundSystem::~GOSoundSystem() {
   GOSoundPortFactory::terminate();
 }
 
-// Runs entirely on a worker thread. Touches only `job` - the inputs it
-// needs were snapshotted by OpenSoundAsync() on the GUI thread, and the
-// newly created ports are written into job->outputs, not into
-// GOSoundSystem::m_AudioOutputs - so this function never needs `this` to
-// still be a live GOSoundSystem. The `this` pointer passed into
-// GOSoundPortFactory::create() below is stored inside the new GOSoundPort
-// objects for later use by their audio callback, which can only start
-// firing after StartStreams() - and that only happens later, from
-// ApplyOpenJobResult() on the GUI thread, once `this` has been confirmed
-// alive again.
+// Runs entirely on the GOSoundAudioWorker thread (see its declaration for
+// why Open() and StartStream() must happen on the same thread). Touches
+// only `job` - the inputs it needs were snapshotted by OpenSoundAsync() on
+// the GUI thread, and the newly created ports are written into
+// job->outputs, not into GOSoundSystem::m_AudioOutputs - so this function
+// never needs `this` to still be a live GOSoundSystem. The `this` pointer
+// passed into GOSoundPortFactory::create() below is stored inside the new
+// GOSoundPort objects for later use by their audio callback; see the
+// comment on the StartStream() loop below for why that callback starting
+// to fire before GOSoundSystem has installed job->outputs is safe.
 void GOSoundSystem::OpenJobWorker(std::shared_ptr<GOSoundOpenJob> job) {
   wxString errorMessage;
   bool ok = false;
@@ -175,6 +175,17 @@ void GOSoundSystem::OpenJobWorker(std::shared_ptr<GOSoundOpenJob> job) {
         _("Cannot use buffer size above %d samples; "
           "unacceptable quantization would occur."),
         MAX_FRAME_SIZE);
+
+    // StartStream() must run on the same thread as Open() for the same
+    // apartment-threading reason explained on GOSoundAudioWorker - and it
+    // is safe to do so before GOSoundSystem installs job->outputs into
+    // m_AudioOutputs (see ApplyOpenJobResult): the realtime callback only
+    // ever indexes into m_AudioOutputs while m_IsRunning is true, and that
+    // is only set afterwards, by StartSoundSystem() on the GUI thread - a
+    // callback that fires this early just sees m_IsRunning == false and
+    // fills silence instead.
+    for (GOSoundOutput &output : job->outputs)
+      output.port->StartStream();
 
     ok = true;
   } catch (wxString &msg) {
@@ -225,51 +236,30 @@ void GOSoundSystem::ApplyOpenJobResult(
   }
 
   if (job->ok) {
+    // Streams are already open and started (OpenJobWorker did that, on the
+    // worker thread); installing them here only touches GOSoundSystem's
+    // own bookkeeping, none of it driver calls, so it is fine to do on
+    // whichever thread calls ApplyOpenJobResult().
     m_SampleRate = job->sampleRate;
     m_SamplesPerBuffer = job->samplesPerBuffer;
     m_AudioOutputs = std::move(job->outputs);
+    OpenMidi();
+    m_AudioRecorder.SetSampleRate(m_SampleRate);
+    m_open = true;
+    // seed before SetState so the watchdog's first tick has a fair grace
+    // period instead of comparing against a stale or zero timestamp
+    m_LastAudioCallbackMs.store(
+      wxGetLocalTimeMillis().GetValue(), std::memory_order_relaxed);
+    SetState(GOSoundDeviceState::RUNNING);
+    m_Watchdog.SetRelativeTimer(
+      WATCHDOG_POLL_INTERVAL_MS, this, WATCHDOG_POLL_INTERVAL_MS);
 
-    try {
-      // Callbacks fired during stream start are no-ops: the audio callback
-      // checks m_IsRunning first and exits early while it is false.
-      // m_IsRunning is set to true only in StartSoundSystem().
-      StartStreams();
-      OpenMidi();
-      m_AudioRecorder.SetSampleRate(m_SampleRate);
-      m_open = true;
-      // seed before SetState so the watchdog's first tick has a fair grace
-      // period instead of comparing against a stale or zero timestamp
-      m_LastAudioCallbackMs.store(
-        wxGetLocalTimeMillis().GetValue(), std::memory_order_relaxed);
-      SetState(GOSoundDeviceState::RUNNING);
-      m_Watchdog.SetRelativeTimer(
-        WATCHDOG_POLL_INTERVAL_MS, this, WATCHDOG_POLL_INTERVAL_MS);
-
-      if (m_OrganController) {
-        BuildAndStartEngine();
-        StartSoundSystem();
-        NotifySoundIsOpen();
-      }
-      return;
-    } catch (wxString &msg) {
-      // StartStream() failed even though Open() succeeded; fall through to
-      // the same cleanup/reporting as an open failure below
-      job->errorMessage = msg;
-      job->ok = false;
-      for (GOSoundOutput &output : m_AudioOutputs)
-        if (output.port) {
-          GOSoundPort *port = output.port;
-
-          output.port = nullptr;
-          try {
-            port->Close();
-          } catch (...) {
-          }
-          delete port;
-        }
-      m_AudioOutputs.clear();
-      m_open = false;
+    if (m_OrganController) {
+      BuildAndStartEngine();
+      StartSoundSystem();
+      NotifySoundIsOpen();
     }
+    return;
   }
 
   if (logSoundErrors)
@@ -503,11 +493,6 @@ void GOSoundSystem::CloseSoundAsync(unsigned timeoutMs) {
       if (aliveFlag->load())
         ApplyCloseJobResult(job);
     });
-}
-
-void GOSoundSystem::StartStreams() {
-  for (GOSoundOutput &output : m_AudioOutputs)
-    output.port->StartStream();
 }
 
 void GOSoundSystem::BuildAndStartEngine() {
