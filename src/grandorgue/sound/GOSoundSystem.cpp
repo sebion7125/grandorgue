@@ -7,6 +7,9 @@
 
 #include "GOSoundSystem.h"
 
+#include <chrono>
+#include <thread>
+
 #include <wx/app.h>
 #include <wx/intl.h>
 #include <wx/time.h>
@@ -30,6 +33,11 @@ static constexpr int64_t WATCHDOG_CALLBACK_TIMEOUT_MS = 1500;
 // How long to wait after a system resume before reopening the audio device,
 // giving USB/ASIO devices time to become ready again
 static constexpr unsigned RESUME_DELAY_MS = 2000;
+// How long OpenSoundAsync/CloseSoundAsync wait for their worker thread
+// before giving up and marking the device DRIVER_HUNG instead of blocking
+// the GUI thread indefinitely
+static constexpr unsigned AUDIO_OPEN_TIMEOUT_MS = 5000;
+static constexpr unsigned AUDIO_CLOSE_TIMEOUT_MS = 5000;
 
 static const char *GOSoundDeviceStateToCString(GOSoundDeviceState state) {
   switch (state) {
@@ -97,86 +105,232 @@ GOSoundSystem::GOSoundSystem(GOConfig &settings)
     m_WaitCount(0),
     m_CalcCount(0),
     m_ResumeCallback(*this),
-    m_WasRunningBeforeSuspend(false) {}
+    m_WasRunningBeforeSuspend(false),
+    m_AliveFlag(std::make_shared<std::atomic<bool>>(true)) {}
 
 GOSoundSystem::~GOSoundSystem() {
+  // Must be the first statement: lets a still-running open worker's
+  // deferred completion (see OpenSoundAsync) detect that `this` is no
+  // longer valid, instead of risking a use-after-free.
+  m_AliveFlag->store(false);
+
   AssureSoundIsClosed();
 
   GOMidiPortFactory::terminate();
   GOSoundPortFactory::terminate();
 }
 
-void GOSoundSystem::OpenSoundSystem() {
-  assert(!m_open);
-  assert(m_AudioOutputs.size() == 0);
-
-  SetState(GOSoundDeviceState::OPENING);
-
-  std::vector<GOAudioDeviceConfig> &audio_config
-    = m_config.GetAudioDeviceConfig();
-
-  m_LastErrorMessage = wxEmptyString;
-  m_SampleRate = m_config.SampleRate();
-  m_SamplesPerBuffer = m_config.SamplesPerBuffer();
-  m_AudioRecorder.SetBytesPerSample(m_config.WaveFormatBytesPerSample());
-
-  m_AudioOutputs.resize(audio_config.size());
-  for (GOSoundOutput &output : m_AudioOutputs)
-    output.port = NULL;
-
-  const GOPortsConfig &portsConfig(m_config.GetSoundPortsConfig());
+// Runs entirely on a worker thread. Touches only `job` - the inputs it
+// needs were snapshotted by OpenSoundAsync() on the GUI thread, and the
+// newly created ports are written into job->outputs, not into
+// GOSoundSystem::m_AudioOutputs - so this function never needs `this` to
+// still be a live GOSoundSystem. The `this` pointer passed into
+// GOSoundPortFactory::create() below is stored inside the new GOSoundPort
+// objects for later use by their audio callback, which can only start
+// firing after StartStreams() - and that only happens later, from
+// ApplyOpenJobResult() on the GUI thread, once `this` has been confirmed
+// alive again.
+void GOSoundSystem::OpenJobWorker(std::shared_ptr<GOSoundOpenJob> job) {
+  wxString errorMessage;
+  bool ok = false;
 
   try {
-    for (unsigned n = m_AudioOutputs.size(), i = 0; i < n; i++) {
-      GOAudioDeviceConfig &deviceConfig = audio_config[i];
-      GODeviceNamePattern *pNamePattern = &deviceConfig;
-      GODeviceNamePattern defaultDevicePattern;
+    job->outputs.resize(job->audioConfig.size());
 
-      if (!pNamePattern->IsFilled()) {
-        FillDeviceNamePattern(
-          GetDefaultAudioDevice(portsConfig), defaultDevicePattern);
-        pNamePattern = &defaultDevicePattern;
-      }
+    for (unsigned n = job->outputs.size(), i = 0; i < n; i++) {
+      GOAudioDeviceConfig &deviceConfig = job->audioConfig[i];
+      GODeviceNamePattern *pNamePattern = &deviceConfig;
+      GODeviceNamePattern defaultPattern = job->defaultDevicePattern;
+
+      if (!pNamePattern->IsFilled())
+        pNamePattern = &defaultPattern;
 
       GOSoundPort *pPort
-        = GOSoundPortFactory::create(portsConfig, this, *pNamePattern);
+        = GOSoundPortFactory::create(job->portsConfig, this, *pNamePattern);
 
       if (!pPort)
         throw wxString::Format(
           _("Output device %s not found - no sound output will occur"),
           pNamePattern->GetRegEx());
-      m_AudioOutputs[i].port = pPort;
+      job->outputs[i].port = pPort;
       pPort->Init(
         deviceConfig.GetChannels(),
-        m_SampleRate,
-        m_SamplesPerBuffer,
+        job->sampleRate,
+        job->samplesPerBuffer,
         deviceConfig.GetDesiredLatency(),
         i);
     }
-    // Callbacks fired during stream start are no-ops: the audio callback
-    // checks m_IsRunning first and exits early while it is false.
-    // m_IsRunning is set to true only in StartSoundSystem(), called after
-    // OpenSoundSystem() completes.
-    StartStreams();
-    OpenMidi();
-    m_AudioRecorder.SetSampleRate(m_SampleRate);
-    m_open = true;
-    // seed before SetState so the watchdog's first tick has a fair grace
-    // period instead of comparing against a stale or zero timestamp
-    m_LastAudioCallbackMs.store(
-      wxGetLocalTimeMillis().GetValue(), std::memory_order_relaxed);
-    SetState(GOSoundDeviceState::RUNNING);
-    m_Watchdog.SetRelativeTimer(
-      WATCHDOG_POLL_INTERVAL_MS, this, WATCHDOG_POLL_INTERVAL_MS);
-  } catch (wxString &msg) {
-    if (logSoundErrors)
-      GOMessageBox(msg, _("Error"), wxOK | wxICON_ERROR, NULL);
-    else
-      m_LastErrorMessage = msg;
 
-    CloseSoundSystem();
-    SetState(GOSoundDeviceState::OPEN_FAILED);
+    for (GOSoundOutput &output : job->outputs)
+      output.port->Open();
+
+    if (job->samplesPerBuffer > MAX_FRAME_SIZE)
+      throw wxString::Format(
+        _("Cannot use buffer size above %d samples; "
+          "unacceptable quantization would occur."),
+        MAX_FRAME_SIZE);
+
+    ok = true;
+  } catch (wxString &msg) {
+    errorMessage = msg;
+  } catch (const std::exception &e) {
+    errorMessage = wxString::FromUTF8(e.what());
+  } catch (...) {
+    errorMessage = _("Unknown error while opening the audio device");
   }
+
+  if (!ok)
+    for (GOSoundOutput &output : job->outputs)
+      if (output.port) {
+        GOSoundPort *port = output.port;
+
+        output.port = nullptr;
+        try {
+          port->Close();
+        } catch (...) {
+          // a background thread must never let an exception escape
+        }
+        delete port;
+      }
+
+  {
+    std::lock_guard<std::mutex> lock(job->mutex);
+
+    job->ok = ok;
+    job->errorMessage = errorMessage;
+    job->done = true;
+  }
+  job->condition.notify_all();
+}
+
+// Installs a finished open job's result into GOSoundSystem. Safe to call
+// more than once for the same job (only the first call after `done` does
+// anything) and safe to call from either the bounded wait in
+// OpenSoundAsync() or a later GUI-thread completion for a worker that took
+// longer than the timeout - both paths only ever run on the GUI thread.
+void GOSoundSystem::ApplyOpenJobResult(
+  const std::shared_ptr<GOSoundOpenJob> &job) {
+  {
+    std::lock_guard<std::mutex> lock(job->mutex);
+
+    if (job->applied || !job->done)
+      return;
+    job->applied = true;
+  }
+
+  if (job->ok) {
+    m_SampleRate = job->sampleRate;
+    m_SamplesPerBuffer = job->samplesPerBuffer;
+    m_AudioOutputs = std::move(job->outputs);
+
+    try {
+      // Callbacks fired during stream start are no-ops: the audio callback
+      // checks m_IsRunning first and exits early while it is false.
+      // m_IsRunning is set to true only in StartSoundSystem().
+      StartStreams();
+      OpenMidi();
+      m_AudioRecorder.SetSampleRate(m_SampleRate);
+      m_open = true;
+      // seed before SetState so the watchdog's first tick has a fair grace
+      // period instead of comparing against a stale or zero timestamp
+      m_LastAudioCallbackMs.store(
+        wxGetLocalTimeMillis().GetValue(), std::memory_order_relaxed);
+      SetState(GOSoundDeviceState::RUNNING);
+      m_Watchdog.SetRelativeTimer(
+        WATCHDOG_POLL_INTERVAL_MS, this, WATCHDOG_POLL_INTERVAL_MS);
+
+      if (m_OrganController) {
+        BuildAndStartEngine();
+        StartSoundSystem();
+        NotifySoundIsOpen();
+      }
+      return;
+    } catch (wxString &msg) {
+      // StartStream() failed even though Open() succeeded; fall through to
+      // the same cleanup/reporting as an open failure below
+      job->errorMessage = msg;
+      job->ok = false;
+      for (GOSoundOutput &output : m_AudioOutputs)
+        if (output.port) {
+          GOSoundPort *port = output.port;
+
+          output.port = nullptr;
+          try {
+            port->Close();
+          } catch (...) {
+          }
+          delete port;
+        }
+      m_AudioOutputs.clear();
+      m_open = false;
+    }
+  }
+
+  if (logSoundErrors)
+    GOMessageBox(job->errorMessage, _("Error"), wxOK | wxICON_ERROR, NULL);
+  else
+    m_LastErrorMessage = job->errorMessage;
+
+  SetState(GOSoundDeviceState::OPEN_FAILED);
+}
+
+bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs) {
+  assert(!m_open);
+  assert(m_AudioOutputs.size() == 0);
+
+  if (m_State.load() == GOSoundDeviceState::DRIVER_HUNG) {
+    wxLogWarning(
+      _("Audio driver is already marked as hung. Restart GrandOrgue before "
+        "retrying."));
+    return false;
+  }
+
+  SetState(GOSoundDeviceState::OPENING);
+  m_LastErrorMessage = wxEmptyString;
+
+  auto job = std::make_shared<GOSoundOpenJob>();
+
+  job->portsConfig = m_config.GetSoundPortsConfig();
+  job->audioConfig = m_config.GetAudioDeviceConfig();
+  job->sampleRate = m_config.SampleRate();
+  job->samplesPerBuffer = m_config.SamplesPerBuffer();
+  FillDeviceNamePattern(
+    GetDefaultAudioDevice(job->portsConfig), job->defaultDevicePattern);
+  m_AudioRecorder.SetBytesPerSample(m_config.WaveFormatBytesPerSample());
+
+  std::shared_ptr<std::atomic<bool>> aliveFlag = m_AliveFlag;
+
+  std::thread([this, job]() { OpenJobWorker(job); }).detach();
+
+  {
+    std::unique_lock<std::mutex> lock(job->mutex);
+
+    job->condition.wait_for(
+      lock, std::chrono::milliseconds(timeoutMs), [&job] { return job->done; });
+  }
+
+  if (job->done)
+    ApplyOpenJobResult(job);
+  else {
+    SetState(GOSoundDeviceState::DRIVER_HUNG);
+    wxLogWarning(
+      _("Audio driver did not return while opening the device. The driver "
+        "may be stuck, e.g. after suspend/resume. Restart GrandOrgue if "
+        "sound does not come back by itself."));
+  }
+
+  // The worker may still be running (DRIVER_HUNG above) or may have just
+  // missed the lock above by a hair; either way, apply its result once it
+  // does finish, but only if GOSoundSystem is still alive by then.
+  // ApplyOpenJobResult() is idempotent, so this is harmless if the result
+  // was already applied just above.
+  if (wxTheApp)
+    wxTheApp->CallAfter([this, job, aliveFlag]() {
+      if (aliveFlag->load())
+        ApplyOpenJobResult(job);
+    });
+
+  return m_open;
 }
 
 void GOSoundSystem::StartSoundSystem() {
@@ -230,34 +384,65 @@ void GOSoundSystem::StopSoundSystem() {
   }
 }
 
-void GOSoundSystem::CloseSoundSystem() {
+// Detaches m_AudioOutputs immediately (so GOSoundSystem no longer
+// references those ports at all) and closes/deletes them on a worker
+// thread. Unlike OpenJobWorker, that worker never needs to call back into
+// GOSoundSystem - there is nothing left here for it to install - so it
+// needs no alive-flag, generation, or GUI-thread completion: it just goes
+// on quietly tearing down orphaned GOSoundPort objects if it outlives the
+// timeout below.
+void GOSoundSystem::CloseSoundAsync(unsigned timeoutMs) {
   m_Watchdog.DeleteTimer(this);
 
-  for (int i = m_AudioOutputs.size() - 1; i >= 0; i--) {
-    if (m_AudioOutputs[i].port) {
-      GOSoundPort *const port = m_AudioOutputs[i].port;
+  auto job = std::make_shared<GOSoundCloseJob>();
 
-      m_AudioOutputs[i].port = NULL;
-      port->Close();
-      delete port;
+  job->outputs = std::move(m_AudioOutputs);
+  m_AudioOutputs.clear();
+  m_open = false;
+
+  std::thread([job]() {
+    for (GOSoundOutput &output : job->outputs)
+      if (output.port) {
+        GOSoundPort *port = output.port;
+
+        output.port = nullptr;
+        try {
+          port->Close();
+        } catch (...) {
+          // a background thread must never let an exception escape
+        }
+        delete port;
+      }
+    {
+      std::lock_guard<std::mutex> lock(job->mutex);
+
+      job->done = true;
     }
+    job->condition.notify_all();
+  }).detach();
+
+  bool finishedInTime;
+  {
+    std::unique_lock<std::mutex> lock(job->mutex);
+
+    finishedInTime = job->condition.wait_for(
+      lock, std::chrono::milliseconds(timeoutMs), [&job] { return job->done; });
   }
 
   ResetMeters();
-  m_AudioOutputs.clear();
-  m_open = false;
-  SetState(GOSoundDeviceState::CLOSED);
+
+  if (finishedInTime)
+    SetState(GOSoundDeviceState::CLOSED);
+  else {
+    SetState(GOSoundDeviceState::DRIVER_HUNG);
+    wxLogWarning(
+      _("Audio driver did not return while closing the device. The audio "
+        "ports will be released in the background; restart GrandOrgue if "
+        "problems persist."));
+  }
 }
 
 void GOSoundSystem::StartStreams() {
-  for (GOSoundOutput &output : m_AudioOutputs)
-    output.port->Open();
-
-  if (m_SamplesPerBuffer > MAX_FRAME_SIZE)
-    throw wxString::Format(
-      _("Cannot use buffer size above %d samples; "
-        "unacceptable quantization would occur."),
-      MAX_FRAME_SIZE);
   for (GOSoundOutput &output : m_AudioOutputs)
     output.port->StartStream();
 }
@@ -276,14 +461,11 @@ void GOSoundSystem::BuildAndStartEngine() {
 void GOSoundSystem::StopAndDestroyEngine() { m_SoundEngine.StopAndDestroy(); }
 
 bool GOSoundSystem::AssureSoundIsOpen() {
-  if (!m_open) {
-    OpenSoundSystem();
-    if (m_open && m_OrganController) {
-      BuildAndStartEngine();
-      StartSoundSystem();
-      NotifySoundIsOpen();
-    }
-  }
+  // BuildAndStartEngine/StartSoundSystem/NotifySoundIsOpen now happen
+  // inside ApplyOpenJobResult(), so they still run correctly even if the
+  // open finishes late, after OpenSoundAsync() already gave up waiting.
+  if (!m_open)
+    OpenSoundAsync(AUDIO_OPEN_TIMEOUT_MS);
   return m_open;
 }
 
@@ -294,7 +476,7 @@ void GOSoundSystem::AssureSoundIsClosed() {
       StopSoundSystem();
       StopAndDestroyEngine();
     }
-    CloseSoundSystem();
+    CloseSoundAsync(AUDIO_CLOSE_TIMEOUT_MS);
   }
 }
 
@@ -339,6 +521,10 @@ void GOSoundSystem::SuspendAudioForPowerEvent() {
   m_ResumeTimer.DeleteTimer(&m_ResumeCallback);
 
   if (m_State.load() == GOSoundDeviceState::SUSPENDED)
+    return;
+  // leave a hung device alone - there is nothing to close, and the only
+  // way out of DRIVER_HUNG is restarting GrandOrgue
+  if (m_State.load() == GOSoundDeviceState::DRIVER_HUNG)
     return;
 
   m_WasRunningBeforeSuspend = m_open;

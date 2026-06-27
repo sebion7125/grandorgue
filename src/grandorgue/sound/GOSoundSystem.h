@@ -9,13 +9,19 @@
 #define GOSOUNDSYSTEM_H
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 #include <wx/string.h>
 
+#include "config/GOAudioDeviceConfig.h"
+#include "config/GODeviceNamePattern.h"
+#include "config/GOPortsConfig.h"
 #include "midi/GOMidiSystem.h"
 #include "threading/GOCondition.h"
 #include "threading/GOMutex.h"
@@ -29,18 +35,16 @@
 #include "GOTimerCallback.h"
 
 class GOConfig;
-class GODeviceNamePattern;
 class GOOrganController;
-class GOPortsConfig;
 class GOSoundBufferMutable;
 class GOSoundPort;
 
 /**
  * The lifecycle state of the audio device, as tracked by GOSoundSystem.
  * This is distinct from m_open: m_open only records that GOSoundSystem
- * believes it has asked the backend to open a stream, while this state is
- * meant to also reflect whether the stream is actually alive (used by the
- * planned suspend/resume and device-loss watchdog logic).
+ * believes it has asked the backend to open a stream, while this state also
+ * reflects whether the stream is actually alive (see the device-loss
+ * watchdog and suspend/resume handling below).
  */
 enum class GOSoundDeviceState {
   CLOSED,
@@ -131,7 +135,7 @@ private:
   // Polls m_LastAudioCallbackMs while m_State is RUNNING and flags
   // DEVICE_LOST if the backend has stopped invoking AudioCallback. Runs on
   // the GUI thread, started/stopped together with the audio port lifecycle
-  // (OpenSoundSystem/CloseSoundSystem), independent of the organ engine.
+  // (OpenSoundAsync/CloseSoundAsync), independent of the organ engine.
   GOTimer m_Watchdog;
 
   // Separate GOTimerCallback identity for the delayed resume-after-suspend
@@ -151,6 +155,70 @@ private:
   GOTimer m_ResumeTimer;
   bool m_WasRunningBeforeSuspend;
 
+  // A job for opening the audio ports off the GUI thread. Only the inputs
+  // below are read by the worker thread; the worker never touches
+  // GOSoundSystem (`this`) itself while building `outputs`, so
+  // GOSoundSystem's lifetime is irrelevant to that part of the work. Once
+  // `done`, the result is collected either by the bounded wait inside
+  // OpenSoundAsync() (the common, fast case) or by a completion posted to
+  // the GUI thread for a worker that finishes later than the timeout - the
+  // `applied` flag makes ApplyOpenJobResult() safe to call from both places.
+  struct GOSoundOpenJob {
+    // inputs, snapshotted on the GUI thread before the worker starts
+    GOPortsConfig portsConfig;
+    std::vector<GOAudioDeviceConfig> audioConfig;
+    GODeviceNamePattern defaultDevicePattern;
+    unsigned sampleRate = 0;
+    unsigned samplesPerBuffer = 0;
+
+    // completion signalling; touched by both threads only while holding
+    // mutex. Deliberately plain std::mutex/condition_variable rather than
+    // GOMutex/GOCondition, since this needs a true bounded wait_for() with
+    // an absolute give-up time, which GOCondition::WaitOrStop() does not
+    // provide (it either waits forever for a signal, or polls forever on a
+    // fixed interval while a GOThread has not been told to stop).
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool done = false;
+    bool applied = false;
+
+    // outputs, written by the worker thread before setting done = true
+    bool ok = false;
+    wxString errorMessage;
+    std::vector<GOSoundOutput> outputs;
+  };
+
+  // A job for closing already-detached audio ports off the GUI thread. By
+  // the time this runs, the ports it owns are no longer referenced by
+  // GOSoundSystem at all (see CloseSoundAsync), so unlike GOSoundOpenJob,
+  // its worker needs no lifetime guard for GOSoundSystem.
+  struct GOSoundCloseJob {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool done = false;
+    std::vector<GOSoundOutput> outputs;
+  };
+
+  // Sentinel set to false as the first statement in ~GOSoundSystem() and
+  // captured by value (as a shared_ptr, so the flag itself outlives
+  // GOSoundSystem if need be) into the open worker's GUI-thread completion
+  // callback, letting that callback detect a destroyed GOSoundSystem
+  // instead of risking a use-after-free.
+  std::shared_ptr<std::atomic<bool>> m_AliveFlag;
+
+  void OpenJobWorker(std::shared_ptr<GOSoundOpenJob> job);
+  void ApplyOpenJobResult(const std::shared_ptr<GOSoundOpenJob> &job);
+
+  /** Opens the audio ports off the GUI thread. Waits up to timeoutMs for
+   *  the common case, but gives up and marks DRIVER_HUNG - instead of
+   *  blocking the GUI thread forever - if the backend doesn't return in
+   *  time; the worker keeps running in the background and is still applied
+   *  if it eventually succeeds. */
+  bool OpenSoundAsync(unsigned timeoutMs);
+  /** Closes the audio ports off the GUI thread, with the same bounded-wait/
+   *  DRIVER_HUNG behavior as OpenSoundAsync(). */
+  void CloseSoundAsync(unsigned timeoutMs);
+
   void StartStreams();
   void OpenMidi() { m_midi.Open(); }
 
@@ -166,8 +234,6 @@ private:
   void UpdateMeter();
   void ResetMeters();
 
-  /** Open audio ports and configure the sound engine (without organ setup) */
-  void OpenSoundSystem();
   /** Start audio streams and mark system as running */
   void StartSoundSystem();
   /** Notify the organ controller that sound is open and begin playback */
@@ -177,8 +243,6 @@ private:
   void NotifySoundIsClosing();
   /** Stop audio streams and wait for all callbacks to finish */
   void StopSoundSystem();
-  /** Close and delete audio ports, reset meters, mark system as closed */
-  void CloseSoundSystem();
 
   /** Build the sound organ engine and start its worker threads */
   void BuildAndStartEngine();
