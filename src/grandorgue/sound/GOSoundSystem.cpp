@@ -9,6 +9,7 @@
 
 #include <wx/app.h>
 #include <wx/intl.h>
+#include <wx/time.h>
 #include <wx/window.h>
 
 #include "buffer/GOSoundBufferMutable.h"
@@ -21,6 +22,11 @@
 #include "GOEvent.h"
 #include "GOOrganController.h"
 #include "GOSoundDefs.h"
+
+// How often the watchdog checks m_LastAudioCallbackMs
+static constexpr unsigned WATCHDOG_POLL_INTERVAL_MS = 500;
+// How long the backend may stay silent before being considered lost
+static constexpr int64_t WATCHDOG_CALLBACK_TIMEOUT_MS = 1500;
 
 static const char *GOSoundDeviceStateToCString(GOSoundDeviceState state) {
   switch (state) {
@@ -54,6 +60,22 @@ void GOSoundSystem::SetState(GOSoundDeviceState newState) {
       GOSoundDeviceStateToCString(newState));
 }
 
+void GOSoundSystem::HandleTimer() {
+  if (m_State.load() != GOSoundDeviceState::RUNNING)
+    return;
+
+  const int64_t lastMs = m_LastAudioCallbackMs.load(std::memory_order_relaxed);
+  const int64_t nowMs = wxGetLocalTimeMillis().GetValue();
+
+  if (nowMs - lastMs > WATCHDOG_CALLBACK_TIMEOUT_MS) {
+    SetState(GOSoundDeviceState::DEVICE_LOST);
+    wxLogWarning(
+      _("Audio device appears to be lost: no audio callbacks received for "
+        "over %d ms."),
+      (int)WATCHDOG_CALLBACK_TIMEOUT_MS);
+  }
+}
+
 GOSoundSystem::GOSoundSystem(GOConfig &settings)
   : m_config(settings),
     m_midi(settings),
@@ -66,6 +88,7 @@ GOSoundSystem::GOSoundSystem(GOConfig &settings)
     m_DefaultAudioDevice(GOSoundDevInfo::getInvalideDeviceInfo()),
     m_IsRunning(false),
     m_NCallbacksEntered(0),
+    m_LastAudioCallbackMs(0),
     m_CallbackCondition(m_CallbackMutex),
     meter_counter(0),
     m_WaitCount(0),
@@ -133,7 +156,13 @@ void GOSoundSystem::OpenSoundSystem() {
     OpenMidi();
     m_AudioRecorder.SetSampleRate(m_SampleRate);
     m_open = true;
+    // seed before SetState so the watchdog's first tick has a fair grace
+    // period instead of comparing against a stale or zero timestamp
+    m_LastAudioCallbackMs.store(
+      wxGetLocalTimeMillis().GetValue(), std::memory_order_relaxed);
     SetState(GOSoundDeviceState::RUNNING);
+    m_Watchdog.SetRelativeTimer(
+      WATCHDOG_POLL_INTERVAL_MS, this, WATCHDOG_POLL_INTERVAL_MS);
   } catch (wxString &msg) {
     if (logSoundErrors)
       GOMessageBox(msg, _("Error"), wxOK | wxICON_ERROR, NULL);
@@ -197,6 +226,8 @@ void GOSoundSystem::StopSoundSystem() {
 }
 
 void GOSoundSystem::CloseSoundSystem() {
+  m_Watchdog.DeleteTimer(this);
+
   for (int i = m_AudioOutputs.size() - 1; i >= 0; i--) {
     if (m_AudioOutputs[i].port) {
       GOSoundPort *const port = m_AudioOutputs[i].port;
@@ -359,6 +390,10 @@ void GOSoundSystem::UpdateMeter() {
 
 bool GOSoundSystem::AudioCallback(
   unsigned devIndex, GOSoundBufferMutable &outBuffer) {
+  // realtime-safe: no logging, no locking, no allocation
+  m_LastAudioCallbackMs.store(
+    wxGetLocalTimeMillis().GetValue(), std::memory_order_relaxed);
+
   bool wasEntered = false;
   const unsigned nSamples = outBuffer.GetNFrames();
 

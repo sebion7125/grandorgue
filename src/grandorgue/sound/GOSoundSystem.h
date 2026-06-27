@@ -9,6 +9,7 @@
 #define GOSOUNDSYSTEM_H
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <vector>
@@ -24,6 +25,8 @@
 #include "GOSoundDevInfo.h"
 #include "GOSoundOrganEngine.h"
 #include "GOSoundRecorder.h"
+#include "GOTimer.h"
+#include "GOTimerCallback.h"
 
 class GOConfig;
 class GODeviceNamePattern;
@@ -55,7 +58,7 @@ enum class GOSoundDeviceState {
  * without a loaded organ
  */
 
-class GOSoundSystem {
+class GOSoundSystem : private GOTimerCallback {
   class GOSoundOutput {
   public:
     GOSoundPort *port;
@@ -109,6 +112,11 @@ private:
   // exited
   std::atomic_uint m_NCallbacksEntered;
 
+  // Timestamp (ms) of the last time the backend invoked AudioCallback,
+  // updated unconditionally (even while m_IsRunning is false) so the planned
+  // watchdog can tell a genuinely silent device apart from a lost one
+  std::atomic<int64_t> m_LastAudioCallbackMs;
+
   // For waiting for and notifying when m_NCallbacksEntered bacomes 0
   GOMutex m_CallbackMutex;
   GOCondition m_CallbackCondition;
@@ -120,11 +128,20 @@ private:
   std::atomic_uint m_WaitCount;
   std::atomic_uint m_CalcCount;
 
+  // Polls m_LastAudioCallbackMs while m_State is RUNNING and flags
+  // DEVICE_LOST if the backend has stopped invoking AudioCallback. Runs on
+  // the GUI thread, started/stopped together with the audio port lifecycle
+  // (OpenSoundSystem/CloseSoundSystem), independent of the organ engine.
+  GOTimer m_Watchdog;
+
   void StartStreams();
   void OpenMidi() { m_midi.Open(); }
 
   /** Update m_State and log the transition, if any */
   void SetState(GOSoundDeviceState newState);
+
+  /** GOTimerCallback: checks m_LastAudioCallbackMs for the watchdog */
+  void HandleTimer() override;
 
   void UpdateMeter();
   void ResetMeters();
