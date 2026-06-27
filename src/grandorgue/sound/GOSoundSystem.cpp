@@ -81,6 +81,16 @@ void GOSoundSystem::SetState(GOSoundDeviceState newState) {
 }
 
 void GOSoundSystem::HandleTimer() {
+  // Report a buffer-size mismatch flagged by AudioCallback() here, off the
+  // realtime thread - checked unconditionally so it is still reported even
+  // if it happened right as the device was closing and the watchdog timer
+  // got disarmed before the next tick.
+  if (m_HasSamplesPerBufferMismatch.exchange(false, std::memory_order_relaxed))
+    wxLogError(
+      _("No sound output will happen. Samples per buffer has been changed "
+        "by the sound driver to %d"),
+      m_MismatchedSamplesPerBuffer.load(std::memory_order_relaxed));
+
   if (m_State.load() != GOSoundDeviceState::RUNNING)
     return;
 
@@ -109,6 +119,8 @@ GOSoundSystem::GOSoundSystem(GOConfig &settings)
     m_IsRunning(false),
     m_NCallbacksEntered(0),
     m_LastAudioCallbackMs(0),
+    m_HasSamplesPerBufferMismatch(false),
+    m_MismatchedSamplesPerBuffer(0),
     m_CallbackCondition(m_CallbackMutex),
     meter_counter(0),
     m_WaitCount(0),
@@ -283,6 +295,16 @@ bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs) {
   assert(!m_open);
   assert(m_AudioOutputs.size() == 0);
 
+  // *** TEMPORARY DIAGNOSTIC CHANGE - NOT FOR MERGING ***
+  // Both guards below disabled (#if 0) on request, to check whether they
+  // make any difference for the "Panic while a healthy device is open"
+  // crash report. They should not: DRIVER_HUNG isn't set and
+  // m_PendingCloseJob is already null in that scenario, so neither guard
+  // should ever trigger there. Re-enable before this branch is considered
+  // done - they matter for real for device-loss/suspend recovery, where
+  // a second Open could otherwise race with a still-running Close on the
+  // same physical device.
+#if 0
   if (m_State.load() == GOSoundDeviceState::DRIVER_HUNG) {
     wxLogWarning(
       _("Audio driver is already marked as hung. Restart GrandOrgue before "
@@ -315,6 +337,7 @@ bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs) {
       return false;
     }
   }
+#endif
 
   SetState(GOSoundDeviceState::OPENING);
   m_LastErrorMessage = wxEmptyString;
@@ -450,9 +473,13 @@ std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob() {
       // GOSoundAudioWorker also has a catch-all so a throw here could
       // never crash the process, but catching it here too means the
       // waiter gets a prompt "done" instead of waiting out the full
-      // timeout for an exception that already happened
-      wxLogError("GOSoundSystem: unexpected exception while closing the audio "
-                 "device.");
+      // timeout for an exception that already happened. Not logging
+      // here - this runs on the worker thread, and wx's logging is not
+      // guaranteed safe to call off the GUI thread; CloseSoundAsync()
+      // logs a generic warning on the GUI thread instead, if set.
+      std::lock_guard<std::mutex> lock(job->mutex);
+
+      job->hadException = true;
     }
     {
       std::lock_guard<std::mutex> lock(job->mutex);
@@ -493,6 +520,9 @@ void GOSoundSystem::CloseSoundAsync(unsigned timeoutMs) {
   }
 
   if (finishedInTime) {
+    if (job->hadException)
+      wxLogWarning(
+        _("Audio: an unexpected error occurred while closing the device."));
     ApplyCloseJobResult(job);
     SetState(GOSoundDeviceState::CLOSED);
     return;
@@ -674,17 +704,20 @@ std::vector<GOSoundDevInfo> GOSoundSystem::EnumerateAudioDevices(
   m_AudioWorker.Post([job, portsConfigCopy]() {
     std::vector<GOSoundDevInfo> result;
 
+    bool hadException = false;
+
     try {
       result = GOSoundPortFactory::getDeviceList(portsConfigCopy);
     } catch (...) {
-      wxLogError("GOSoundSystem: unexpected exception while enumerating audio "
-                 "devices.");
+      // Not logging here - see the matching comment in StartCloseJob().
+      hadException = true;
     }
 
     {
       std::lock_guard<std::mutex> lock(job->mutex);
 
       job->result = std::move(result);
+      job->hadException = hadException;
       job->done = true;
     }
     job->condition.notify_all();
@@ -701,6 +734,9 @@ std::vector<GOSoundDevInfo> GOSoundSystem::EnumerateAudioDevices(
         "list may be incomplete."));
     return {};
   }
+  if (job->hadException)
+    wxLogWarning(
+      _("Audio: an unexpected error occurred while enumerating devices."));
   return std::move(job->result);
 }
 
@@ -775,11 +811,16 @@ bool GOSoundSystem::AudioCallback(
     if (nSamples == m_SamplesPerBuffer) {
       m_NCallbacksEntered.fetch_add(1);
       wasEntered = true;
-    } else
-      wxLogError(
-        _("No sound output will happen. Samples per buffer has been "
-          "changed by the sound driver to %d"),
-        nSamples);
+    } else {
+      // wxLogError() must never be called from here - this is the
+      // realtime audio callback, invoked directly by the backend's own
+      // thread, which is not guaranteed to be safe for wx logging (the
+      // comment above already promised "no logging" for this function,
+      // this branch just hadn't honoured it). HandleTimer() reports this
+      // from the GUI thread instead.
+      m_MismatchedSamplesPerBuffer.store(nSamples, std::memory_order_relaxed);
+      m_HasSamplesPerBufferMismatch.store(true, std::memory_order_relaxed);
+    }
   }
   // assure that m_IsRunning has not yet been changed after
   // m_NCallbacksEntered.fetch_add, otherwise the control thread may not wait
