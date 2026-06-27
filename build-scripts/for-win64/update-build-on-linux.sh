@@ -27,6 +27,7 @@ DO_CLEAN=false
 DO_RECONF=false
 LOG_RELEASE_ALIGN=false
 LOG_RELEASE_ALIGN_VERBOSE=false
+KEEP_DEBUG_INFO=false   # --debug-symbols: -g statt -g0, fuer Crash-Diagnose
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,9 +36,17 @@ while [[ $# -gt 0 ]]; do
     --extra) EXTRA_LABEL="$2"; shift 2 ;;
     --log-release-align) LOG_RELEASE_ALIGN=true; shift ;;
     --log-release-align-verbose) LOG_RELEASE_ALIGN=true; LOG_RELEASE_ALIGN_VERBOSE=true; shift ;;
+    --debug-symbols) KEEP_DEBUG_INFO=true; shift ;;
     *) break ;;  # Rest bleibt für set-ver-prms.sh (z.B. numerische Version)
   esac
 done
+
+# --debug-symbols erzwingt ein --reconfigure: die CMAKE_*_FLAGS_RELEASE-Werte
+# unten werden nur bei einer (Re-)Konfiguration neu an CMake uebergeben, sonst
+# bliebe die alte CMakeCache.txt (mit -g0) unveraendert bestehen.
+if $KEEP_DEBUG_INFO; then
+  DO_RECONF=true
+fi
 
 # Optional: set-ver-prms.sh laden (z.B. numerische Versionen), wenn noch Args da sind
 if [[ $# -gt 0 ]]; then
@@ -94,8 +103,18 @@ if [[ -x "${MINGW_DIR:-}/bin/wx-config" ]]; then
 fi
 
 # ⚙️ Compiler-Flags
-export CXXFLAGS="-O3 -DNDEBUG -g0"
-export CFLAGS="-O3 -DNDEBUG -g0"
+# -g0 (Standard) erzeugt gar keine Debug-Infos -> kleinere/schnellere Builds,
+# aber Crash-Stacks (Application Verifier, WinDbg, Event-Viewer-Offset) lassen
+# sich nicht auf Quelltext zurueckfuehren. --debug-symbols ersetzt -g0 durch
+# -g, behaelt aber -O3 -DNDEBUG bei (gleicher generierter Code, nur zusaetzliche
+# Metadaten) - die vorhandene CV2PDB_EXE/VC_PATH-Pipeline unten wandelt das dann
+# wie gewohnt in eine .pdb um.
+DEBUG_GFLAG="-g0"
+if $KEEP_DEBUG_INFO; then
+  DEBUG_GFLAG="-g"
+fi
+export CXXFLAGS="-O3 -DNDEBUG $DEBUG_GFLAG"
+export CFLAGS="-O3 -DNDEBUG $DEBUG_GFLAG"
 
 # ---- Release-Align-Logging / Parity-Build -----------------------------------
 # The marker headers are intentionally allowed to change more than pure I/O:
@@ -170,6 +189,14 @@ if [[ ! -f CMakeCache.txt || $DO_RECONF || $DO_CLEAN ]]; then
   echo "Führe CMake-Konfiguration aus …"
   CMAKE_APP_PRMS="-DGO_USE_JACK=ON $VERSION_PRMS"
 
+  # -s (Linker strip) wuerde die Debug-Infos beim Linken wieder wegwerfen,
+  # selbst wenn der Compiler sie mit -g erzeugt hat. Bei --debug-symbols also
+  # nicht stripen, damit CV2PDB_EXE unten etwas zum Konvertieren vorfindet.
+  LINKER_FLAGS_RELEASE="-s"
+  if $KEEP_DEBUG_INFO; then
+    LINKER_FLAGS_RELEASE=""
+  fi
+
   cmake "$SRC_DIR" \
     $CMAKE_MINGW_PRMS \
     $CMAKE_APP_PRMS \
@@ -182,9 +209,9 @@ if [[ ! -f CMakeCache.txt || $DO_RECONF || $DO_CLEAN ]]; then
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DCMAKE_EXPORT_COMPILE_COMMANDS_USE_ARGUMENTS=ON \
-    "-DCMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG -g0" \
-    "-DCMAKE_CXX_FLAGS_RELEASE:STRING=-O3 -DNDEBUG -g0" \
-    "-DCMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=-s" \
+    "-DCMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG $DEBUG_GFLAG" \
+    "-DCMAKE_CXX_FLAGS_RELEASE:STRING=-O3 -DNDEBUG $DEBUG_GFLAG" \
+    "-DCMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=$LINKER_FLAGS_RELEASE" \
     -DVC_PATH=/usr/local/share/wine/msvc/VC/Tools/MSVC/14.29.30133/bin/Hostx86/x86
 else
   echo "CMake-Konfiguration bereits vorhanden – überspringe Konfiguration."
