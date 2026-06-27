@@ -285,6 +285,32 @@ bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs) {
     return false;
   }
 
+  if (m_PendingCloseJob) {
+    // A previous close may have been fired without waiting for it (see
+    // SuspendAudioForPowerEvent); wait for it here, inside the same
+    // timeout budget, rather than risk opening a new port for the same
+    // physical device while it might still be touching it.
+    std::shared_ptr<GOSoundCloseJob> pendingClose = m_PendingCloseJob;
+    bool closeFinished;
+    {
+      std::unique_lock<std::mutex> lock(pendingClose->mutex);
+
+      closeFinished = pendingClose->condition.wait_for(
+        lock, std::chrono::milliseconds(timeoutMs), [&pendingClose] {
+          return pendingClose->done;
+        });
+    }
+    if (closeFinished)
+      ApplyCloseJobResult(pendingClose);
+    else {
+      SetState(GOSoundDeviceState::DRIVER_HUNG);
+      wxLogWarning(_("Audio: the previous close has still not finished; not "
+                     "reopening the device to avoid touching it twice. Restart "
+                     "GrandOrgue if sound does not come back by itself."));
+      return false;
+    }
+  }
+
   SetState(GOSoundDeviceState::OPENING);
   m_LastErrorMessage = wxEmptyString;
 
@@ -385,13 +411,13 @@ void GOSoundSystem::StopSoundSystem() {
 }
 
 // Detaches m_AudioOutputs immediately (so GOSoundSystem no longer
-// references those ports at all) and closes/deletes them on a worker
-// thread. Unlike OpenJobWorker, that worker never needs to call back into
-// GOSoundSystem - there is nothing left here for it to install - so it
-// needs no alive-flag, generation, or GUI-thread completion: it just goes
-// on quietly tearing down orphaned GOSoundPort objects if it outlives the
-// timeout below.
-void GOSoundSystem::CloseSoundAsync(unsigned timeoutMs) {
+// references those ports at all) and starts closing/deleting them on a
+// worker thread, without waiting for it - the caller decides whether and
+// how long to wait via the returned job. The worker itself never needs to
+// call back into GOSoundSystem - there is nothing left here for it to
+// install - it just goes on quietly tearing down orphaned GOSoundPort
+// objects if it outlives whatever the caller ends up waiting for.
+std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob() {
   m_Watchdog.DeleteTimer(this);
 
   auto job = std::make_shared<GOSoundCloseJob>();
@@ -399,6 +425,7 @@ void GOSoundSystem::CloseSoundAsync(unsigned timeoutMs) {
   job->outputs = std::move(m_AudioOutputs);
   m_AudioOutputs.clear();
   m_open = false;
+  m_PendingCloseJob = job;
 
   std::thread([job]() {
     for (GOSoundOutput &output : job->outputs)
@@ -421,6 +448,28 @@ void GOSoundSystem::CloseSoundAsync(unsigned timeoutMs) {
     job->condition.notify_all();
   }).detach();
 
+  ResetMeters();
+  return job;
+}
+
+// Idempotent: only the first call after the job is done does anything.
+// Safe to call from the bounded wait in CloseSoundAsync()/OpenSoundAsync()
+// (already on the GUI thread) or from a later GUI-thread completion for a
+// job that took longer than whoever was waiting cared to wait.
+void GOSoundSystem::ApplyCloseJobResult(
+  const std::shared_ptr<GOSoundCloseJob> &job) {
+  std::lock_guard<std::mutex> lock(job->mutex);
+
+  if (job->applied || !job->done)
+    return;
+  job->applied = true;
+  if (m_PendingCloseJob == job)
+    m_PendingCloseJob.reset();
+}
+
+void GOSoundSystem::CloseSoundAsync(unsigned timeoutMs) {
+  std::shared_ptr<GOSoundCloseJob> job = StartCloseJob();
+
   bool finishedInTime;
   {
     std::unique_lock<std::mutex> lock(job->mutex);
@@ -429,17 +478,25 @@ void GOSoundSystem::CloseSoundAsync(unsigned timeoutMs) {
       lock, std::chrono::milliseconds(timeoutMs), [&job] { return job->done; });
   }
 
-  ResetMeters();
-
-  if (finishedInTime)
+  if (finishedInTime) {
+    ApplyCloseJobResult(job);
     SetState(GOSoundDeviceState::CLOSED);
-  else {
-    SetState(GOSoundDeviceState::DRIVER_HUNG);
-    wxLogWarning(
-      _("Audio driver did not return while closing the device. The audio "
-        "ports will be released in the background; restart GrandOrgue if "
-        "problems persist."));
+    return;
   }
+
+  SetState(GOSoundDeviceState::DRIVER_HUNG);
+  wxLogWarning(
+    _("Audio driver did not return while closing the device. The audio "
+      "ports will be released in the background; restart GrandOrgue if "
+      "problems persist."));
+
+  std::shared_ptr<std::atomic<bool>> aliveFlag = m_AliveFlag;
+
+  if (wxTheApp)
+    wxTheApp->CallAfter([this, job, aliveFlag]() {
+      if (aliveFlag->load())
+        ApplyCloseJobResult(job);
+    });
 }
 
 void GOSoundSystem::StartStreams() {
@@ -530,7 +587,27 @@ void GOSoundSystem::SuspendAudioForPowerEvent() {
   m_WasRunningBeforeSuspend = m_open;
   if (m_WasRunningBeforeSuspend) {
     wxLogWarning(_("Audio: suspend event received, closing the audio device."));
-    AssureSoundIsClosed();
+
+    // Windows expects WM_POWERBROADCAST handling to return quickly, so -
+    // unlike AssureSoundIsClosed()/CloseSoundAsync() - this must not block
+    // waiting for the (possibly hanging) driver Close() call. The engine
+    // stop sequence below is pure in-process thread coordination, not a
+    // driver call, so it stays synchronous; only the port close is
+    // deferred.
+    if (m_OrganController) {
+      NotifySoundIsClosing();
+      StopSoundSystem();
+      StopAndDestroyEngine();
+    }
+
+    std::shared_ptr<GOSoundCloseJob> job = StartCloseJob();
+    std::shared_ptr<std::atomic<bool>> aliveFlag = m_AliveFlag;
+
+    if (wxTheApp)
+      wxTheApp->CallAfter([this, job, aliveFlag]() {
+        if (aliveFlag->load())
+          ApplyCloseJobResult(job);
+      });
   }
   SetState(GOSoundDeviceState::SUSPENDED);
 }
