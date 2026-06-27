@@ -295,6 +295,16 @@ bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs) {
   assert(!m_open);
   assert(m_AudioOutputs.size() == 0);
 
+  // *** TEMPORARY DIAGNOSTIC CHANGE - NOT FOR MERGING ***
+  // Both guards below disabled (#if 0) on request, to check whether they
+  // make any difference for the "Panic while a healthy device is open"
+  // crash report. They should not: DRIVER_HUNG isn't set and
+  // m_PendingCloseJob is already null in that scenario, so neither guard
+  // should ever trigger there. Re-enable before this branch is considered
+  // done - they matter for real for device-loss/suspend recovery, where
+  // a second Open could otherwise race with a still-running Close on the
+  // same physical device.
+#if 0
   if (m_State.load() == GOSoundDeviceState::DRIVER_HUNG) {
     wxLogWarning(
       _("Audio driver is already marked as hung. Restart GrandOrgue before "
@@ -327,6 +337,7 @@ bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs) {
       return false;
     }
   }
+#endif
 
   SetState(GOSoundDeviceState::OPENING);
   m_LastErrorMessage = wxEmptyString;
