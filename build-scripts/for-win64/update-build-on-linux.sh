@@ -233,7 +233,14 @@ else
 fi
 
 # 🔨 Bauen
-make $PARALLEL_PRMS VERBOSE=1 GrandOrgue
+# GrandOrgue.pdb ist ein eigenes add_custom_target(... ALL ...) (siehe
+# cmake/BuildExecutable.cmake) und haengt nur am impliziten "all"-Meta-Target,
+# nicht am "GrandOrgue"-Target selbst - ein "make GrandOrgue" allein erzeugt
+# deshalb nie eine .pdb. Explizit mitbauen, sonst bleibt im Zielordner eine
+# alte/fremde .pdb (z.B. vom offiziellen Release) liegen, und Windows laedt
+# die fuer JEDE gleichnamige .exe an diesem Pfad - mit voellig irrefuehrenden
+# Symbolen/Quellzeilen als Folge.
+make $PARALLEL_PRMS VERBOSE=1 GrandOrgue GrandOrgue.pdb
 popd
 
 # === Ergebnis kopieren ===
