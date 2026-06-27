@@ -44,6 +44,9 @@ static constexpr unsigned AUDIO_CLOSE_TIMEOUT_MS = 5000;
 // Close() succeeding at all is already unlikely - no point waiting as long
 // as for a normal close.
 static constexpr unsigned AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS = 1500;
+// How long EnumerateAudioDevices() waits for the worker thread before
+// giving up and returning an empty list instead of blocking the GUI thread
+static constexpr unsigned AUDIO_ENUM_TIMEOUT_MS = 5000;
 
 static const char *GOSoundDeviceStateToCString(GOSoundDeviceState state) {
   switch (state) {
@@ -123,7 +126,13 @@ GOSoundSystem::~GOSoundSystem() {
   AssureSoundIsClosed();
 
   GOMidiPortFactory::terminate();
-  GOSoundPortFactory::terminate();
+
+  // GOSoundPortFactory::terminate() calls Pa_Terminate(), another call
+  // into the audio backend - keep it on the same worker thread as
+  // everything else for the usual apartment-threading reason. Posted, not
+  // waited for: it touches no GOSoundSystem state, so there is nothing to
+  // protect here by blocking the destructor on it.
+  m_AudioWorker.Post([]() { GOSoundPortFactory::terminate(); });
 }
 
 // Runs entirely on the GOSoundAudioWorker thread (see its declaration for
@@ -626,6 +635,44 @@ void GOSoundSystem::DoDelayedResume() {
     AssureSoundIsOpen();
 }
 
+// Lists devices on the worker thread: constructing RtAudio/PortAudio host
+// API objects to enumerate them is just as apartment-sensitive as
+// Open()/Close()/StartStream() (see GOSoundRtPort::create()/addDevices(),
+// which build a fresh RtAudio instance per call), so this must not run on
+// the GUI thread while OpenJobWorker/StartCloseJob's tasks run on
+// GOSoundAudioWorker.
+std::vector<GOSoundDevInfo> GOSoundSystem::EnumerateAudioDevices(
+  const GOPortsConfig &portsConfig) {
+  auto job = std::make_shared<GOSoundEnumJob>();
+  GOPortsConfig portsConfigCopy = portsConfig;
+
+  m_AudioWorker.Post([job, portsConfigCopy]() {
+    std::vector<GOSoundDevInfo> result
+      = GOSoundPortFactory::getDeviceList(portsConfigCopy);
+
+    {
+      std::lock_guard<std::mutex> lock(job->mutex);
+
+      job->result = std::move(result);
+      job->done = true;
+    }
+    job->condition.notify_all();
+  });
+
+  std::unique_lock<std::mutex> lock(job->mutex);
+
+  if (!job->condition.wait_for(
+        lock, std::chrono::milliseconds(AUDIO_ENUM_TIMEOUT_MS), [&job] {
+          return job->done;
+        })) {
+    wxLogWarning(
+      _("Audio: device enumeration did not return in time; the device "
+        "list may be incomplete."));
+    return {};
+  }
+  return std::move(job->result);
+}
+
 std::vector<GOSoundDevInfo> GOSoundSystem::GetAudioDevices(
   const GOPortsConfig &portsConfig) {
   // Getting a device list tries to open and close each device
@@ -634,8 +681,7 @@ std::vector<GOSoundDevInfo> GOSoundSystem::GetAudioDevices(
   AssureSoundIsClosed();
   m_DefaultAudioDevice = GOSoundDevInfo::getInvalideDeviceInfo();
 
-  std::vector<GOSoundDevInfo> list
-    = GOSoundPortFactory::getDeviceList(portsConfig);
+  std::vector<GOSoundDevInfo> list = EnumerateAudioDevices(portsConfig);
 
   for (const auto &devInfo : list)
     if (devInfo.IsDefault()) {

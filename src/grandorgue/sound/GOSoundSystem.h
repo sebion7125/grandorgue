@@ -271,6 +271,20 @@ private:
     std::vector<GOSoundOutput> outputs;
   };
 
+  // A job for enumerating audio devices off the GUI thread. Listing
+  // devices constructs fresh RtAudio/PortAudio host API objects just like
+  // OpenJobWorker does (see GOSoundRtPort::create()/addDevices()), so it
+  // needs to run on the same GOSoundAudioWorker thread for the same
+  // apartment-threading reason - otherwise enumeration on the GUI thread
+  // could itself cross the apartment boundary against Open()/Close()/
+  // StartStream() on the worker thread.
+  struct GOSoundEnumJob {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool done = false;
+    std::vector<GOSoundDevInfo> result;
+  };
+
   // Sentinel set to false as the first statement in ~GOSoundSystem() and
   // captured by value (as a shared_ptr, so the flag itself outlives
   // GOSoundSystem if need be) into a worker's GUI-thread completion
@@ -293,6 +307,12 @@ private:
    *  whether/how long to wait for the result via m_PendingCloseJob. */
   std::shared_ptr<GOSoundCloseJob> StartCloseJob();
   void ApplyCloseJobResult(const std::shared_ptr<GOSoundCloseJob> &job);
+
+  /** Lists audio devices on the GOSoundAudioWorker thread and waits up to
+   *  AUDIO_ENUM_TIMEOUT_MS for the result; returns an empty list if the
+   *  worker doesn't return in time rather than blocking the GUI forever. */
+  std::vector<GOSoundDevInfo> EnumerateAudioDevices(
+    const GOPortsConfig &portsConfig);
 
   /** Opens the audio ports off the GUI thread. Waits up to timeoutMs for
    *  the common case, but gives up and marks DRIVER_HUNG - instead of
