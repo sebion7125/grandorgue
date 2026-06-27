@@ -27,7 +27,7 @@ DO_CLEAN=false
 DO_RECONF=false
 LOG_RELEASE_ALIGN=false
 LOG_RELEASE_ALIGN_VERBOSE=false
-KEEP_DEBUG_INFO=false   # --debug-symbols: -g statt -g0, fuer Crash-Diagnose
+KEEP_DEBUG_INFO=false   # --debug-symbols: -Og -g statt -O3 -DNDEBUG -g0, fuer Crash-Diagnose
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -103,18 +103,23 @@ if [[ -x "${MINGW_DIR:-}/bin/wx-config" ]]; then
 fi
 
 # ⚙️ Compiler-Flags
-# -g0 (Standard) erzeugt gar keine Debug-Infos -> kleinere/schnellere Builds,
-# aber Crash-Stacks (Application Verifier, WinDbg, Event-Viewer-Offset) lassen
-# sich nicht auf Quelltext zurueckfuehren. --debug-symbols ersetzt -g0 durch
-# -g, behaelt aber -O3 -DNDEBUG bei (gleicher generierter Code, nur zusaetzliche
-# Metadaten) - die vorhandene CV2PDB_EXE/VC_PATH-Pipeline unten wandelt das dann
-# wie gewohnt in eine .pdb um.
-DEBUG_GFLAG="-g0"
+# Standard (-O3 -DNDEBUG -g0): kleinster/schnellster Build, aber Crash-Stacks
+# (Application Verifier, WinDbg, Event-Viewer-Offset) lassen sich nicht auf
+# Quelltext zurueckfuehren - und selbst mit -g bleibt bei -O3 die Zeilen-
+# Zuordnung fuer stark inlinen/templatisierten Code unzuverlaessig (z.B. eine
+# Adresse, die auf eine statische Datentabelle statt auf den wirklichen
+# Aufrufer zeigt). --debug-symbols wechselt deshalb auf das Profil, das
+# CMakeLists.txt selbst fuer Debug-Builds vorsieht (-Og -g, kein NDEBUG) -
+# weniger Inlining => verlaessliche Zeilen, und assert() ist aktiv. Die
+# vorhandene CV2PDB_EXE/VC_PATH-Pipeline unten wandelt das wie gewohnt in
+# eine .pdb um.
 if $KEEP_DEBUG_INFO; then
-  DEBUG_GFLAG="-g"
+  DIAG_CFLAGS="-Og -g"
+else
+  DIAG_CFLAGS="-O3 -DNDEBUG -g0"
 fi
-export CXXFLAGS="-O3 -DNDEBUG $DEBUG_GFLAG"
-export CFLAGS="-O3 -DNDEBUG $DEBUG_GFLAG"
+export CXXFLAGS="$DIAG_CFLAGS"
+export CFLAGS="$DIAG_CFLAGS"
 
 # ---- Release-Align-Logging / Parity-Build -----------------------------------
 # The marker headers are intentionally allowed to change more than pure I/O:
@@ -209,8 +214,8 @@ if [[ ! -f CMakeCache.txt || $DO_RECONF || $DO_CLEAN ]]; then
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DCMAKE_EXPORT_COMPILE_COMMANDS_USE_ARGUMENTS=ON \
-    "-DCMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG $DEBUG_GFLAG" \
-    "-DCMAKE_CXX_FLAGS_RELEASE:STRING=-O3 -DNDEBUG $DEBUG_GFLAG" \
+    "-DCMAKE_C_FLAGS_RELEASE:STRING=$DIAG_CFLAGS" \
+    "-DCMAKE_CXX_FLAGS_RELEASE:STRING=$DIAG_CFLAGS" \
     "-DCMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=$LINKER_FLAGS_RELEASE" \
     -DVC_PATH=/usr/local/share/wine/msvc/VC/Tools/MSVC/14.29.30133/bin/Hostx86/x86
 else
