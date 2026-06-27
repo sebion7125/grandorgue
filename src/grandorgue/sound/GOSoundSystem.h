@@ -19,6 +19,7 @@
 #include <thread>
 #include <vector>
 
+#include <wx/log.h>
 #include <wx/string.h>
 
 #include "config/GOAudioDeviceConfig.h"
@@ -203,7 +204,19 @@ private:
             task = std::move(state->tasks.front());
             state->tasks.pop_front();
           }
-          task();
+          // An exception escaping a std::thread's entry function calls
+          // std::terminate() and kills the whole process - and this loop
+          // IS that entry function for every task ever posted here, for
+          // the rest of the process's lifetime. Individual tasks (e.g.
+          // OpenJobWorker) have their own try/catch for proper error
+          // reporting, but this catch-all is the one that actually
+          // guarantees a single bad task can never bring down GO.
+          try {
+            task();
+          } catch (...) {
+            wxLogError("GOSoundAudioWorker: an audio task threw an unhandled "
+                       "exception; ignoring it to avoid crashing the process.");
+          }
         }
       }).detach();
     }

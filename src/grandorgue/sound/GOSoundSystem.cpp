@@ -433,18 +433,27 @@ std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob() {
   m_PendingCloseJob = job;
 
   m_AudioWorker.Post([job]() {
-    for (GOSoundOutput &output : job->outputs)
-      if (output.port) {
-        GOSoundPort *port = output.port;
+    try {
+      for (GOSoundOutput &output : job->outputs)
+        if (output.port) {
+          GOSoundPort *port = output.port;
 
-        output.port = nullptr;
-        try {
-          port->Close();
-        } catch (...) {
-          // a background thread must never let an exception escape
+          output.port = nullptr;
+          try {
+            port->Close();
+          } catch (...) {
+            // a background thread must never let an exception escape
+          }
+          delete port;
         }
-        delete port;
-      }
+    } catch (...) {
+      // GOSoundAudioWorker also has a catch-all so a throw here could
+      // never crash the process, but catching it here too means the
+      // waiter gets a prompt "done" instead of waiting out the full
+      // timeout for an exception that already happened
+      wxLogError("GOSoundSystem: unexpected exception while closing the audio "
+                 "device.");
+    }
     {
       std::lock_guard<std::mutex> lock(job->mutex);
 
@@ -663,8 +672,14 @@ std::vector<GOSoundDevInfo> GOSoundSystem::EnumerateAudioDevices(
   GOPortsConfig portsConfigCopy = portsConfig;
 
   m_AudioWorker.Post([job, portsConfigCopy]() {
-    std::vector<GOSoundDevInfo> result
-      = GOSoundPortFactory::getDeviceList(portsConfigCopy);
+    std::vector<GOSoundDevInfo> result;
+
+    try {
+      result = GOSoundPortFactory::getDeviceList(portsConfigCopy);
+    } catch (...) {
+      wxLogError("GOSoundSystem: unexpected exception while enumerating audio "
+                 "devices.");
+    }
 
     {
       std::lock_guard<std::mutex> lock(job->mutex);
