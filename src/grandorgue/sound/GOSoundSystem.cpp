@@ -332,7 +332,7 @@ bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs) {
 
   std::shared_ptr<std::atomic<bool>> aliveFlag = m_AliveFlag;
 
-  std::thread([this, job]() { OpenJobWorker(job); }).detach();
+  m_AudioWorker.Post([this, job]() { OpenJobWorker(job); });
 
   {
     std::unique_lock<std::mutex> lock(job->mutex);
@@ -433,7 +433,7 @@ std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob() {
   m_open = false;
   m_PendingCloseJob = job;
 
-  std::thread([job]() {
+  m_AudioWorker.Post([job]() {
     for (GOSoundOutput &output : job->outputs)
       if (output.port) {
         GOSoundPort *port = output.port;
@@ -452,7 +452,7 @@ std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob() {
       job->done = true;
     }
     job->condition.notify_all();
-  }).detach();
+  });
 
   ResetMeters();
   return job;

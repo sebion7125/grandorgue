@@ -11,10 +11,12 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include <wx/string.h>
@@ -154,6 +156,74 @@ private:
   GOSoundResumeCallback m_ResumeCallback;
   GOTimer m_ResumeTimer;
   bool m_WasRunningBeforeSuspend;
+
+  // Runs every queued task on a single, persistent background thread - in
+  // order, one at a time, forever. This matters because PortAudio's ASIO
+  // and WASAPI host APIs initialise COM as apartment-threaded (see
+  // pa_win_coinitialize.c / RtApiAsio's constructor in the vendored
+  // PortAudio/RtAudio sources) on whichever thread first touches them, and
+  // ASIO in particular documents that it "cannot run on a multi-threaded
+  // apartment". Calling Open() on one thread and later Close() on another
+  // (e.g. a fresh std::thread per operation) crosses that apartment
+  // boundary, which is consistent with hangs/crashes seen in practice.
+  // Routing every driver call through the same dedicated thread restores
+  // the "always the same thread" property the old, fully synchronous code
+  // had on the GUI thread - just off the GUI thread, so it can no longer
+  // freeze it.
+  class GOSoundAudioWorker {
+  private:
+    struct State {
+      std::mutex mutex;
+      std::condition_variable condition;
+      std::deque<std::function<void()>> tasks;
+      bool stop = false;
+    };
+
+    // Held by both GOSoundAudioWorker and the (detached) thread itself, so
+    // the mutex/condition/queue stay alive for as long as the thread might
+    // still touch them, even if GOSoundAudioWorker is destroyed first while
+    // the thread is stuck running a task and never gets back to checking
+    // `stop`.
+    std::shared_ptr<State> p_State;
+
+  public:
+    GOSoundAudioWorker() : p_State(std::make_shared<State>()) {
+      std::shared_ptr<State> state = p_State;
+
+      std::thread([state]() {
+        for (;;) {
+          std::function<void()> task;
+          {
+            std::unique_lock<std::mutex> lock(state->mutex);
+
+            state->condition.wait(
+              lock, [&state] { return state->stop || !state->tasks.empty(); });
+            if (state->stop && state->tasks.empty())
+              return;
+            task = std::move(state->tasks.front());
+            state->tasks.pop_front();
+          }
+          task();
+        }
+      }).detach();
+    }
+
+    ~GOSoundAudioWorker() {
+      std::lock_guard<std::mutex> lock(p_State->mutex);
+
+      p_State->stop = true;
+      p_State->condition.notify_all();
+    }
+
+    void Post(std::function<void()> task) {
+      std::lock_guard<std::mutex> lock(p_State->mutex);
+
+      p_State->tasks.push_back(std::move(task));
+      p_State->condition.notify_one();
+    }
+  };
+
+  GOSoundAudioWorker m_AudioWorker;
 
   // A job for opening the audio ports off the GUI thread. Only the inputs
   // below are read by the worker thread; the worker never touches
