@@ -104,15 +104,20 @@ fi
 
 # ⚙️ Compiler-Flags
 # Standard (-O3 -DNDEBUG -g0): kleinster/schnellster Build, aber Crash-Stacks
-# (Application Verifier, WinDbg, Event-Viewer-Offset) lassen sich nicht auf
-# Quelltext zurueckfuehren - und selbst mit -g bleibt bei -O3 die Zeilen-
-# Zuordnung fuer stark inlinen/templatisierten Code unzuverlaessig (z.B. eine
-# Adresse, die auf eine statische Datentabelle statt auf den wirklichen
-# Aufrufer zeigt). --debug-symbols wechselt deshalb auf das Profil, das
-# CMakeLists.txt selbst fuer Debug-Builds vorsieht (-Og -g, kein NDEBUG) -
-# weniger Inlining => verlaessliche Zeilen, und assert() ist aktiv. Die
-# vorhandene CV2PDB_EXE/VC_PATH-Pipeline unten wandelt das wie gewohnt in
-# eine .pdb um.
+# lassen sich nicht auf Quelltext zurueckfuehren.
+#
+# Bei --debug-symbols reicht es NICHT, nur CMAKE_*_FLAGS_RELEASE zu
+# ueberschreiben: CMakeLists.txt selbst haengt im else-Zweig (Zeile ~186-192,
+# "if (CMAKE_BUILD_TYPE STREQUAL Debug) ... else ...") fuer JEDEN
+# Nicht-Debug-Build *zusaetzlich und unconditional* -O3 -g -DNDEBUG
+# -fomit-frame-pointer -funroll-loops -ffast-math an - das stand bisher
+# trotz unserer Og/-g-Ueberschreibung weiter im Kompilierbefehl, und
+# -fomit-frame-pointer war vermutlich der Hauptgrund, warum Application-
+# Verifier-Stacks bisher voellig unplausible Aufruferketten zeigten (ohne
+# Frame-Pointer kann kein Stack-Walker zuverlaessig entrollen). Deshalb
+# schaltet --debug-symbols jetzt komplett auf CMAKE_BUILD_TYPE=Debug um -
+# das ist der Zweig, den CMakeLists.txt selbst fuer genau diesen Zweck
+# vorsieht (-g3 -Og, kein NDEBUG, kein -fomit-frame-pointer/-ffast-math).
 if $KEEP_DEBUG_INFO; then
   DIAG_CFLAGS="-Og -g"
 else
@@ -194,11 +199,16 @@ if [[ ! -f CMakeCache.txt || $DO_RECONF || $DO_CLEAN ]]; then
   echo "Führe CMake-Konfiguration aus …"
   CMAKE_APP_PRMS="-DGO_USE_JACK=ON $VERSION_PRMS"
 
-  # -s (Linker strip) wuerde die Debug-Infos beim Linken wieder wegwerfen,
-  # selbst wenn der Compiler sie mit -g erzeugt hat. Bei --debug-symbols also
-  # nicht stripen, damit CV2PDB_EXE unten etwas zum Konvertieren vorfindet.
+  # Siehe Kommentar oben bei DIAG_CFLAGS: --debug-symbols braucht
+  # CMAKE_BUILD_TYPE=Debug, damit CMakeLists.txt selbst den passenden
+  # Flag-Zweig waehlt (kein -fomit-frame-pointer, kein -DNDEBUG). Die
+  # CMAKE_*_FLAGS_RELEASE-Werte unten bleiben unveraendert fuer den
+  # Default-Fall (Release) - bei BUILD_TYPE=Debug werden sie von CMake
+  # schlicht nicht verwendet.
+  BUILD_TYPE="Release"
   LINKER_FLAGS_RELEASE="-s"
   if $KEEP_DEBUG_INFO; then
+    BUILD_TYPE="Debug"
     LINKER_FLAGS_RELEASE=""
   fi
 
@@ -211,11 +221,11 @@ if [[ ! -f CMakeCache.txt || $DO_RECONF || $DO_CLEAN ]]; then
     -DINSTALL_DEPEND=ON \
     -DMSYS=1 -DSTATIC=0 \
     -DRTAUDIO_USE_ASIO=ON \
-    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DCMAKE_EXPORT_COMPILE_COMMANDS_USE_ARGUMENTS=ON \
-    "-DCMAKE_C_FLAGS_RELEASE:STRING=$DIAG_CFLAGS" \
-    "-DCMAKE_CXX_FLAGS_RELEASE:STRING=$DIAG_CFLAGS" \
+    "-DCMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG -g0" \
+    "-DCMAKE_CXX_FLAGS_RELEASE:STRING=-O3 -DNDEBUG -g0" \
     "-DCMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=$LINKER_FLAGS_RELEASE" \
     -DVC_PATH=/usr/local/share/wine/msvc/VC/Tools/MSVC/14.29.30133/bin/Hostx86/x86
 else
