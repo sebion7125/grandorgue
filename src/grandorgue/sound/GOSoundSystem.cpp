@@ -38,6 +38,12 @@ static constexpr unsigned RESUME_DELAY_MS = 2000;
 // the GUI thread indefinitely
 static constexpr unsigned AUDIO_OPEN_TIMEOUT_MS = 5000;
 static constexpr unsigned AUDIO_CLOSE_TIMEOUT_MS = 5000;
+// Shorter close timeout used when the stream was already DEVICE_LOST before
+// the close was requested (e.g. Audio Panic after the device disappeared):
+// the old stream object is tied to a now-gone device session, so a graceful
+// Close() succeeding at all is already unlikely - no point waiting as long
+// as for a normal close.
+static constexpr unsigned AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS = 1500;
 
 static const char *GOSoundDeviceStateToCString(GOSoundDeviceState state) {
   switch (state) {
@@ -528,12 +534,18 @@ bool GOSoundSystem::AssureSoundIsOpen() {
 
 void GOSoundSystem::AssureSoundIsClosed() {
   if (m_open) {
+    // capture before StopSoundSystem() unconditionally switches to CLOSING
+    const bool wasAlreadyLost
+      = m_State.load() == GOSoundDeviceState::DEVICE_LOST;
+
     if (m_OrganController) {
       NotifySoundIsClosing();
       StopSoundSystem();
       StopAndDestroyEngine();
     }
-    CloseSoundAsync(AUDIO_CLOSE_TIMEOUT_MS);
+    CloseSoundAsync(
+      wasAlreadyLost ? AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS
+                     : AUDIO_CLOSE_TIMEOUT_MS);
   }
 }
 
@@ -563,12 +575,22 @@ void GOSoundSystem::SuspendAudioForPowerEvent() {
 
   if (m_State.load() == GOSoundDeviceState::SUSPENDED)
     return;
-  // leave a hung device alone - there is nothing to close, and the only
-  // way out of DRIVER_HUNG is restarting GrandOrgue
-  if (m_State.load() == GOSoundDeviceState::DRIVER_HUNG)
-    return;
+  // Leave a hung or already-lost device alone: m_open stays true while
+  // DEVICE_LOST (we don't auto-close on watchdog timeout), but that does
+  // NOT mean the stream is healthy - closing it is unlikely to succeed
+  // (the old stream object is tied to a device session that's already
+  // gone) and there is nothing useful to resume into afterwards anyway.
+  GOSoundDeviceState stateBeforeSuspend = m_State.load();
 
-  m_WasRunningBeforeSuspend = m_open;
+  if (
+    stateBeforeSuspend == GOSoundDeviceState::DRIVER_HUNG
+    || stateBeforeSuspend == GOSoundDeviceState::DEVICE_LOST) {
+    m_WasRunningBeforeSuspend = false;
+    SetState(GOSoundDeviceState::SUSPENDED);
+    return;
+  }
+
+  m_WasRunningBeforeSuspend = stateBeforeSuspend == GOSoundDeviceState::RUNNING;
   if (m_WasRunningBeforeSuspend) {
     wxLogWarning(_("Audio: suspend event received, closing the audio device."));
 
