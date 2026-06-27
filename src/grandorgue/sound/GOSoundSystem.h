@@ -309,7 +309,6 @@ private:
    *  suspend handler, which the OS expects to return quickly). */
   void CloseSoundAsync(unsigned timeoutMs);
 
-  void StartStreams();
   void OpenMidi() { m_midi.Open(); }
 
   /** Update m_State and log the transition, if any */
