@@ -8,6 +8,7 @@
 #ifndef GOSOUNDSYSTEM_H
 #define GOSOUNDSYSTEM_H
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <vector>
@@ -30,6 +31,24 @@ class GOOrganController;
 class GOPortsConfig;
 class GOSoundBufferMutable;
 class GOSoundPort;
+
+/**
+ * The lifecycle state of the audio device, as tracked by GOSoundSystem.
+ * This is distinct from m_open: m_open only records that GOSoundSystem
+ * believes it has asked the backend to open a stream, while this state is
+ * meant to also reflect whether the stream is actually alive (used by the
+ * planned suspend/resume and device-loss watchdog logic).
+ */
+enum class GOSoundDeviceState {
+  CLOSED,
+  OPENING,
+  RUNNING,
+  SUSPENDED,
+  DEVICE_LOST,
+  CLOSING,
+  OPEN_FAILED,
+  DRIVER_HUNG,
+};
 
 /**
  * This class represents a GrandOrgue-wide sound system. It may be used even
@@ -73,6 +92,7 @@ private:
   GOSoundOrganEngine m_SoundEngine;
 
   bool m_open;
+  std::atomic<GOSoundDeviceState> m_State;
   bool logSoundErrors;
   unsigned m_SampleRate;
   unsigned m_SamplesPerBuffer;
@@ -102,6 +122,9 @@ private:
 
   void StartStreams();
   void OpenMidi() { m_midi.Open(); }
+
+  /** Update m_State and log the transition, if any */
+  void SetState(GOSoundDeviceState newState);
 
   void UpdateMeter();
   void ResetMeters();
@@ -145,6 +168,7 @@ public:
   unsigned GetSampleRate() const { return m_SampleRate; }
   unsigned GetSamplesPerBuffer() const { return m_SamplesPerBuffer; }
   wxString getState();
+  GOSoundDeviceState GetDeviceState() const { return m_State.load(); }
 
   void SetLogSoundErrorMessages(bool isVisible) { logSoundErrors = isVisible; }
 

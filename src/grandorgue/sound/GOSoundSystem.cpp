@@ -22,10 +22,43 @@
 #include "GOOrganController.h"
 #include "GOSoundDefs.h"
 
+static const char *GOSoundDeviceStateToCString(GOSoundDeviceState state) {
+  switch (state) {
+  case GOSoundDeviceState::CLOSED:
+    return "Closed";
+  case GOSoundDeviceState::OPENING:
+    return "Opening";
+  case GOSoundDeviceState::RUNNING:
+    return "Running";
+  case GOSoundDeviceState::SUSPENDED:
+    return "Suspended";
+  case GOSoundDeviceState::DEVICE_LOST:
+    return "DeviceLost";
+  case GOSoundDeviceState::CLOSING:
+    return "Closing";
+  case GOSoundDeviceState::OPEN_FAILED:
+    return "OpenFailed";
+  case GOSoundDeviceState::DRIVER_HUNG:
+    return "DriverHung";
+  }
+  return "Unknown";
+}
+
+void GOSoundSystem::SetState(GOSoundDeviceState newState) {
+  GOSoundDeviceState oldState = m_State.exchange(newState);
+
+  if (oldState != newState)
+    wxLogDebug(
+      "Audio: state %s -> %s",
+      GOSoundDeviceStateToCString(oldState),
+      GOSoundDeviceStateToCString(newState));
+}
+
 GOSoundSystem::GOSoundSystem(GOConfig &settings)
   : m_config(settings),
     m_midi(settings),
     m_open(false),
+    m_State(GOSoundDeviceState::CLOSED),
     logSoundErrors(true),
     m_SampleRate(0),
     m_SamplesPerBuffer(0),
@@ -48,6 +81,8 @@ GOSoundSystem::~GOSoundSystem() {
 void GOSoundSystem::OpenSoundSystem() {
   assert(!m_open);
   assert(m_AudioOutputs.size() == 0);
+
+  SetState(GOSoundDeviceState::OPENING);
 
   std::vector<GOAudioDeviceConfig> &audio_config
     = m_config.GetAudioDeviceConfig();
@@ -98,6 +133,7 @@ void GOSoundSystem::OpenSoundSystem() {
     OpenMidi();
     m_AudioRecorder.SetSampleRate(m_SampleRate);
     m_open = true;
+    SetState(GOSoundDeviceState::RUNNING);
   } catch (wxString &msg) {
     if (logSoundErrors)
       GOMessageBox(msg, _("Error"), wxOK | wxICON_ERROR, NULL);
@@ -105,6 +141,7 @@ void GOSoundSystem::OpenSoundSystem() {
       m_LastErrorMessage = msg;
 
     CloseSoundSystem();
+    SetState(GOSoundDeviceState::OPEN_FAILED);
   }
 }
 
@@ -120,6 +157,7 @@ void GOSoundSystem::StartSoundSystem() {
   m_CalcCount.store(0);
   m_NCallbacksEntered.store(0);
   m_IsRunning.store(true);
+  SetState(GOSoundDeviceState::RUNNING);
 }
 
 void GOSoundSystem::NotifySoundIsOpen() {
@@ -130,6 +168,7 @@ void GOSoundSystem::NotifySoundIsOpen() {
 void GOSoundSystem::NotifySoundIsClosing() { m_OrganController->Abort(); }
 
 void GOSoundSystem::StopSoundSystem() {
+  SetState(GOSoundDeviceState::CLOSING);
   m_IsRunning.store(false);
 
   // wait for all started callbacks to finish
@@ -171,6 +210,7 @@ void GOSoundSystem::CloseSoundSystem() {
   ResetMeters();
   m_AudioOutputs.clear();
   m_open = false;
+  SetState(GOSoundDeviceState::CLOSED);
 }
 
 void GOSoundSystem::StartStreams() {
