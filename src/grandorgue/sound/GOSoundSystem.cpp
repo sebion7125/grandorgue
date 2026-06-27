@@ -450,9 +450,13 @@ std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob() {
       // GOSoundAudioWorker also has a catch-all so a throw here could
       // never crash the process, but catching it here too means the
       // waiter gets a prompt "done" instead of waiting out the full
-      // timeout for an exception that already happened
-      wxLogError("GOSoundSystem: unexpected exception while closing the audio "
-                 "device.");
+      // timeout for an exception that already happened. Not logging
+      // here - this runs on the worker thread, and wx's logging is not
+      // guaranteed safe to call off the GUI thread; CloseSoundAsync()
+      // logs a generic warning on the GUI thread instead, if set.
+      std::lock_guard<std::mutex> lock(job->mutex);
+
+      job->hadException = true;
     }
     {
       std::lock_guard<std::mutex> lock(job->mutex);
@@ -493,6 +497,9 @@ void GOSoundSystem::CloseSoundAsync(unsigned timeoutMs) {
   }
 
   if (finishedInTime) {
+    if (job->hadException)
+      wxLogWarning(
+        _("Audio: an unexpected error occurred while closing the device."));
     ApplyCloseJobResult(job);
     SetState(GOSoundDeviceState::CLOSED);
     return;
@@ -658,17 +665,20 @@ std::vector<GOSoundDevInfo> GOSoundSystem::EnumerateAudioDevices(
   m_AudioWorker.Post([job, portsConfigCopy]() {
     std::vector<GOSoundDevInfo> result;
 
+    bool hadException = false;
+
     try {
       result = GOSoundPortFactory::getDeviceList(portsConfigCopy);
     } catch (...) {
-      wxLogError("GOSoundSystem: unexpected exception while enumerating audio "
-                 "devices.");
+      // Not logging here - see the matching comment in StartCloseJob().
+      hadException = true;
     }
 
     {
       std::lock_guard<std::mutex> lock(job->mutex);
 
       job->result = std::move(result);
+      job->hadException = hadException;
       job->done = true;
     }
     job->condition.notify_all();
@@ -685,6 +695,9 @@ std::vector<GOSoundDevInfo> GOSoundSystem::EnumerateAudioDevices(
         "list may be incomplete."));
     return {};
   }
+  if (job->hadException)
+    wxLogWarning(
+      _("Audio: an unexpected error occurred while enumerating devices."));
   return std::move(job->result);
 }
 

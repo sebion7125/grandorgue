@@ -11,6 +11,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -18,7 +19,6 @@
 #include <thread>
 #include <vector>
 
-#include <wx/log.h>
 #include <wx/string.h>
 
 #include "config/GOAudioDeviceConfig.h"
@@ -208,13 +208,20 @@ private:
           // IS that entry function for every task ever posted here, for
           // the rest of the process's lifetime. Individual tasks (e.g.
           // OpenJobWorker) have their own try/catch for proper error
-          // reporting, but this catch-all is the one that actually
-          // guarantees a single bad task can never bring down GO.
+          // reporting into their job object, but this catch-all is the
+          // one that actually guarantees a single bad task can never
+          // bring down GO. Deliberately not calling any wxLog* function
+          // here: wx's logging is not guaranteed safe to call off the
+          // GUI thread (same class of thread-affinity issue as the COM/
+          // ASIO one this whole class exists to avoid), so this only
+          // writes to stderr - safe from any thread, no wx involved.
           try {
             task();
           } catch (...) {
-            wxLogError("GOSoundAudioWorker: an audio task threw an unhandled "
-                       "exception; ignoring it to avoid crashing the process.");
+            std::fputs(
+              "GOSoundAudioWorker: an audio task threw an unhandled "
+              "exception; ignoring it to avoid crashing the process.\n",
+              stderr);
           }
         }
       }).detach();
@@ -281,6 +288,11 @@ private:
     std::condition_variable condition;
     bool done = false;
     bool applied = false;
+    // Set by the worker task if closing threw; deliberately not a wxString
+    // with the exception's message, and not logged from the worker itself
+    // - see the GOSoundAudioWorker comment on why no wxLog* call belongs
+    // on that thread. The GUI-thread caller logs a generic message if set.
+    bool hadException = false;
     std::vector<GOSoundOutput> outputs;
   };
 
@@ -295,6 +307,8 @@ private:
     std::mutex mutex;
     std::condition_variable condition;
     bool done = false;
+    // See GOSoundCloseJob::hadException - same reasoning.
+    bool hadException = false;
     std::vector<GOSoundDevInfo> result;
   };
 
