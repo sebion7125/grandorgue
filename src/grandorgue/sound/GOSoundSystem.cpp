@@ -9,6 +9,7 @@
 
 #include <wx/app.h>
 #include <wx/intl.h>
+#include <wx/time.h>
 #include <wx/window.h>
 
 #include "buffer/GOSoundBufferMutable.h"
@@ -66,6 +67,7 @@ GOSoundSystem::GOSoundSystem(GOConfig &settings)
     m_DefaultAudioDevice(GOSoundDevInfo::getInvalideDeviceInfo()),
     m_IsRunning(false),
     m_NCallbacksEntered(0),
+    m_LastAudioCallbackMs(0),
     m_CallbackCondition(m_CallbackMutex),
     meter_counter(0),
     m_WaitCount(0),
@@ -343,6 +345,10 @@ void GOSoundSystem::UpdateMeter() {
 
 bool GOSoundSystem::AudioCallback(
   unsigned devIndex, GOSoundBufferMutable &outBuffer) {
+  // realtime-safe: no logging, no locking, no allocation
+  m_LastAudioCallbackMs.store(
+    wxGetLocalTimeMillis().GetValue(), std::memory_order_relaxed);
+
   bool wasEntered = false;
   const unsigned nSamples = outBuffer.GetNFrames();
 

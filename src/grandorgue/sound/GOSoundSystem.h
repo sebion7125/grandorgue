@@ -9,6 +9,7 @@
 #define GOSOUNDSYSTEM_H
 
 #include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include <wx/string.h>
@@ -106,6 +107,11 @@ private:
   // counter of audio callbacks that have been entered but have not yet been
   // exited
   std::atomic_uint m_NCallbacksEntered;
+
+  // Timestamp (ms) of the last time the backend invoked AudioCallback,
+  // updated unconditionally (even while m_IsRunning is false) so the planned
+  // watchdog can tell a genuinely silent device apart from a lost one
+  std::atomic<int64_t> m_LastAudioCallbackMs;
 
   // For waiting for and notifying when m_NCallbacksEntered bacomes 0
   GOMutex m_CallbackMutex;
