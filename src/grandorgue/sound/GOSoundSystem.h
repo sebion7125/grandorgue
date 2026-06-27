@@ -188,33 +188,54 @@ private:
 
   // A job for closing already-detached audio ports off the GUI thread. By
   // the time this runs, the ports it owns are no longer referenced by
-  // GOSoundSystem at all (see CloseSoundAsync), so unlike GOSoundOpenJob,
-  // its worker needs no lifetime guard for GOSoundSystem.
+  // GOSoundSystem at all (see StartCloseJob), so unlike GOSoundOpenJob, its
+  // *worker* needs no lifetime guard for GOSoundSystem. Applying its result
+  // (clearing m_PendingCloseJob) does touch GOSoundSystem, though, so that
+  // part is guarded the same way as the open job's, via m_AliveFlag.
   struct GOSoundCloseJob {
     std::mutex mutex;
     std::condition_variable condition;
     bool done = false;
+    bool applied = false;
     std::vector<GOSoundOutput> outputs;
   };
 
   // Sentinel set to false as the first statement in ~GOSoundSystem() and
   // captured by value (as a shared_ptr, so the flag itself outlives
-  // GOSoundSystem if need be) into the open worker's GUI-thread completion
+  // GOSoundSystem if need be) into a worker's GUI-thread completion
   // callback, letting that callback detect a destroyed GOSoundSystem
   // instead of risking a use-after-free.
   std::shared_ptr<std::atomic<bool>> m_AliveFlag;
 
+  // Set by StartCloseJob() and cleared by ApplyCloseJobResult() once that
+  // job is done. While set, OpenSoundAsync() waits for it before opening a
+  // new port for the same physical device, so a close that was fired
+  // without waiting (see SuspendAudioForPowerEvent) can never race with a
+  // subsequent open.
+  std::shared_ptr<GOSoundCloseJob> m_PendingCloseJob;
+
   void OpenJobWorker(std::shared_ptr<GOSoundOpenJob> job);
   void ApplyOpenJobResult(const std::shared_ptr<GOSoundOpenJob> &job);
+
+  /** Detaches m_AudioOutputs and starts closing them on a worker thread,
+   *  without waiting for it. Safe to call repeatedly; the caller decides
+   *  whether/how long to wait for the result via m_PendingCloseJob. */
+  std::shared_ptr<GOSoundCloseJob> StartCloseJob();
+  void ApplyCloseJobResult(const std::shared_ptr<GOSoundCloseJob> &job);
 
   /** Opens the audio ports off the GUI thread. Waits up to timeoutMs for
    *  the common case, but gives up and marks DRIVER_HUNG - instead of
    *  blocking the GUI thread forever - if the backend doesn't return in
    *  time; the worker keeps running in the background and is still applied
-   *  if it eventually succeeds. */
+   *  if it eventually succeeds. Also waits (within the same timeoutMs
+   *  budget) for any still-pending close job first - see
+   *  m_PendingCloseJob. */
   bool OpenSoundAsync(unsigned timeoutMs);
-  /** Closes the audio ports off the GUI thread, with the same bounded-wait/
-   *  DRIVER_HUNG behavior as OpenSoundAsync(). */
+  /** Calls StartCloseJob() and waits up to timeoutMs for it, then marks
+   *  CLOSED or DRIVER_HUNG accordingly. Use this when the caller needs a
+   *  definite answer soon (e.g. AssureSoundIsClosed()); use StartCloseJob()
+   *  directly when the caller must not block at all (e.g. a Windows power
+   *  suspend handler, which the OS expects to return quickly). */
   void CloseSoundAsync(unsigned timeoutMs);
 
   void StartStreams();
