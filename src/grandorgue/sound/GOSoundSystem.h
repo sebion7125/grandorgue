@@ -134,6 +134,23 @@ private:
   // (OpenSoundSystem/CloseSoundSystem), independent of the organ engine.
   GOTimer m_Watchdog;
 
+  // Separate GOTimerCallback identity for the delayed resume-after-suspend
+  // timer below, kept apart from GOSoundSystem's own HandleTimer() (used for
+  // the watchdog) so that GOTimer::DeleteTimer() can cancel one without
+  // accidentally cancelling the other.
+  class GOSoundResumeCallback : public GOTimerCallback {
+  private:
+    GOSoundSystem &r_System;
+
+  public:
+    explicit GOSoundResumeCallback(GOSoundSystem &system) : r_System(system) {}
+    void HandleTimer() override { r_System.DoDelayedResume(); }
+  };
+
+  GOSoundResumeCallback m_ResumeCallback;
+  GOTimer m_ResumeTimer;
+  bool m_WasRunningBeforeSuspend;
+
   void StartStreams();
   void OpenMidi() { m_midi.Open(); }
 
@@ -142,6 +159,9 @@ private:
 
   /** GOTimerCallback: checks m_LastAudioCallbackMs for the watchdog */
   void HandleTimer() override;
+
+  /** Reopens the device after a suspend/resume cycle, if still wanted */
+  void DoDelayedResume();
 
   void UpdateMeter();
   void ResetMeters();
@@ -192,6 +212,11 @@ public:
   bool AssureSoundIsOpen();
   void AssureSoundIsClosed();
   void AssignOrganFile(GOOrganController *pNewOrganController);
+
+  /** Closes the audio device immediately, e.g. on a system suspend event */
+  void SuspendAudioForPowerEvent();
+  /** Schedules reopening the device after a delay, e.g. on system resume */
+  void ResumeAudioAfterPowerEvent();
 
   bool AudioCallback(unsigned devIndex, GOSoundBufferMutable &outBuffer);
 };

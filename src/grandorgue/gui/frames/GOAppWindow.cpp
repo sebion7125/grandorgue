@@ -66,6 +66,10 @@ BEGIN_EVENT_TABLE(GOAppWindow, wxFrame)
 EVT_MSGBOX(GOAppWindow::OnMsgBox)
 EVT_RENAMEFILE(GOAppWindow::OnRenameFile)
 EVT_CLOSE(GOAppWindow::OnCloseWindow)
+#ifdef wxHAS_POWER_EVENTS
+EVT_POWER_SUSPENDED(GOAppWindow::OnPowerSuspended)
+EVT_POWER_RESUME(GOAppWindow::OnPowerResume)
+#endif
 EVT_CHAR_HOOK(GOAppWindow::OnKeyCommand)
 EVT_COMMAND(0, wxEVT_METERS, GOAppWindow::OnMeters)
 EVT_COMMAND(0, wxEVT_LOADFILE, GOAppWindow::OnLoadFile)
@@ -1201,6 +1205,18 @@ void GOAppWindow::OnExit(wxCommandEvent &event) { CloseProgram(); }
 void GOAppWindow::OnCloseWindow(wxCloseEvent &event) {
   CloseProgram(!event.CanVeto());
 }
+
+#ifdef wxHAS_POWER_EVENTS
+void GOAppWindow::OnPowerSuspended(wxPowerEvent &event) {
+  r_SoundSystem.SuspendAudioForPowerEvent();
+  event.Skip();
+}
+
+void GOAppWindow::OnPowerResume(wxPowerEvent &event) {
+  r_SoundSystem.ResumeAudioAfterPowerEvent();
+  event.Skip();
+}
+#endif
 
 void GOAppWindow::OnRevert(wxCommandEvent &event) {
   if (

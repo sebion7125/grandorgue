@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <wx/frame.h>
+#include <wx/power.h>
 
 #include "gui/size/GOResizable.h"
 #include "help/GOHelpRequestor.h"
@@ -181,6 +182,11 @@ private:
 
   void OnMenuOpen(wxMenuEvent &event);
   void OnCloseWindow(wxCloseEvent &event);
+
+#ifdef wxHAS_POWER_EVENTS
+  void OnPowerSuspended(wxPowerEvent &event);
+  void OnPowerResume(wxPowerEvent &event);
+#endif
 
   void OnMidiEvent(const GOMidiEvent &event) override;
 

@@ -27,6 +27,9 @@
 static constexpr unsigned WATCHDOG_POLL_INTERVAL_MS = 500;
 // How long the backend may stay silent before being considered lost
 static constexpr int64_t WATCHDOG_CALLBACK_TIMEOUT_MS = 1500;
+// How long to wait after a system resume before reopening the audio device,
+// giving USB/ASIO devices time to become ready again
+static constexpr unsigned RESUME_DELAY_MS = 2000;
 
 static const char *GOSoundDeviceStateToCString(GOSoundDeviceState state) {
   switch (state) {
@@ -92,7 +95,9 @@ GOSoundSystem::GOSoundSystem(GOConfig &settings)
     m_CallbackCondition(m_CallbackMutex),
     meter_counter(0),
     m_WaitCount(0),
-    m_CalcCount(0) {}
+    m_CalcCount(0),
+    m_ResumeCallback(*this),
+    m_WasRunningBeforeSuspend(false) {}
 
 GOSoundSystem::~GOSoundSystem() {
   AssureSoundIsClosed();
@@ -327,6 +332,44 @@ void GOSoundSystem::AssignOrganFile(GOOrganController *pNewOrganController) {
       NotifySoundIsOpen();
     }
   }
+}
+
+void GOSoundSystem::SuspendAudioForPowerEvent() {
+  // cancel a delayed resume left over from an earlier suspend/resume blip
+  m_ResumeTimer.DeleteTimer(&m_ResumeCallback);
+
+  if (m_State.load() == GOSoundDeviceState::SUSPENDED)
+    return;
+
+  m_WasRunningBeforeSuspend = m_open;
+  if (m_WasRunningBeforeSuspend) {
+    wxLogWarning(_("Audio: suspend event received, closing the audio device."));
+    AssureSoundIsClosed();
+  }
+  SetState(GOSoundDeviceState::SUSPENDED);
+}
+
+void GOSoundSystem::ResumeAudioAfterPowerEvent() {
+  if (m_State.load() != GOSoundDeviceState::SUSPENDED)
+    return;
+
+  m_ResumeTimer.DeleteTimer(&m_ResumeCallback);
+
+  if (!m_WasRunningBeforeSuspend) {
+    SetState(GOSoundDeviceState::CLOSED);
+    return;
+  }
+
+  wxLogWarning(
+    _("Audio: resume event received, reopening the audio device after a "
+      "delay."));
+  m_ResumeTimer.SetRelativeTimer(RESUME_DELAY_MS, &m_ResumeCallback);
+}
+
+void GOSoundSystem::DoDelayedResume() {
+  m_WasRunningBeforeSuspend = false;
+  if (m_State.load() == GOSoundDeviceState::SUSPENDED)
+    AssureSoundIsOpen();
 }
 
 std::vector<GOSoundDevInfo> GOSoundSystem::GetAudioDevices(
