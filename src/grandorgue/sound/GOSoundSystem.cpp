@@ -81,6 +81,16 @@ void GOSoundSystem::SetState(GOSoundDeviceState newState) {
 }
 
 void GOSoundSystem::HandleTimer() {
+  // Report a buffer-size mismatch flagged by AudioCallback() here, off the
+  // realtime thread - checked unconditionally so it is still reported even
+  // if it happened right as the device was closing and the watchdog timer
+  // got disarmed before the next tick.
+  if (m_HasSamplesPerBufferMismatch.exchange(false, std::memory_order_relaxed))
+    wxLogError(
+      _("No sound output will happen. Samples per buffer has been changed "
+        "by the sound driver to %d"),
+      m_MismatchedSamplesPerBuffer.load(std::memory_order_relaxed));
+
   if (m_State.load() != GOSoundDeviceState::RUNNING)
     return;
 
@@ -109,6 +119,8 @@ GOSoundSystem::GOSoundSystem(GOConfig &settings)
     m_IsRunning(false),
     m_NCallbacksEntered(0),
     m_LastAudioCallbackMs(0),
+    m_HasSamplesPerBufferMismatch(false),
+    m_MismatchedSamplesPerBuffer(0),
     m_CallbackCondition(m_CallbackMutex),
     meter_counter(0),
     m_WaitCount(0),
@@ -772,11 +784,16 @@ bool GOSoundSystem::AudioCallback(
     if (nSamples == m_SamplesPerBuffer) {
       m_NCallbacksEntered.fetch_add(1);
       wasEntered = true;
-    } else
-      wxLogError(
-        _("No sound output will happen. Samples per buffer has been "
-          "changed by the sound driver to %d"),
-        nSamples);
+    } else {
+      // wxLogError() must never be called from here - this is the
+      // realtime audio callback, invoked directly by the backend's own
+      // thread, which is not guaranteed to be safe for wx logging (the
+      // comment above already promised "no logging" for this function,
+      // this branch just hadn't honoured it). HandleTimer() reports this
+      // from the GUI thread instead.
+      m_MismatchedSamplesPerBuffer.store(nSamples, std::memory_order_relaxed);
+      m_HasSamplesPerBufferMismatch.store(true, std::memory_order_relaxed);
+    }
   }
   // assure that m_IsRunning has not yet been changed after
   // m_NCallbacksEntered.fetch_add, otherwise the control thread may not wait

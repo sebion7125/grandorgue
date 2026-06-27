@@ -123,6 +123,15 @@ private:
   // watchdog can tell a genuinely silent device apart from a lost one
   std::atomic<int64_t> m_LastAudioCallbackMs;
 
+  // Set by AudioCallback() (realtime thread) when the backend hands it a
+  // different buffer size than configured; reported via wxLogError() from
+  // HandleTimer() on the GUI thread instead, since wx logging is not safe
+  // to call from the realtime audio callback (same reasoning as the rest
+  // of this class's thread-affinity rules, just realtime-safety this
+  // time: no logging, no locking, no allocation in AudioCallback()).
+  std::atomic_bool m_HasSamplesPerBufferMismatch;
+  std::atomic_uint m_MismatchedSamplesPerBuffer;
+
   // For waiting for and notifying when m_NCallbacksEntered bacomes 0
   GOMutex m_CallbackMutex;
   GOCondition m_CallbackCondition;
