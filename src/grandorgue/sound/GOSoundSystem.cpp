@@ -33,6 +33,24 @@ static constexpr int64_t WATCHDOG_CALLBACK_TIMEOUT_MS = 1500;
 // How long to wait after a system resume before reopening the audio device,
 // giving USB/ASIO devices time to become ready again
 static constexpr unsigned RESUME_DELAY_MS = 2000;
+
+// *** TEMPORARY DIAGNOSTIC - NOT FOR MERGING ***
+// Measures the actual wall-clock duration of each individual driver call on
+// whichever thread runs it (the worker thread for all of these), to find
+// out whether one specific call is genuinely slow/stuck rather than
+// inferring it from symptoms (DRIVER_HUNG, timeouts). std::fprintf only -
+// no wxLog* here, since this can run off the GUI thread.
+static void LogDriverCallTiming(const char *label, int64_t startMs) {
+  int64_t endMs = wxGetLocalTimeMillis().GetValue();
+
+  std::fprintf(
+    stderr,
+    "[DriverTiming] thread=%zu %s took %lldms\n",
+    std::hash<std::thread::id>{}(std::this_thread::get_id()),
+    label,
+    (long long)(endMs - startMs));
+  std::fflush(stderr);
+}
 // How long OpenSoundAsync/CloseSoundAsync wait for their worker thread
 // before giving up and marking the device DRIVER_HUNG instead of blocking
 // the GUI thread indefinitely
@@ -183,16 +201,23 @@ void GOSoundSystem::OpenJobWorker(std::shared_ptr<GOSoundOpenJob> job) {
           _("Output device %s not found - no sound output will occur"),
           pNamePattern->GetRegEx());
       job->outputs[i].port = pPort;
-      pPort->Init(
-        deviceConfig.GetChannels(),
-        job->sampleRate,
-        job->samplesPerBuffer,
-        deviceConfig.GetDesiredLatency(),
-        i);
+      {
+        int64_t t0 = wxGetLocalTimeMillis().GetValue();
+        pPort->Init(
+          deviceConfig.GetChannels(),
+          job->sampleRate,
+          job->samplesPerBuffer,
+          deviceConfig.GetDesiredLatency(),
+          i);
+        LogDriverCallTiming("Init", t0);
+      }
     }
 
-    for (GOSoundOutput &output : job->outputs)
+    for (GOSoundOutput &output : job->outputs) {
+      int64_t t0 = wxGetLocalTimeMillis().GetValue();
       output.port->Open();
+      LogDriverCallTiming("Open", t0);
+    }
 
     if (job->samplesPerBuffer > MAX_FRAME_SIZE)
       throw wxString::Format(
@@ -208,8 +233,11 @@ void GOSoundSystem::OpenJobWorker(std::shared_ptr<GOSoundOpenJob> job) {
     // is only set afterwards, by StartSoundSystem() on the GUI thread - a
     // callback that fires this early just sees m_IsRunning == false and
     // fills silence instead.
-    for (GOSoundOutput &output : job->outputs)
+    for (GOSoundOutput &output : job->outputs) {
+      int64_t t0 = wxGetLocalTimeMillis().GetValue();
       output.port->StartStream();
+      LogDriverCallTiming("StartStream", t0);
+    }
 
     ok = true;
   } catch (wxString &msg) {
@@ -466,7 +494,9 @@ std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob() {
 
           output.port = nullptr;
           try {
+            int64_t t0 = wxGetLocalTimeMillis().GetValue();
             port->Close();
+            LogDriverCallTiming("Close", t0);
           } catch (...) {
             // a background thread must never let an exception escape
           }
