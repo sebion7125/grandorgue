@@ -9,11 +9,9 @@
 
 #include <wx/intl.h>
 #include <wx/log.h>
-#include <wx/time.h>
 
 #include "GOSoundPortFactory.h"
 #include "config/GODeviceNamePattern.h"
-#include "sound/GOSoundSystem.h"
 #include "sound/buffer/GOSoundBufferMutable.h"
 
 const wxString GOSoundRtPort::PORT_NAME = wxT("RtAudio");
@@ -133,16 +131,9 @@ void GOSoundRtPort::Close(bool deviceMaybeLost) {
   // sampleRateChanged, see RtAudio.cpp) already knows to skip straight to
   // closeStream() instead of stopStream() for exactly this reason - do the
   // same here when the caller already knows the device may be gone.
-  if (!deviceMaybeLost) {
-    int64_t t0 = wxGetLocalTimeMillis().GetValue();
+  if (!deviceMaybeLost)
     processRtResult(m_rtApi->abortStream(), false);
-    LogDriverCallTiming("abortStream", t0);
-  }
-  {
-    int64_t t0 = wxGetLocalTimeMillis().GetValue();
-    m_rtApi->closeStream();
-    LogDriverCallTiming("closeStream", t0);
-  }
+  m_rtApi->closeStream();
   m_IsOpen = false;
 }
 

@@ -34,68 +34,17 @@ static constexpr int64_t WATCHDOG_CALLBACK_TIMEOUT_MS = 1500;
 // giving USB/ASIO devices time to become ready again
 static constexpr unsigned RESUME_DELAY_MS = 2000;
 
-// *** TEMPORARY DIAGNOSTIC - NOT FOR MERGING ***
-// Measures the actual wall-clock duration of each individual driver call on
-// whichever thread runs it (the worker thread for all of these), to find
-// out whether one specific call is genuinely slow/stuck rather than
-// inferring it from symptoms (DRIVER_HUNG, timeouts).
-//
-// File-static (not a GOSoundSystem member) so the GOSoundCloseJob worker
-// task - which deliberately never touches `this`/GOSoundSystem, see
-// StartCloseJob() - does not need an m_AliveFlag-style lifetime guard just
-// for this diagnostic. wxLog* is not safe to call off the GUI thread, so
-// the worker side only queues a plain std::string here; HandleTimer() (GUI
-// thread) drains and logs the queue via wxLogWarning() into the normal Log
-// messages window.
-static std::mutex g_DriverTimingLogMutex;
-static std::vector<std::string> g_PendingDriverTimingLogs;
-
-void LogDriverCallTiming(const char *label, int64_t startMs) {
-  int64_t endMs = wxGetLocalTimeMillis().GetValue();
-  char buf[160];
-
-  std::snprintf(
-    buf,
-    sizeof(buf),
-    "[DriverTiming] thread=%zu %s took %lldms",
-    std::hash<std::thread::id>{}(std::this_thread::get_id()),
-    label,
-    (long long)(endMs - startMs));
-
-  std::lock_guard<std::mutex> lock(g_DriverTimingLogMutex);
-
-  g_PendingDriverTimingLogs.push_back(buf);
-}
-
-// GUI-thread only. Called from HandleTimer() (covers the common case while
-// the watchdog is armed) and from ApplyOpenJobResult()/ApplyCloseJobResult()
-// (covers Closing/DriverHung/Opening, while m_Watchdog is deliberately
-// disarmed - see StartCloseJob() - so HandleTimer() alone would never fire
-// during exactly the states this diagnostic is meant to observe).
-static void FlushDriverCallTimingLog() {
-  std::vector<std::string> pending;
-  {
-    std::lock_guard<std::mutex> lock(g_DriverTimingLogMutex);
-
-    pending.swap(g_PendingDriverTimingLogs);
-  }
-  for (const std::string &msg : pending)
-    wxLogWarning("%s", wxString::FromUTF8(msg));
-}
 // How long OpenSoundAsync/CloseSoundAsync wait for their worker thread
 // before giving up and marking the device DRIVER_HUNG instead of blocking
 // the GUI thread indefinitely
 static constexpr unsigned AUDIO_OPEN_TIMEOUT_MS = 5000;
 static constexpr unsigned AUDIO_CLOSE_TIMEOUT_MS = 5000;
-// TEMPORARY DIAGNOSTIC CHANGE - was 1500. The old, fully synchronous
-// pre-Phase-5 code had no timeout at all here and (per user testing)
-// reliably recovers within ~4s, logging RtAudio's own "the stream is
-// stopping or closed!" warning from abortStream() - evidence that RtAudio's
-// internal stream state has time to settle before our Close() call reaches
-// it. 1500ms may simply be cutting that off too early. Testing whether
-// raising this resolves the "never recovers" symptom, or whether (as
-// suspected) the real cause lies elsewhere.
-static constexpr unsigned AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS = 5000;
+// Shorter close timeout used when the stream was already DEVICE_LOST before
+// the close was requested (e.g. Audio Panic after the device disappeared).
+// GOSoundPort::Close(deviceMaybeLost=true) skips the driver call that used
+// to hang indefinitely in this case (see GOSoundRtPort::Close()), so this
+// only needs to cover a normal, fast close (measured: tens of ms).
+static constexpr unsigned AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS = 1500;
 // How long EnumerateAudioDevices() waits for the worker thread before
 // giving up and returning an empty list instead of blocking the GUI thread
 static constexpr unsigned AUDIO_ENUM_TIMEOUT_MS = 5000;
@@ -142,9 +91,6 @@ void GOSoundSystem::HandleTimer() {
       _("No sound output will happen. Samples per buffer has been changed "
         "by the sound driver to %d"),
       m_MismatchedSamplesPerBuffer.load(std::memory_order_relaxed));
-
-  // *** TEMPORARY DIAGNOSTIC - NOT FOR MERGING ***
-  FlushDriverCallTimingLog();
 
   if (m_State.load() != GOSoundDeviceState::RUNNING)
     return;
@@ -235,23 +181,16 @@ void GOSoundSystem::OpenJobWorker(std::shared_ptr<GOSoundOpenJob> job) {
           _("Output device %s not found - no sound output will occur"),
           pNamePattern->GetRegEx());
       job->outputs[i].port = pPort;
-      {
-        int64_t t0 = wxGetLocalTimeMillis().GetValue();
-        pPort->Init(
-          deviceConfig.GetChannels(),
-          job->sampleRate,
-          job->samplesPerBuffer,
-          deviceConfig.GetDesiredLatency(),
-          i);
-        LogDriverCallTiming("Init", t0);
-      }
+      pPort->Init(
+        deviceConfig.GetChannels(),
+        job->sampleRate,
+        job->samplesPerBuffer,
+        deviceConfig.GetDesiredLatency(),
+        i);
     }
 
-    for (GOSoundOutput &output : job->outputs) {
-      int64_t t0 = wxGetLocalTimeMillis().GetValue();
+    for (GOSoundOutput &output : job->outputs)
       output.port->Open();
-      LogDriverCallTiming("Open", t0);
-    }
 
     if (job->samplesPerBuffer > MAX_FRAME_SIZE)
       throw wxString::Format(
@@ -267,11 +206,8 @@ void GOSoundSystem::OpenJobWorker(std::shared_ptr<GOSoundOpenJob> job) {
     // is only set afterwards, by StartSoundSystem() on the GUI thread - a
     // callback that fires this early just sees m_IsRunning == false and
     // fills silence instead.
-    for (GOSoundOutput &output : job->outputs) {
-      int64_t t0 = wxGetLocalTimeMillis().GetValue();
+    for (GOSoundOutput &output : job->outputs)
       output.port->StartStream();
-      LogDriverCallTiming("StartStream", t0);
-    }
 
     ok = true;
   } catch (wxString &msg) {
@@ -313,10 +249,6 @@ void GOSoundSystem::OpenJobWorker(std::shared_ptr<GOSoundOpenJob> job) {
 // longer than the timeout - both paths only ever run on the GUI thread.
 void GOSoundSystem::ApplyOpenJobResult(
   const std::shared_ptr<GOSoundOpenJob> &job) {
-  // *** TEMPORARY DIAGNOSTIC - NOT FOR MERGING *** - see HandleTimer()'s
-  // comment on why this also needs draining here, not just there.
-  FlushDriverCallTimingLog();
-
   {
     std::lock_guard<std::mutex> lock(job->mutex);
 
@@ -364,16 +296,6 @@ bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs) {
   assert(!m_open);
   assert(m_AudioOutputs.size() == 0);
 
-  // *** TEMPORARY DIAGNOSTIC CHANGE - NOT FOR MERGING ***
-  // Both guards below disabled (#if 0) on request, to check whether they
-  // make any difference for the "Panic while a healthy device is open"
-  // crash report. They should not: DRIVER_HUNG isn't set and
-  // m_PendingCloseJob is already null in that scenario, so neither guard
-  // should ever trigger there. Re-enable before this branch is considered
-  // done - they matter for real for device-loss/suspend recovery, where
-  // a second Open could otherwise race with a still-running Close on the
-  // same physical device.
-#if 0
   if (m_State.load() == GOSoundDeviceState::DRIVER_HUNG) {
     wxLogWarning(
       _("Audio driver is already marked as hung. Restart GrandOrgue before "
@@ -406,7 +328,6 @@ bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs) {
       return false;
     }
   }
-#endif
 
   SetState(GOSoundDeviceState::OPENING);
   m_LastErrorMessage = wxEmptyString;
@@ -533,9 +454,7 @@ std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob(
 
           output.port = nullptr;
           try {
-            int64_t t0 = wxGetLocalTimeMillis().GetValue();
             port->Close(deviceMaybeLost);
-            LogDriverCallTiming("Close", t0);
           } catch (...) {
             // a background thread must never let an exception escape
           }
@@ -571,10 +490,6 @@ std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob(
 // job that took longer than whoever was waiting cared to wait.
 void GOSoundSystem::ApplyCloseJobResult(
   const std::shared_ptr<GOSoundCloseJob> &job) {
-  // *** TEMPORARY DIAGNOSTIC - NOT FOR MERGING *** - see HandleTimer()'s
-  // comment on why this also needs draining here, not just there.
-  FlushDriverCallTimingLog();
-
   std::lock_guard<std::mutex> lock(job->mutex);
 
   if (job->applied || !job->done)
