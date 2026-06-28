@@ -42,6 +42,14 @@ class GOOrganController;
 class GOSoundBufferMutable;
 class GOSoundPort;
 
+// *** TEMPORARY DIAGNOSTIC - NOT FOR MERGING *** - defined in
+// GOSoundSystem.cpp. Queues a "<label> took Nms" message (where N is now
+// minus startMs) to be logged via wxLogWarning() on the GUI thread later -
+// safe to call from any thread, including from inside GOSoundRtPort::Close()
+// (which is what this declaration is for: GOSoundRtPort.cpp does not
+// otherwise depend on GOSoundSystem.h).
+void LogDriverCallTiming(const char *label, int64_t startMs);
+
 /**
  * The lifecycle state of the audio device, as tracked by GOSoundSystem.
  * This is distinct from m_open: m_open only records that GOSoundSystem

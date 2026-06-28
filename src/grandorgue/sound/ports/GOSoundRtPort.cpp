@@ -9,9 +9,11 @@
 
 #include <wx/intl.h>
 #include <wx/log.h>
+#include <wx/time.h>
 
 #include "GOSoundPortFactory.h"
 #include "config/GODeviceNamePattern.h"
+#include "sound/GOSoundSystem.h"
 #include "sound/buffer/GOSoundBufferMutable.h"
 
 const wxString GOSoundRtPort::PORT_NAME = wxT("RtAudio");
@@ -119,8 +121,22 @@ void GOSoundRtPort::StartStream() {
 void GOSoundRtPort::Close() {
   if (!m_rtApi || !m_IsOpen)
     return;
-  processRtResult(m_rtApi->abortStream(), false);
-  m_rtApi->closeStream();
+
+  // *** TEMPORARY DIAGNOSTIC - NOT FOR MERGING *** - split timing for
+  // abortStream() vs closeStream() individually: GOSoundSystem's own
+  // "Close" timing wraps both together and never logged anything at all
+  // for a hung post-device-loss close, meaning one of these two never
+  // returns - this narrows down which one.
+  {
+    int64_t t0 = wxGetLocalTimeMillis().GetValue();
+    processRtResult(m_rtApi->abortStream(), false);
+    LogDriverCallTiming("abortStream", t0);
+  }
+  {
+    int64_t t0 = wxGetLocalTimeMillis().GetValue();
+    m_rtApi->closeStream();
+    LogDriverCallTiming("closeStream", t0);
+  }
   m_IsOpen = false;
 }
 

@@ -50,7 +50,7 @@ static constexpr unsigned RESUME_DELAY_MS = 2000;
 static std::mutex g_DriverTimingLogMutex;
 static std::vector<std::string> g_PendingDriverTimingLogs;
 
-static void LogDriverCallTiming(const char *label, int64_t startMs) {
+void LogDriverCallTiming(const char *label, int64_t startMs) {
   int64_t endMs = wxGetLocalTimeMillis().GetValue();
   char buf[160];
 
