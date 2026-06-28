@@ -38,18 +38,49 @@ static constexpr unsigned RESUME_DELAY_MS = 2000;
 // Measures the actual wall-clock duration of each individual driver call on
 // whichever thread runs it (the worker thread for all of these), to find
 // out whether one specific call is genuinely slow/stuck rather than
-// inferring it from symptoms (DRIVER_HUNG, timeouts). std::fprintf only -
-// no wxLog* here, since this can run off the GUI thread.
+// inferring it from symptoms (DRIVER_HUNG, timeouts).
+//
+// File-static (not a GOSoundSystem member) so the GOSoundCloseJob worker
+// task - which deliberately never touches `this`/GOSoundSystem, see
+// StartCloseJob() - does not need an m_AliveFlag-style lifetime guard just
+// for this diagnostic. wxLog* is not safe to call off the GUI thread, so
+// the worker side only queues a plain std::string here; HandleTimer() (GUI
+// thread) drains and logs the queue via wxLogWarning() into the normal Log
+// messages window.
+static std::mutex g_DriverTimingLogMutex;
+static std::vector<std::string> g_PendingDriverTimingLogs;
+
 static void LogDriverCallTiming(const char *label, int64_t startMs) {
   int64_t endMs = wxGetLocalTimeMillis().GetValue();
+  char buf[160];
 
-  std::fprintf(
-    stderr,
-    "[DriverTiming] thread=%zu %s took %lldms\n",
+  std::snprintf(
+    buf,
+    sizeof(buf),
+    "[DriverTiming] thread=%zu %s took %lldms",
     std::hash<std::thread::id>{}(std::this_thread::get_id()),
     label,
     (long long)(endMs - startMs));
-  std::fflush(stderr);
+
+  std::lock_guard<std::mutex> lock(g_DriverTimingLogMutex);
+
+  g_PendingDriverTimingLogs.push_back(buf);
+}
+
+// GUI-thread only. Called from HandleTimer() (covers the common case while
+// the watchdog is armed) and from ApplyOpenJobResult()/ApplyCloseJobResult()
+// (covers Closing/DriverHung/Opening, while m_Watchdog is deliberately
+// disarmed - see StartCloseJob() - so HandleTimer() alone would never fire
+// during exactly the states this diagnostic is meant to observe).
+static void FlushDriverCallTimingLog() {
+  std::vector<std::string> pending;
+  {
+    std::lock_guard<std::mutex> lock(g_DriverTimingLogMutex);
+
+    pending.swap(g_PendingDriverTimingLogs);
+  }
+  for (const std::string &msg : pending)
+    wxLogWarning("%s", wxString::FromUTF8(msg));
 }
 // How long OpenSoundAsync/CloseSoundAsync wait for their worker thread
 // before giving up and marking the device DRIVER_HUNG instead of blocking
@@ -111,6 +142,9 @@ void GOSoundSystem::HandleTimer() {
       _("No sound output will happen. Samples per buffer has been changed "
         "by the sound driver to %d"),
       m_MismatchedSamplesPerBuffer.load(std::memory_order_relaxed));
+
+  // *** TEMPORARY DIAGNOSTIC - NOT FOR MERGING ***
+  FlushDriverCallTimingLog();
 
   if (m_State.load() != GOSoundDeviceState::RUNNING)
     return;
@@ -279,6 +313,10 @@ void GOSoundSystem::OpenJobWorker(std::shared_ptr<GOSoundOpenJob> job) {
 // longer than the timeout - both paths only ever run on the GUI thread.
 void GOSoundSystem::ApplyOpenJobResult(
   const std::shared_ptr<GOSoundOpenJob> &job) {
+  // *** TEMPORARY DIAGNOSTIC - NOT FOR MERGING *** - see HandleTimer()'s
+  // comment on why this also needs draining here, not just there.
+  FlushDriverCallTimingLog();
+
   {
     std::lock_guard<std::mutex> lock(job->mutex);
 
@@ -532,6 +570,10 @@ std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob() {
 // job that took longer than whoever was waiting cared to wait.
 void GOSoundSystem::ApplyCloseJobResult(
   const std::shared_ptr<GOSoundCloseJob> &job) {
+  // *** TEMPORARY DIAGNOSTIC - NOT FOR MERGING *** - see HandleTimer()'s
+  // comment on why this also needs draining here, not just there.
+  FlushDriverCallTimingLog();
+
   std::lock_guard<std::mutex> lock(job->mutex);
 
   if (job->applied || !job->done)
