@@ -684,7 +684,7 @@ void GOSoundSystem::SuspendAudioForPowerEvent() {
 
   m_WasRunningBeforeSuspend = stateBeforeSuspend == GOSoundDeviceState::RUNNING;
   if (m_WasRunningBeforeSuspend) {
-    wxLogWarning(_("Audio: suspend event received, closing the audio device."));
+    wxLogDebug(_("Audio: suspend event received, closing the audio device."));
 
     // Windows expects WM_POWERBROADCAST handling to return quickly, so -
     // unlike AssureSoundIsClosed()/CloseSoundAsync() - this must not block
@@ -721,7 +721,7 @@ void GOSoundSystem::ResumeAudioAfterPowerEvent() {
     return;
   }
 
-  wxLogWarning(
+  wxLogDebug(
     _("Audio: resume event received, reopening the audio device after a "
       "delay."));
   m_ResumeTimer.SetRelativeTimer(RESUME_DELAY_MS, &m_ResumeCallback);
