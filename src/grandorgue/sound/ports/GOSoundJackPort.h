@@ -53,7 +53,7 @@ public:
 #endif /* GO_USE_JACK */
 
 public:
-  void Close();
+  void Close(bool deviceMaybeLost = false);
 
   static const std::vector<wxString> &getApis() {
     return GOSoundPortFactory::c_NoApis;

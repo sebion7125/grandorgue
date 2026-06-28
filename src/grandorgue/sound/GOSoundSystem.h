@@ -349,8 +349,9 @@ private:
 
   /** Detaches m_AudioOutputs and starts closing them on a worker thread,
    *  without waiting for it. Safe to call repeatedly; the caller decides
-   *  whether/how long to wait for the result via m_PendingCloseJob. */
-  std::shared_ptr<GOSoundCloseJob> StartCloseJob();
+   *  whether/how long to wait for the result via m_PendingCloseJob.
+   *  @param deviceMaybeLost forwarded to GOSoundPort::Close() - see there. */
+  std::shared_ptr<GOSoundCloseJob> StartCloseJob(bool deviceMaybeLost = false);
   void ApplyCloseJobResult(const std::shared_ptr<GOSoundCloseJob> &job);
 
   /** Lists audio devices on the GOSoundAudioWorker thread and waits up to
@@ -371,8 +372,9 @@ private:
    *  CLOSED or DRIVER_HUNG accordingly. Use this when the caller needs a
    *  definite answer soon (e.g. AssureSoundIsClosed()); use StartCloseJob()
    *  directly when the caller must not block at all (e.g. a Windows power
-   *  suspend handler, which the OS expects to return quickly). */
-  void CloseSoundAsync(unsigned timeoutMs);
+   *  suspend handler, which the OS expects to return quickly).
+   *  @param deviceMaybeLost forwarded to StartCloseJob() - see there. */
+  void CloseSoundAsync(unsigned timeoutMs, bool deviceMaybeLost = false);
 
   void OpenMidi() { m_midi.Open(); }
 

@@ -152,7 +152,10 @@ wxString GOSoundJackPort::getName() {
 }
 #endif /* GO_USE_JACK */
 
-void GOSoundJackPort::Close() {
+void GOSoundJackPort::Close(bool deviceMaybeLost) {
+  // deviceMaybeLost is RtAudio/ASIO-specific (see GOSoundRtPort::Close());
+  // no equivalent hang found here, so it is accepted but unused for now.
+  (void)deviceMaybeLost;
 #if defined(GO_USE_JACK)
   m_IsStarted = false;
   m_IsOpen = false;

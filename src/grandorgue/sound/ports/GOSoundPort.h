@@ -44,7 +44,15 @@ public:
     unsigned index);
   virtual void Open() = 0;
   virtual void StartStream() = 0;
-  virtual void Close() = 0;
+  /**
+   * Closes the port.
+   * @param deviceMaybeLost true if the caller already believes the
+   *   underlying device may be physically gone (e.g. USB unplugged) - lets
+   *   an implementation skip steps that are known to hang in that case
+   *   instead of trying a graceful shutdown that the device can no longer
+   *   participate in.
+   */
+  virtual void Close(bool deviceMaybeLost = false) = 0;
 
   const wxString &GetName();
 

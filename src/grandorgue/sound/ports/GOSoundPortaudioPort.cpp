@@ -98,7 +98,10 @@ void GOSoundPortaudioPort::StartStream() {
   SetActualLatency(info->outputLatency);
 }
 
-void GOSoundPortaudioPort::Close() {
+void GOSoundPortaudioPort::Close(bool deviceMaybeLost) {
+  // deviceMaybeLost is RtAudio/ASIO-specific (see GOSoundRtPort::Close());
+  // no equivalent hang found here, so it is accepted but unused for now.
+  (void)deviceMaybeLost;
   if (!m_stream || !m_IsOpen)
     return;
   Pa_StopStream(m_stream);

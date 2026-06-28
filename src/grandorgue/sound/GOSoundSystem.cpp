@@ -514,7 +514,8 @@ void GOSoundSystem::StopSoundSystem() {
 // call back into GOSoundSystem - there is nothing left here for it to
 // install - it just goes on quietly tearing down orphaned GOSoundPort
 // objects if it outlives whatever the caller ends up waiting for.
-std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob() {
+std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob(
+  bool deviceMaybeLost) {
   m_Watchdog.DeleteTimer(this);
 
   auto job = std::make_shared<GOSoundCloseJob>();
@@ -524,7 +525,7 @@ std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob() {
   m_open = false;
   m_PendingCloseJob = job;
 
-  m_AudioWorker.Post([job]() {
+  m_AudioWorker.Post([job, deviceMaybeLost]() {
     try {
       for (GOSoundOutput &output : job->outputs)
         if (output.port) {
@@ -533,7 +534,7 @@ std::shared_ptr<GOSoundSystem::GOSoundCloseJob> GOSoundSystem::StartCloseJob() {
           output.port = nullptr;
           try {
             int64_t t0 = wxGetLocalTimeMillis().GetValue();
-            port->Close();
+            port->Close(deviceMaybeLost);
             LogDriverCallTiming("Close", t0);
           } catch (...) {
             // a background thread must never let an exception escape
@@ -583,8 +584,8 @@ void GOSoundSystem::ApplyCloseJobResult(
     m_PendingCloseJob.reset();
 }
 
-void GOSoundSystem::CloseSoundAsync(unsigned timeoutMs) {
-  std::shared_ptr<GOSoundCloseJob> job = StartCloseJob();
+void GOSoundSystem::CloseSoundAsync(unsigned timeoutMs, bool deviceMaybeLost) {
+  std::shared_ptr<GOSoundCloseJob> job = StartCloseJob(deviceMaybeLost);
 
   bool finishedInTime;
   {
@@ -652,8 +653,8 @@ void GOSoundSystem::AssureSoundIsClosed() {
       StopAndDestroyEngine();
     }
     CloseSoundAsync(
-      wasAlreadyLost ? AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS
-                     : AUDIO_CLOSE_TIMEOUT_MS);
+      wasAlreadyLost ? AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS : AUDIO_CLOSE_TIMEOUT_MS,
+      wasAlreadyLost);
   }
 }
 

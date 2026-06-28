@@ -37,7 +37,7 @@ public:
 
   void Open();
   void StartStream();
-  void Close();
+  void Close(bool deviceMaybeLost = false);
 
   static const std::vector<wxString> &getApis() {
     return GOSoundPortFactory::c_NoApis;

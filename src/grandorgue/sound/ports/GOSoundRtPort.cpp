@@ -118,16 +118,22 @@ void GOSoundRtPort::StartStream() {
       _("Sample rate of device %s changed"), m_Name.c_str());
 }
 
-void GOSoundRtPort::Close() {
+void GOSoundRtPort::Close(bool deviceMaybeLost) {
   if (!m_rtApi || !m_IsOpen)
     return;
 
-  // *** TEMPORARY DIAGNOSTIC - NOT FOR MERGING *** - split timing for
-  // abortStream() vs closeStream() individually: GOSoundSystem's own
-  // "Close" timing wraps both together and never logged anything at all
-  // for a hung post-device-loss close, meaning one of these two never
-  // returns - this narrows down which one.
-  {
+  // RtApiAsio::abortStream() calls stopStream() whenever stream_.state is
+  // still STREAM_RUNNING, and that waits (WaitForSingleObject with an
+  // INFINITE timeout - see RtAudio.cpp) for a "drain complete" signal that
+  // is only ever raised from inside the ASIO audio callback itself. Once
+  // the device is physically gone, the driver stops invoking that callback
+  // entirely, so the signal never comes and this blocks forever - measured
+  // directly: abortStream() never returned at all after a USB disconnect.
+  // RtAudio's own internal device-loss handling (asioMessages/
+  // sampleRateChanged, see RtAudio.cpp) already knows to skip straight to
+  // closeStream() instead of stopStream() for exactly this reason - do the
+  // same here when the caller already knows the device may be gone.
+  if (!deviceMaybeLost) {
     int64_t t0 = wxGetLocalTimeMillis().GetValue();
     processRtResult(m_rtApi->abortStream(), false);
     LogDriverCallTiming("abortStream", t0);
