@@ -48,6 +48,11 @@ static constexpr unsigned AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS = 1500;
 // How long EnumerateAudioDevices() waits for the worker thread before
 // giving up and returning an empty list instead of blocking the GUI thread
 static constexpr unsigned AUDIO_ENUM_TIMEOUT_MS = 5000;
+// How often to retry opening the device automatically while DEVICE_LOST -
+// see TryAutoReconnect(). Deliberately much coarser than the watchdog's own
+// poll interval, so a still-missing device does not get probed many times
+// per second.
+static constexpr int64_t RECONNECT_RETRY_INTERVAL_MS = 3000;
 
 static const char *GOSoundDeviceStateToCString(GOSoundDeviceState state) {
   switch (state) {
@@ -92,7 +97,14 @@ void GOSoundSystem::HandleTimer() {
         "by the sound driver to %d"),
       m_MismatchedSamplesPerBuffer.load(std::memory_order_relaxed));
 
-  if (m_State.load() != GOSoundDeviceState::RUNNING)
+  GOSoundDeviceState state = m_State.load();
+
+  if (state == GOSoundDeviceState::DEVICE_LOST) {
+    TryAutoReconnect();
+    return;
+  }
+
+  if (state != GOSoundDeviceState::RUNNING)
     return;
 
   const int64_t lastMs = m_LastAudioCallbackMs.load(std::memory_order_relaxed);
@@ -105,6 +117,23 @@ void GOSoundSystem::HandleTimer() {
         "over %d ms."),
       (int)WATCHDOG_CALLBACK_TIMEOUT_MS);
   }
+}
+
+void GOSoundSystem::TryAutoReconnect() {
+  const int64_t nowMs = wxGetLocalTimeMillis().GetValue();
+
+  if (nowMs - m_LastReconnectAttemptMs < RECONNECT_RETRY_INTERVAL_MS)
+    return;
+  m_LastReconnectAttemptMs = nowMs;
+
+  // Closes the still-registered (but already-dead) port quickly - see
+  // GOSoundPort::Close(deviceMaybeLost) - then retries opening, quietly:
+  // "device not found" is the expected outcome of most attempts here, not
+  // an error worth an error box every few seconds. AssureSoundIsClosed()
+  // disarms m_Watchdog (see StartCloseJob()); on a failed retry,
+  // ApplyOpenJobResult() re-arms it so the next tick still gets here.
+  AssureSoundIsClosed();
+  OpenSoundAsync(AUDIO_OPEN_TIMEOUT_MS, /*isQuietRetry=*/true);
 }
 
 GOSoundSystem::GOSoundSystem(GOConfig &settings)
@@ -122,6 +151,7 @@ GOSoundSystem::GOSoundSystem(GOConfig &settings)
     m_LastAudioCallbackMs(0),
     m_HasSamplesPerBufferMismatch(false),
     m_MismatchedSamplesPerBuffer(0),
+    m_LastReconnectAttemptMs(0),
     m_CallbackCondition(m_CallbackMutex),
     meter_counter(0),
     m_WaitCount(0),
@@ -284,6 +314,19 @@ void GOSoundSystem::ApplyOpenJobResult(
     return;
   }
 
+  if (job->isQuietRetry) {
+    // Expected, repeated outcome while the device is still missing - no
+    // error box, and back to DEVICE_LOST (not OPEN_FAILED) so the next
+    // watchdog tick retries again. AssureSoundIsClosed() disarmed
+    // m_Watchdog (see StartCloseJob()); re-arm it here.
+    wxLogDebug(
+      "Audio: automatic reconnect attempt failed: %s", job->errorMessage);
+    SetState(GOSoundDeviceState::DEVICE_LOST);
+    m_Watchdog.SetRelativeTimer(
+      WATCHDOG_POLL_INTERVAL_MS, this, WATCHDOG_POLL_INTERVAL_MS);
+    return;
+  }
+
   if (logSoundErrors)
     GOMessageBox(job->errorMessage, _("Error"), wxOK | wxICON_ERROR, NULL);
   else
@@ -292,7 +335,7 @@ void GOSoundSystem::ApplyOpenJobResult(
   SetState(GOSoundDeviceState::OPEN_FAILED);
 }
 
-bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs) {
+bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs, bool isQuietRetry) {
   assert(!m_open);
   assert(m_AudioOutputs.size() == 0);
 
@@ -338,6 +381,7 @@ bool GOSoundSystem::OpenSoundAsync(unsigned timeoutMs) {
   job->audioConfig = m_config.GetAudioDeviceConfig();
   job->sampleRate = m_config.SampleRate();
   job->samplesPerBuffer = m_config.SamplesPerBuffer();
+  job->isQuietRetry = isQuietRetry;
   FillDeviceNamePattern(
     GetDefaultAudioDevice(job->portsConfig), job->defaultDevicePattern);
   m_AudioRecorder.SetBytesPerSample(m_config.WaveFormatBytesPerSample());

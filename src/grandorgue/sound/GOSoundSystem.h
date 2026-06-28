@@ -133,6 +133,11 @@ private:
   std::atomic_bool m_HasSamplesPerBufferMismatch;
   std::atomic_uint m_MismatchedSamplesPerBuffer;
 
+  // GUI-thread only (set/read solely from HandleTimer()/TryAutoReconnect()):
+  // timestamp of the last automatic reconnect attempt, so DEVICE_LOST is
+  // retried periodically rather than on every watchdog tick.
+  int64_t m_LastReconnectAttemptMs;
+
   // For waiting for and notifying when m_NCallbacksEntered bacomes 0
   GOMutex m_CallbackMutex;
   GOCondition m_CallbackCondition;
@@ -269,6 +274,12 @@ private:
     GODeviceNamePattern defaultDevicePattern;
     unsigned sampleRate = 0;
     unsigned samplesPerBuffer = 0;
+    // true for an automatic DEVICE_LOST retry (see TryAutoReconnect()): on
+    // failure, ApplyOpenJobResult() logs quietly (wxLogDebug, invisible in
+    // a release build) and returns to DEVICE_LOST instead of popping an
+    // error box and settling in OPEN_FAILED, since a "device not found" is
+    // the expected, repeated outcome until the device actually comes back.
+    bool isQuietRetry = false;
 
     // completion signalling; touched by both threads only while holding
     // mutex. Deliberately plain std::mutex/condition_variable rather than
@@ -358,8 +369,9 @@ private:
    *  time; the worker keeps running in the background and is still applied
    *  if it eventually succeeds. Also waits (within the same timeoutMs
    *  budget) for any still-pending close job first - see
-   *  m_PendingCloseJob. */
-  bool OpenSoundAsync(unsigned timeoutMs);
+   *  m_PendingCloseJob.
+   *  @param isQuietRetry forwarded to GOSoundOpenJob::isQuietRetry. */
+  bool OpenSoundAsync(unsigned timeoutMs, bool isQuietRetry = false);
   /** Calls StartCloseJob() and waits up to timeoutMs for it, then marks
    *  CLOSED or DRIVER_HUNG accordingly. Use this when the caller needs a
    *  definite answer soon (e.g. AssureSoundIsClosed()); use StartCloseJob()
@@ -375,6 +387,13 @@ private:
 
   /** GOTimerCallback: checks m_LastAudioCallbackMs for the watchdog */
   void HandleTimer() override;
+
+  /** Called from HandleTimer() while m_State is DEVICE_LOST: periodically
+   *  (not on every tick) retries opening the device quietly, so playback
+   *  resumes automatically once a previously lost device (e.g. unplugged
+   *  USB) is reconnected, without popping an error box for every failed
+   *  attempt in between. */
+  void TryAutoReconnect();
 
   /** Reopens the device after a suspend/resume cycle, if still wanted */
   void DoDelayedResume();
