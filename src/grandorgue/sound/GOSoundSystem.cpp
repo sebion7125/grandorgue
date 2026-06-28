@@ -55,7 +55,8 @@ static constexpr unsigned AUDIO_ENUM_TIMEOUT_MS = 5000;
 // still bounded by AUDIO_OPEN_TIMEOUT_MS/AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS,
 // surfaces as a visible DRIVER_HUNG warning, and stops further retries -
 // see ApplyOpenJobResult()/OpenSoundAsync()).
-static constexpr int64_t RECONNECT_RETRY_INTERVAL_MS = WATCHDOG_POLL_INTERVAL_MS;
+static constexpr int64_t RECONNECT_RETRY_INTERVAL_MS
+  = WATCHDOG_POLL_INTERVAL_MS;
 
 static const char *GOSoundDeviceStateToCString(GOSoundDeviceState state) {
   switch (state) {
@@ -620,7 +621,8 @@ void GOSoundSystem::AssureSoundIsClosed() {
       StopAndDestroyEngine();
     }
     CloseSoundAsync(
-      wasAlreadyLost ? AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS : AUDIO_CLOSE_TIMEOUT_MS,
+      wasAlreadyLost ? AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS
+                     : AUDIO_CLOSE_TIMEOUT_MS,
       wasAlreadyLost);
   }
 }
