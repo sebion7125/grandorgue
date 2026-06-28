@@ -38,12 +38,15 @@ static constexpr unsigned RESUME_DELAY_MS = 2000;
 // the GUI thread indefinitely
 static constexpr unsigned AUDIO_OPEN_TIMEOUT_MS = 5000;
 static constexpr unsigned AUDIO_CLOSE_TIMEOUT_MS = 5000;
-// Shorter close timeout used when the stream was already DEVICE_LOST before
-// the close was requested (e.g. Audio Panic after the device disappeared):
-// the old stream object is tied to a now-gone device session, so a graceful
-// Close() succeeding at all is already unlikely - no point waiting as long
-// as for a normal close.
-static constexpr unsigned AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS = 1500;
+// TEMPORARY DIAGNOSTIC CHANGE - was 1500. The old, fully synchronous
+// pre-Phase-5 code had no timeout at all here and (per user testing)
+// reliably recovers within ~4s, logging RtAudio's own "the stream is
+// stopping or closed!" warning from abortStream() - evidence that RtAudio's
+// internal stream state has time to settle before our Close() call reaches
+// it. 1500ms may simply be cutting that off too early. Testing whether
+// raising this resolves the "never recovers" symptom, or whether (as
+// suspected) the real cause lies elsewhere.
+static constexpr unsigned AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS = 5000;
 // How long EnumerateAudioDevices() waits for the worker thread before
 // giving up and returning an empty list instead of blocking the GUI thread
 static constexpr unsigned AUDIO_ENUM_TIMEOUT_MS = 5000;
