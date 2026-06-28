@@ -49,10 +49,13 @@ static constexpr unsigned AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS = 1500;
 // giving up and returning an empty list instead of blocking the GUI thread
 static constexpr unsigned AUDIO_ENUM_TIMEOUT_MS = 5000;
 // How often to retry opening the device automatically while DEVICE_LOST -
-// see TryAutoReconnect(). Deliberately much coarser than the watchdog's own
-// poll interval, so a still-missing device does not get probed many times
-// per second.
-static constexpr int64_t RECONNECT_RETRY_INTERVAL_MS = 3000;
+// see TryAutoReconnect(). Same cadence as the watchdog's own poll interval
+// (on request - a longer interval only reduces how often a bad-timing
+// driver hang could be hit, not whether one is handled safely: a hang is
+// still bounded by AUDIO_OPEN_TIMEOUT_MS/AUDIO_CLOSE_TIMEOUT_AFTER_LOST_MS,
+// surfaces as a visible DRIVER_HUNG warning, and stops further retries -
+// see ApplyOpenJobResult()/OpenSoundAsync()).
+static constexpr int64_t RECONNECT_RETRY_INTERVAL_MS = WATCHDOG_POLL_INTERVAL_MS;
 
 static const char *GOSoundDeviceStateToCString(GOSoundDeviceState state) {
   switch (state) {
@@ -125,6 +128,11 @@ void GOSoundSystem::TryAutoReconnect() {
   if (nowMs - m_LastReconnectAttemptMs < RECONNECT_RETRY_INTERVAL_MS)
     return;
   m_LastReconnectAttemptMs = nowMs;
+
+  // Logged unconditionally (not just on failure in ApplyOpenJobResult()),
+  // so a rare bad-timing hang during this specific attempt is traceable by
+  // its start time too - the Log messages window timestamps every line.
+  wxLogDebug("Audio: attempting automatic reconnect");
 
   // Closes the still-registered (but already-dead) port quickly - see
   // GOSoundPort::Close(deviceMaybeLost) - then retries opening, quietly:
