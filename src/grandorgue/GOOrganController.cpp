@@ -834,8 +834,28 @@ wxString GOOrganController::GetCombinationsDir() const {
 }
 
 void GOOrganController::LoadMIDIFile(wxString const &filename) {
+  // Build a channel mapping from the ODF MIDIInputNumber values so that
+  // external MIDI files (without GO setup headers) are routed to the correct
+  // manual/pedal based on how the organ was configured, rather than the
+  // hardcoded manuals-first fallback.
+  std::vector<GOMidiPlayerContent::ManualEntry> inputMapping;
+  const unsigned firstManual = GetFirstManualIndex();
+  const unsigned lastManual = GetManualAndPedalCount();
+  for (unsigned i = firstManual; i <= lastManual; i++) {
+    int ch = GetManual(i)->GetMidiInputNumber();
+    if (ch > 0)
+      inputMapping.push_back(
+        {(unsigned)ch, wxString::Format(wxT("M%d"), i)});
+  }
+  // Only use the ODF mapping if every manual/pedal has a non-zero assignment.
+  if (inputMapping.size() < lastManual - firstManual + 1)
+    inputMapping.clear();
+
   m_MidiPlayer->LoadFile(
-    filename, GetODFManualCount() - 1, GetFirstManualIndex() == 0);
+    filename,
+    GetODFManualCount() - 1,
+    GetFirstManualIndex() == 0,
+    inputMapping);
 }
 
 void GOOrganController::Abort() {
@@ -898,7 +918,12 @@ void GOOrganController::PrepareRecording() {
   m_MidiRecorder->SetSamplesetId(m_SampleSetId1, m_SampleSetId2);
   PreconfigRecorder();
 
+  // Suppress external MIDI sends during recording init: we only want the
+  // current organ state written into the recorder stream, not re-fired to
+  // external MIDI outputs (hardware panels, LCD displays, etc.).
+  SetSuppressExternalSends(true);
   GOEventDistributor::PrepareRecording();
+  SetSuppressExternalSends(false);
 }
 
 void GOOrganController::Update() {

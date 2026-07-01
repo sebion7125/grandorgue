@@ -17,7 +17,7 @@ void GOMidiSendProxy::SetMidi(
 }
 
 void GOMidiSendProxy::SendMidiMessage(const GOMidiEvent &e) {
-  if (p_midi)
+  if (p_midi && !m_suppressExternalSends)
     p_midi->Send(e);
 }
 

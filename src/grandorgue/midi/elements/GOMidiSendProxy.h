@@ -15,11 +15,15 @@ class GOMidiRecorder;
 class GOMidiSendProxy {
   GOMidiSystem *p_midi = nullptr;
   GOMidiRecorder *p_MidiRecorder = nullptr;
+  bool m_suppressExternalSends = false;
 
 public:
   void SetMidi(GOMidiSystem *pMidi, GOMidiRecorder *pMidiRecorder);
   void SendMidiMessage(const GOMidiEvent &e);
   void SendMidiRecorderMessage(GOMidiEvent &e);
+  void SetSuppressExternalSends(bool suppress) {
+    m_suppressExternalSends = suppress;
+  }
 };
 
 #endif /* GOMIDISENDPROXY_H */
