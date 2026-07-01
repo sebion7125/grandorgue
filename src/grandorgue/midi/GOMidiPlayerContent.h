@@ -17,6 +17,12 @@ class GOMidiMap;
 class GOMidiFileReader;
 
 class GOMidiPlayerContent {
+public:
+  struct ManualEntry {
+    unsigned channel;
+    wxString recorderId;
+  };
+
 private:
   std::vector<GOMidiEvent> m_Events;
   unsigned m_Pos;
@@ -33,7 +39,11 @@ public:
   void Reset();
   bool IsLoaded();
   bool Load(
-    GOMidiFileReader &reader, GOMidiMap &map, unsigned manuals, bool pedal);
+    GOMidiFileReader &reader,
+    GOMidiMap &map,
+    unsigned manuals,
+    bool pedal,
+    const std::vector<ManualEntry> &inputMapping = {});
 
   const GOMidiEvent &GetCurrentEvent();
   bool Next();

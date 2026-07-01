@@ -66,7 +66,11 @@ public:
    */
   void Setup(GOMidiSystem *pMidi) { p_midi = pMidi; }
 
-  void LoadFile(const wxString &filename, unsigned manuals, bool pedal);
+  void LoadFile(
+    const wxString &filename,
+    unsigned manuals,
+    bool pedal,
+    const std::vector<GOMidiPlayerContent::ManualEntry> &inputMapping = {});
   bool IsLoaded();
 
   void Play();

@@ -64,7 +64,11 @@ void GOMidiPlayerContent::SetupManual(
 }
 
 bool GOMidiPlayerContent::Load(
-  GOMidiFileReader &reader, GOMidiMap &map, unsigned manuals, bool pedal) {
+  GOMidiFileReader &reader,
+  GOMidiMap &map,
+  unsigned manuals,
+  bool pedal,
+  const std::vector<ManualEntry> &inputMapping) {
   Clear();
   std::vector<GOMidiEvent> events;
   ReadFileContent(reader, events);
@@ -80,10 +84,15 @@ bool GOMidiPlayerContent::Load(
     e.SetChannel(0);
     m_Events.push_back(e);
 
-    for (unsigned i = 1; i <= manuals; i++)
-      SetupManual(map, i, wxString::Format(wxT("M%d"), i));
-    if (pedal)
-      SetupManual(map, manuals + 1, wxString::Format(wxT("M%d"), 0));
+    if (!inputMapping.empty()) {
+      for (const auto &entry : inputMapping)
+        SetupManual(map, entry.channel, entry.recorderId);
+    } else {
+      for (unsigned i = 1; i <= manuals; i++)
+        SetupManual(map, i, wxString::Format(wxT("M%d"), i));
+      if (pedal)
+        SetupManual(map, manuals + 1, wxString::Format(wxT("M%d"), 0));
+    }
   }
   for (unsigned i = 0; i < events.size(); i++)
     if (merger.Process(events[i]))

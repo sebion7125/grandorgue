@@ -101,7 +101,10 @@ void GOMidiPlayer::ButtonStateChanged(int id, bool newState) {
 }
 
 void GOMidiPlayer::LoadFile(
-  const wxString &filename, unsigned manuals, bool pedal) {
+  const wxString &filename,
+  unsigned manuals,
+  bool pedal,
+  const std::vector<GOMidiPlayerContent::ManualEntry> &inputMapping) {
   StopPlaying();
   m_content.Clear();
   GOMidiFileReader reader(r_MidiMap);
@@ -113,7 +116,7 @@ void GOMidiPlayer::LoadFile(
       NULL);
     return;
   }
-  if (!m_content.Load(reader, r_MidiMap, manuals, pedal)) {
+  if (!m_content.Load(reader, r_MidiMap, manuals, pedal, inputMapping)) {
     m_content.Clear();
     GOMessageBox(
       wxString::Format(_("Failed to load %s"), filename.c_str()),
