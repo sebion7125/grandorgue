@@ -1,0 +1,122 @@
+CCW: Context loaded ✔ rules | CTX_VERSION: 2025-08-23-a | CTX: Dies ist ein GrandOrgue-Fork.
+
+1) Primary Request and Intent:
+- Ziel: Ladegeschwindigkeit und Lade‑UX für große ODFs verbessern. Insbesondere soll der Fortschrittsdialog feingranular alle Ladephasen anzeigen, damit die UI nicht minutenlang bei "Parsing ODF" oder "Building organ model and GUI resources" "hängt".
+- Konkrete Anforderungen des Nutzers:
+  - Parser‑Prozent auf Zeilenbasis (nicht Byte‑Offset).
+  - Granulares Fortschritts‑Tracking für alle Build‑Phasen (Labels z. B. "Reading organ settings (.cmb)", "Building organ model and GUI resources", "Resolving object references", "Preparing audio objects", "Loading audio data (cache/disk)").
+  - In späterer Phase: Memory‑Clamp nicht hartcodiert; statt­dessen Warnung im Settings-Dialog, transparent für Benutzer.
+  - Kurzfristig: sichtbare, feingranulare Fortschrittsanzeige gestaffelt über Modell‑ und Audio‑Phase; später Performance‑Optimierungen (Parallelisierung).
+  - Der Benutzer bat, memcpy‑FastPath wieder einzuschalten, um Effekte zu messen.
+
+2) Key Technical Concepts:
+- ODF Parsing Chain: GOConfigFileReader → GOConfigReaderDB → GOConfigReader, aufgerufen via GOOrganController::Load.
+- Model-Aufbau: GOOrganModel::Load erzeugt Windchests, Enclosures, Switches, Tremulants, Ranks, Manuals, Piston, Divisionals, etc.
+- Audio-Loading: GOCacheObjectDistributor, GOLoadWorker, GOLoadThread, GOCache, GOSoundProviderWave / GOWave.
+- Progress/UX: GOProgressDialog (Setup/Reset/Update), SetProgressSink in GOOrganModel, ReadWithProgress in GOConfigFileReader.
+- Speicher/VM: GOMemoryPool::SetMemoryLimit und GetSystemMemoryLimit; Gefahr von SWAP/Audio‑Dropouts bei knappen VM‑RAM.
+- Optionales Profiling: GO_PROFILE_ODFLOAD mit wxStopWatch.
+
+3) Files and Code Sections examined / modified (high‑level):
+- src/core/config/GOConfig.cpp
+  - Kontext: zentrale Settings, definiert MemoryLimit default via GOMemoryPool::GetSystemMemoryLimit().
+- src/grandorgue/GOOrganController.cpp
+  - Rolle: zentraler Ladeablauf & UI-Fortschritt.
+  - Änderungen:
+    - Entfernt hartes Clamping der MemoryLimit; jetzt m_pool.SetMemoryLimit(cfgMB ? cfgMB * 1024 * 1024 : 0).
+    - Fortschritts-Mapping: GOOrganModel intern 0..100 wird auf Modell‑segment (0..40) gemappt, danach Audio‑Objekte die restlichen Einheiten füllen.
+    - dlg->Reset() Parameter angepasst: initial Modell-Reset auf 40 (gewichtete Darstellung).
+    - Audio-Reset auf objectDistributor.GetNObjects() (eine Einheit pro Objekt).
+    - Ziel: Gesamtbalken zeigt Modellphase ~40% der Gesamtzeit, Audiophase den Rest.
+- src/grandorgue/gui/dialogs/settings/GOSettingsOptions.h / .cpp
+  - Rolle: Options-Tab; MemoryLimit control (wxSpinCtrl).
+  - Änderungen:
+    - Warnlabel m_MemoryLimitWarn eingefügt.
+    - Live-Update Handler (OnMemoryLimitSpin / OnMemoryLimitText).
+    - UpdateMemoryLimitWarning: zeigt rote Warnung bei 0 (unlimitiert) oder ≥85% system RAM; sonst Info mit %.
+- src/grandorgue/model/GOOrganModel.h / .cpp
+  - Rolle: Model-Aufbau; bislang kein Rückkanal für feingranulare Meldungen.
+  - Änderungen:
+    - SetProgressSink implementiert / genutzt.
+    - Zusätzliche reportPhase(...) Aufrufe gesetzt an mehreren Meilensteinen:
+      - 0% Start, 5% pipe config tree, 10% windchests, incremental enclosures (15→20%), switches (25→30%), tremulants (35→40%), windchest groups (45→50%), ranks (50→70 incremental per rank), manuals (70→80 incremental), floating manuals 85%, pistons 92%, divisional couplers 96%, 100% done.
+    - Innerhalb Ranks loop: per-rank Update mit "Building: ranks (i/total)".
+    - Ersetzt einige coarse updates mit feinen inkrementellen Updates so that the progress dialog advances continuously during long loops.
+- src/grandorgue/model/GOManual.cpp
+  - Rolle: Laden der einzelnen Manuals (Stops / Couplers / Tremulants / Divisionals).
+  - Änderungen (versuchter Einbau, teilw. revert/iterativ):
+    - Idee: pro-Manual lokale Teile zählen (nb_stops + couplers + nb_tremulants + divisionals) und während Laden lokaler Teile ReportProgress() auf GOOrganModel rufen, mapped into the manual's slot in the global model range (per-manual baseStart/baseEnd between 70–80).
+    - Umsetzung wurde schrittweise editiert. Einige Edit‑Versuche erzeugten Compile‑Fehler (siehe Build-Log). Später Teile bereinigt/neu organisiert; noch Restfehler aufgetreten, behoben teilweise.
+- src/core/GOWave.cpp
+  - Rolle: WAV reading + ReadSamples.
+  - Änderung: definierter GO_WAVE_FASTCOPY (wieder aktiviert) — memcpy fast path re-enabled to measure effect. Note: this may expose issues; user asked to keep it on for measurement.
+
+4) Problem Solving (what we addressed so far)
+- UX Freeze: The main issue ("UI hangs long at 'parsing odf'") discovered to be misleading — real delay was in model build and audio I/O phases. Work done:
+  - Implemented line-based ReadWithProgress for config file reads and connected to GOProgressDialog so parser shows real progress.
+  - Implemented model progress sink and many phased updates in GOOrganModel::Load so that user sees incremental updates while model constructs (windchests, enclosures, switches, tremulants, ranks, manuals).
+  - Mapped model progress to a weighted segment (≈40%) of the total progress bar; audio loading fills the rest. This avoids the impression that model-phase equals near end.
+  - Added per-Manual finer-grained progress reporting attempt (stops/couplers/tremulants/divisionals) — implemented by mapping local parts to the manual's 70→80% slice and calling GOOrganModel::ReportProgress(localPct, "Building: manual X stops (i/total)") while iterating.
+- Memory clamp: Removed hard-coded clamp and instead added UI warning in settings (user requested transparency).
+- memcpy fast‑path: Re-enabled so performance measurements can be taken.
+
+5) Problems encountered / Ongoing troubleshooting
+- Several compile warnings and errors arose during edits:
+  - After adding many progress report calls and modifying GOManual.cpp, compile failed in build: error in GOManual.cpp compile step (make error).
+  - While building for win64 with mingw toolchain, other unrelated OS headers caused many errors in ksmedia.h (these are from the environment cross‑toolchain and not necessarily from our changes; but they appear in build logs). The specific failing object was model/GOManual.cpp.obj—caused by code edits that introduced mismatches (some attempted edits temporarily used undeclared variables or wrong captures).
+  - I iteratively fixed GOManual.cpp changes (several replace_in_file edits). The build still reported errors at times (we ran full build via update build script and collected logs).
+- Build command used per user's instruction: build-scripts/for-win64/update-build-on-linux.sh (user requested this for future builds). Build produced failure rc=2 but also produced artifacts; we inspected CMakeError.log entries and compile output.
+- Fastcopy: enabling GO_WAVE_FASTCOPY can cause runtime issues if assumptions fail; currently enabled for measurement.
+
+6) Why the recent compile error occurred (technical explanation)
+- Root cause (inferred from logs & edits):
+  - The per‑manual fine‑grained progress implementation introduced local variables (baseStart, baseEnd, localProcessed, localTotalParts, idx, manualCount) and calls to r_OrganModel.ReportProgress() while iterating through stops/couplers/tremulants/divisionals. Several intermediate edits temporarily used these variables out of scope (e.g., referenced localProcessed in LoadDivisionals before it was defined), or used mismatched function signatures / incorrect string formatting that clazy/clang reported ("No viable conversion from 'const wxString' to 'const wxFormatString'") — often caused by passing wxString where wxFormatString expected in certain wxString::Format contexts (some compilers/platforms warn/fail depending on overload resolution).
+  - Additionally, some edits used ReportProgress which was added to GOOrganModel.h, but build order and declaration/definition synchronization can cause transient compile errors if not all files recompiled consistently. We modified several files in sequence; build failure pointed to GOManual.cpp as first fatal error. The bulk of errors in the mingw logs (ksmedia.h) are platform headers unrelated to our changes; the primary actionable failure was in GOManual.cpp object compilation.
+  - Summary: the edits introduced scope/typing/format mismatches and possibly used undeclared locals in some intermediate commits; these produced compile failures during the cross-build step.
+
+7) Proposed concrete fixes (detailed, prioritized)
+A — Quick, low-risk fixes (recommended first)
+  1. Ensure GOOrganModel::ReportProgress is declared/defined (done) and visible to GOManual compilation unit (header included) — already added.
+  2. Revisit GOManual edits to guarantee local variables are properly declared before use and their types are correct:
+     - Move all manual-local mapping computations (baseStart/baseEnd/localTotalParts) to top of Load() before any uses.
+     - Use only wxString::Format with correct argument types; where using _() gettext macro, wrap the whole formatted string as wxString::Format(_("...%u..."), ...).
+     - Replace any instances where wxString was passed where wxFormatString needed (use explicit wxString::Format or wxS).
+  3. Compile locally (using user's requested script). If it fails, capture first few errors and fix them iteratively.
+  These steps target the GOManual compile error specifically and are low risk.
+
+B — Medium-risk: keep per‑manual progress but make it safer
+  1. Implement a small helper in GOManual.cpp:
+     - inline void ReportManualProgress(unsigned processed, unsigned total, const char* label)
+       which computes subPct and calls r_OrganModel.ReportProgress(...) using only local variables guaranteed initialized.
+  2. Use that helper at the end of each loop iteration (Stops/Couplers/Tremulants/Divisionals).
+  This reduces repeated code and risk of using wrong variables.
+
+C — Fallback if compile still fails
+  1. Revert only the per‑manual progress block (not other model updates), keep GOOrganModel updates and the main ranks/manuals coarse increments. This addresses the user's preference to not revert everything.
+  2. Add unit tests / small local build to validate.
+
+8) Immediate next step I will perform (if you confirm)
+- I will apply the prioritized low-risk fix A.2 and A.3:
+  - Edit src/grandorgue/model/GOManual.cpp to move/manual-local mapping variables into proper scope before use, add a tiny helper ReportManualProgress, and replace manual uses with the helper.
+  - Re-run the update-build script you asked me to use: build-scripts/for-win64/update-build-on-linux.sh (you previously set this as the default).
+- I will then report the build output (first failure if any) and iterate until GOManual compiles.
+
+Quote from the most recent conversation showing where we left off:
+- User: "erkläre woran der fehler liegt und mache mir einen vorschlag zur behebung"
+- Assistant: proposed explanation and fixes above and asked whether to revert or fix — user chose "Jetzt compile-errors beheben (empfohlen)" and confirmed not to revert everything.
+
+Task progress (current):
+- [x] Analyze requirements
+- [x] Identify and implement model progress sink + weighted mapping (model:40% / audio:60%)
+- [x] Implement detailed model-phase updates incl. ranks incremental updates
+- [x] Add MemoryLimit warning UI
+- [x] Re-enable GOWave fast-copy flag for measurement
+- [x] Implement per‑manual progress prototype (stops/couplers/tremulants/divisionals) — introduced compile errors that need fix
+- [ ] Fix compile errors in GOManual.cpp (next)
+- [ ] Rebuild and verify
+- [ ] Smoke test with large ODF and report improvements and any regressions (audio issues if any due to fast-copy)
+
+If you confirm, I will now:
+- Implement the low-risk corrections in GOManual.cpp (scoped helper + proper variable declarations) and run the requested build script (build-scripts/for-win64/update-build-on-linux.sh). I will return the build output and, if errors remain, the targeted fixes and diffs.
+
+</summarize_task>

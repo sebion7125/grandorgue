@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Blockt versehentliche Pushes von lokalen Privat-Branches (local, local/*).
+# Aktivieren mit:
+#   git config core.hooksPath .githooks
+#   chmod +x .githooks/pre-push
+#
+# Funktionsweise:
+# Git übergibt pro Ref-Zuordnung eine Zeile: <local_ref> <local_sha> <remote_ref> <remote_sha>
+# Wir prüfen den lokalen Ref-Namen und brechen ggf. ab.
+
+while read local_ref local_sha remote_ref remote_sha; do
+  case "$local_ref" in
+    refs/heads/local|refs/heads/local/*)
+      echo "Push blockiert: '$local_ref' ist ein lokaler Privat-Branch. Bitte einen PR-Zweig (feature/*) pushen."
+      exit 1
+      ;;
+  esac
+done
+
+exit 0

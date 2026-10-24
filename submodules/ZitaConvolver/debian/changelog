@@ -1,0 +1,223 @@
+zita-convolver (4.0.3-2) unstable; urgency=medium
+
+  * Upload to unstable
+  * Remove unnecessary dh argument -Smakefile
+  * Add me as uploader
+
+ -- Dennis Braun <d_braun@kabelmail.de>  Wed, 04 Mar 2020 14:39:36 +0100
+
+zita-convolver (4.0.3-1) experimental; urgency=medium
+
+  * Team upload
+
+  [ Felipe Sateler ]
+  * Change maintainer address to debian-multimedia@lists.debian.org
+
+  [ Ondřej Nový ]
+  * Use debhelper-compat instead of debian/compat
+  * d/control: Set Vcs-* to salsa.debian.org
+
+  [ Dennis Braun ]
+  * New upstream version 4.0.3
+    + Fixes cross build (Closes: #873161)
+  * d/control:
+    + Bump dh-compat to 12
+    + Bump Standards-Version to 4.5.0
+    + Bump SONAME
+    + Set RRR: no
+  * d/copyright: Update year, http > https & add myself
+  * d/libzita-convolver*.install: Bump SONAME
+  * d/patches: Update patch
+  * Upgrade symbols file
+  * d/rules:
+    + Add more exports to make the build work
+    + Replace libs/ with source/
+
+ -- Dennis Braun <d_braun@kabelmail.de>  Thu, 06 Feb 2020 20:18:35 +0100
+
+zita-convolver (3.1.0-7) unstable; urgency=medium
+
+  * Modernize symbols file. (Closes: #887049)
+  * Set dh/compat 11.
+  * Bump Standards.
+  * Use secure uri where possible.
+
+ -- Jaromír Mikeš <mira.mikes@seznam.cz>  Sat, 13 Jan 2018 11:50:11 +0100
+
+zita-convolver (3.1.0-6) unstable; urgency=medium
+
+  * Team upload.
+  * Bump Standards-Version to 4.1.0:
+    + use HTTPS in debian/copyright's Format field.
+  * Drop Build-dependency on binutils.  Closes: #873161
+    binutils is already pulled in by build-essential, and specifying it
+    explicitly prevents proper resolution of cross build dependencies.
+  * Drop version restriction on fftw3, already satisfied in oldoldstable.
+  * debian/rules: include architecture.mk instead of spawning a shell to
+    get DEB_HOST_MULTIARCH.
+
+ -- Mattia Rizzolo <mattia@debian.org>  Fri, 25 Aug 2017 09:46:27 +0200
+
+zita-convolver (3.1.0-5) unstable; urgency=medium
+
+  * Set dh/compat 10.
+  * Update copyright file.
+  * Sign tags.
+  * Bump Standards.
+  * Fix VCS fields.
+  * Fix hardening.
+
+ -- Jaromír Mikeš <mira.mikes@seznam.cz>  Tue, 27 Dec 2016 13:53:40 +0100
+
+zita-convolver (3.1.0-4) unstable; urgency=low
+
+  [ Alessio Treglia ]
+  * Remove myself from the Uploaders field.
+
+  [ Jaromír Mikeš ]
+  * Bump Standards.
+  * Fix symbols file to allow build on arm64 and ppc64el. (Closes: #735013)
+    Thanks to Daniel T Chen <seven.steps@gmail.com>
+
+ -- Jaromír Mikeš <mira.mikes@seznam.cz>  Sat, 11 Jan 2014 22:38:21 +0100
+
+zita-convolver (3.1.0-3) unstable; urgency=low
+
+  [ Alessio Treglia ]
+  * Remove DM-Upload-Allowed field, not needed anymore.
+
+  [ Jaromír Mikeš ]
+  * Set debhelper 9.
+  * Bump Standards.
+  * Use canonical VCS-* URLs.
+  * Update symbols to support mips64. (Closes: #725805) (Closes: #726134)
+    Thanks to YunQiang Su <wzssyqa@gmail.com>
+
+ -- Jaromír Mikeš <mira.mikes@seznam.cz>  Sat, 12 Oct 2013 22:59:55 +0200
+
+zita-convolver (3.1.0-2) unstable; urgency=low
+
+  * FTBFS on ppc64 (Closes: #669950)
+    Thanks Hiroyuki Yamamoto
+  * Bump Standards
+  * wrap-and-sort -a -s
+  * Copyright updated to format 1.0
+
+ -- Jaromír Mikeš <mira.mikes@seznam.cz>  Sun, 22 Apr 2012 13:14:53 +0200
+
+zita-convolver (3.1.0-1) unstable; urgency=low
+
+  * New upstream release.
+  * Remove nonlinux_support.patch, adopted upstream.
+  * Refresh makefile.patch.
+  * Update debian/copyright.
+  * Update symbols file.
+  * Shorten debian/rules.
+  * Fix Homepage field.
+
+ -- Alessio Treglia <alessio@debian.org>  Wed, 14 Dec 2011 10:41:40 +0100
+
+zita-convolver (3.0.3-3) unstable; urgency=low
+
+  * Update debian/libzita-convolver3.symbols to append s390x to the list
+    of 64-bit architectures (Closes: #651674).
+
+ -- Alessio Treglia <alessio@debian.org>  Sun, 11 Dec 2011 15:01:43 +0100
+
+zita-convolver (3.0.3-2) unstable; urgency=low
+
+  * Upload to unstable.
+
+ -- Alessio Treglia <alessio@debian.org>  Sat, 10 Dec 2011 15:34:14 +0100
+
+zita-convolver (3.0.3-1) experimental; urgency=low
+
+  * New upstream release.
+
+ -- Jaromír Mikeš <mira.mikes@seznam.cz>  Fri, 28 Oct 2011 00:06:38 +0200
+
+zita-convolver (3.0.2-2) experimental; urgency=low
+
+  * Fix FTBFS on s390.
+
+ -- Alessio Treglia <alessio@debian.org>  Tue, 25 Oct 2011 10:52:10 +0200
+
+zita-convolver (3.0.2-1) experimental; urgency=low
+
+  [ Jaromír Mikeš ]
+  * New upstream release.
+  * Soname bump.
+  * Refreshed patch.
+  * Added slash to gitignore file.
+  * Bump Standards
+  * Updated symbols files.
+  * Added README file as upstream changelog.
+  * Updated URL in watch file.
+  * Added local-options file.
+  * Copyright switched to rev. 174.
+  * Little fix in copyright file.
+
+  [ Alessio Treglia ]
+  * Use c++filt to demangle symbols.
+  * debian/patches/makefile.patch: Add kfreebsd,hurd buildds support.
+  * Introduce multiarch support.
+  * Packaging clean-up.
+
+ -- Jaromír Mikeš <mira.mikes@seznam.cz>  Sat, 22 Oct 2011 11:10:27 +0200
+
+zita-convolver (2.0.0really2.0.0-1) unstable; urgency=low
+
+  [ Jaromír Mikeš ]
+  * libzita-convolver-dev depends on libfftw3-dev (Closes: #577527)
+
+  [ Alessio Treglia ]
+  * ACK NMU.
+  * Switch to debhelper 7.
+  * Add ${misc:Depends} macro to libzita-convolver-dev's Depends field.
+  * Bump Standards.
+  * Add myself as Uploader.
+  * Switch to format 3.0 (quilt).
+  * Add git-buildpackage config file.
+  * Add git ignore file.
+  * Add DEP-3-style tags to makefile.patch patch.
+  * Update watch file.
+
+ -- Alessio Treglia <alessio@debian.org>  Wed, 14 Jul 2010 01:10:16 +0200
+
+zita-convolver (2.0.0-2.1) unstable; urgency=low
+
+  * Non-maintainer upload.
+  * Don't use -march=native. (closes: #559747)
+
+ -- Bastian Blank <waldi@debian.org>  Tue, 19 Jan 2010 22:09:34 +0000
+
+zita-convolver (2.0.0-2) unstable; urgency=low
+
+  * Fix FTBFS on various architectures (Closes: #559516)
+  * Added fields Vcs-Git, Vcs-Browser and Homepage to control file
+  * Changed reference /usr/share/common-licenses/GPL to /GPL-2 in copyright file
+
+ -- Jaromír Mikeš <mira.mikes@seznam.cz>  Sat, 05 Dec 2009 05:24:49 +0100
+
+zita-convolver (2.0.0-1) unstable; urgency=low
+
+  * new upstream release
+
+ -- Jaromír Mikeš <mira.mikes@seznam.cz>  Wed, 02 Dec 2009 00:37:49 +0100
+
+zita-convolver (1.0.0-2) unstable; urgency=low
+
+  [ Reinhard Tartler ]
+  * use multiline fields in debian/control
+  * drop build-dependency on libc6-dev (Closes: #530974)
+
+  [ Free Ekanayaka ]
+  * Use binary-arch instead of binary-indep (Closes: #529160)
+
+ -- Free Ekanayaka <freee@debian.org>  Sun, 21 Jun 2009 12:34:20 +0200
+
+zita-convolver (1.0.0-1) unstable; urgency=low
+
+  * Initial release (Closes: #520079)
+
+ -- Jaromír Mikeš <mira.mikes@seznam.cz>  Tue, 17 Mar 2009 03:45:23 +0100

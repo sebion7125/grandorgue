@@ -1,0 +1,68 @@
+/bin/
+/build/
+**/build/
+/CPackConfig.cmake
+/CPackSourceConfig.cmake
+/ImportExecutables.cmake
+/compile_commands.json
+/help/de.xml
+/help/help/
+/help/help_de/
+/lib/
+/po/GrandOrgue.pot.src_lst
+/resources/GrandOrgue.desktop
+/resources/GrandOrgue.1
+/share/
+/src/build/imageconverter
+/src/core/GrandOrgueDef.h/
+/src/images/*.cpp
+
+/ide-projects/NetBeans12/nbproject/private/
+
+*.a
+CMakeCache.txt
+CMakeFiles/
+Makefile
+/_CPack_Packages/
+
+nbproject/
+CLAUDE.md
+.DS_Store
+
+# Ignore editor/IDE caches and indexes
+.cache/
+.cache/clangd/
+.vscode/
+
+# Local Claude assistant settings
+.claude/settings.json
+.claude/settings.local.json
+*.idx
+*.log
+*.swp
+tags
+
+# Ignore common OS/editor files
+*.~
+*.tmp
+*.bak
+
+.idea/
+
+# eclipse
+.cproject
+.project
+.settings/
+repomix-output.xml
+
+__pycache__/
+
+# CTest scratch output
+/Testing/
+# Audio Monitor report bundles dropped next to the binary
+/AudioGlitchReport_*/
+# ad-hoc test binaries in tools/
+/tools/*.exe
+
+# Xorcist: locally built objects for the offline lab binding
+/src/xorcist/*.so

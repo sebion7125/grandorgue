@@ -1,0 +1,61 @@
+#!/bin/bash
+
+# $1 - Version
+# $2 - Build version
+# $3 - Go source Dir. If not set then relative to the script dir
+# $4 - pkg_suffix
+# $5 - release flag (ON/OFF, default: OFF)
+
+set -e
+
+source $(dirname $0)/../set-ver-prms.sh "$1" "$2" "$5"
+
+if [[ -n "$3" ]]; then
+  SRC_DIR=$3
+else
+  SRC_DIR=$(dirname $0)/../..
+fi
+
+PARALLEL_PRMS="-j4"
+
+mkdir -p build/osx
+pushd build/osx
+
+rm -rf *
+export LANG=C
+
+case `arch` in
+  arm64) # Apple silicon
+  OS_PRMS="-DDOCBOOK_DIR=/opt/homebrew/opt/docbook-xsl/docbook-xsl"
+  ;;
+  i386) # Intel
+  OS_PRMS="-DDOCBOOK_DIR=/usr/local/opt/docbook-xsl/docbook-xsl -DCMAKE_OSX_DEPLOYMENT_TARGET=12.1"
+  ;;
+esac
+GO_PRMS="$CMAKE_RELEASE_FLAG_PRM $CMAKE_VERSION_PRMS"
+cmake -G "Unix Makefiles" $OS_PRMS $GO_PRMS . $SRC_DIR
+
+echo "Phase 1"
+
+if ! make -k $PARALLEL_PRMS all; then
+  echo "Phase 2"
+  make -j1 VERBOSE=1 all
+fi
+
+echo "Phase 3"
+
+# Retry make package up to 3 times because hdiutil detach can fail intermittently
+for attempt in 1 2 3; do
+  if make VERBOSE=1 package; then
+    break
+  fi
+  if [ $attempt -lt 3 ]; then
+    echo "make package failed (attempt $attempt), retrying after 5s..."
+    sleep 5
+  else
+    echo "make package failed after $attempt attempts"
+    exit 1
+  fi
+done
+
+popd

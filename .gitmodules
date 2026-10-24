@@ -1,0 +1,20 @@
+[submodule "submodules/RtAudio"]
+	path = submodules/RtAudio
+	url = https://github.com/GrandOrgue/RtAudio.git
+	branch = bugfix/6.0.1-asio
+[submodule "submodules/RtMidi"]
+	path = submodules/RtMidi
+	url = https://github.com/thestk/rtmidi
+	branch = 4.0.0
+[submodule "submodules/PortAudio"]
+	path = submodules/PortAudio
+	url = https://github.com/PortAudio/portaudio.git
+[submodule "submodules/ZitaConvolver"]
+	path = submodules/ZitaConvolver
+	url = https://github.com/GrandOrgue/ZitaConvolver.git
+[submodule "src/v3codec"]
+	path = src/v3codec
+	url = https://github.com/sebion7125/v3codec.git
+[submodule "src/xorcist"]
+	path = src/xorcist
+	url = https://github.com/sebion7125/xorcist.git

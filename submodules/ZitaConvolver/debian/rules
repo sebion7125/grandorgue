@@ -1,0 +1,15 @@
+#!/usr/bin/make -f
+
+include /usr/share/dpkg/architecture.mk
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export PREFIX=/usr
+export LIBDIR=$(PREFIX)/lib/$(DEB_HOST_MULTIARCH)
+export DESTDIR=$(CURDIR)/debian/tmp
+
+DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+
+%:
+	dh $@ -Dsource
+
+override_dh_installchangelogs:
+	dh_installchangelogs README

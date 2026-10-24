@@ -1,0 +1,133 @@
+/*
+ * Copyright 2006 Milan Digital Audio LLC
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
+ * License GPL-2.0 or later
+ * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
+ */
+
+#ifndef GOGUIPANEL_H
+#define GOGUIPANEL_H
+
+#include <memory>
+#include <wx/gdicmn.h>
+#include <wx/string.h>
+
+#include "ptrvector.h"
+
+#include "gui/size/GOSizeKeeper.h"
+#include "primitives/GOBitmap.h"
+
+class GOButtonControl;
+class GOConfigReader;
+class GOConfigWriter;
+class GODC;
+class GODocumentBase;
+class GOGUIControl;
+class GOGUIDisplayMetrics;
+class GOGUILayoutEngine;
+class GOGUIMouseState;
+class GOGUIPanelView;
+class GOGUIPanelWidget;
+class GOOrganController;
+
+#define GOBitmapPrefix "../GO:"
+
+class GOGUIPanel : public GOSizeKeeper {
+private:
+  void BasicLoad(
+    GOConfigReader &cfg, const wxString &group, bool isOpenByDefault);
+  void LoadButton(
+    GOConfigReader &cfg,
+    GOButtonControl *pButtonControl,
+    const wxString &groupPrefix,
+    unsigned groupIndex,
+    bool isPiston = false);
+  void LoadManualButton(
+    GOConfigReader &cfg,
+    GOButtonControl *pButtonControl,
+    const wxString &manualGroup,
+    const wxString &groupPrefix,
+    unsigned elementIndex,
+    bool isPiston = false);
+
+protected:
+  GOOrganController *m_OrganController;
+  GOGUIMouseState &m_MouseState;
+  ptr_vector<GOGUIControl> m_controls;
+  unsigned m_BackgroundControls;
+  wxString m_Name;
+  wxString m_GroupName;
+  GOGUIDisplayMetrics *m_metrics;
+  GOGUILayoutEngine *m_layout;
+  GOGUIPanelView *m_view;
+  bool m_InitialOpenWindow;
+
+  void LoadControl(GOGUIControl *control, GOConfigReader &cfg, wxString group);
+  void LoadBackgroundControl(
+    GOGUIControl *control, GOConfigReader &cfg, wxString group);
+  void Save(GOConfigWriter &cfg) override;
+
+  GOGUIControl *CreateGUIElement(GOConfigReader &cfg, wxString group);
+
+  void SendMousePress(int x, int y, bool right, GOGUIMouseState &state);
+
+public:
+  GOGUIPanel(GOOrganController *organController);
+  virtual ~GOGUIPanel();
+  void Init(
+    GOConfigReader &cfg,
+    GOGUIDisplayMetrics *metrics,
+    wxString name,
+    wxString group,
+    wxString group_name = wxT(""));
+  struct LoadSnapshot {
+    wxString group;
+    bool is_main_panel;
+    unsigned NumberOfImages;
+    unsigned NumberOfGUIElements;
+    unsigned NumberOfLabels;
+    unsigned NumberOfManuals;
+  };
+  std::shared_ptr<LoadSnapshot> CreateLoadSnapshot(
+    GOConfigReader &cfg, const wxString &group);
+  void LoadFromSnapshot(std::shared_ptr<LoadSnapshot> snap);
+
+  void Load(GOConfigReader &cfg, const wxString &group) override;
+  void Layout();
+
+  GOGUIPanelView *GetView() const { return m_view; }
+  void SetView(GOGUIPanelView *view) { m_view = view; }
+  GODocumentBase *GetDocument() const;
+
+  GOOrganController *GetOrganFile();
+  const wxString &GetName();
+  const wxString &GetGroupName();
+
+  // gets the current size info of the window
+  virtual void CaptureSizeInfo(const wxTopLevelWindow &win) override;
+
+  void AddEvent(GOGUIControl *control);
+  void AddControl(GOGUIControl *control);
+  GOGUIDisplayMetrics *GetDisplayMetrics();
+  GOGUILayoutEngine *GetLayoutEngine();
+  void PrepareDraw(double scale, GOBitmap *background);
+  void Draw(GODC &dc);
+  void TakeSnapshotBitmaps();
+  void ClearSnapshotBitmaps();
+  const wxImage *GetWoodImage(unsigned woodImageNumber) const;
+  const wxImage *LoadImage(const wxString &filename, const wxString &maskname);
+  void HandleKey(int key);
+  void HandleMousePress(int x, int y, bool right);
+  void HandleMouseRelease(bool right);
+  void HandleMouseScroll(int x, int y, int amount);
+  void Modified();
+
+  unsigned GetWidth();
+  unsigned GetHeight();
+  bool InitialOpenWindow();
+  bool IsKeyboardInputUsed() const;
+
+  void SetInitialOpenWindow(bool open);
+};
+
+#endif

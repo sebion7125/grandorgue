@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"clangd.arguments": [
+			"--compile-commands-dir=build/win64"
+		],
+		"CodeGPT.apiKey": "OpenAI"
+	}
+}

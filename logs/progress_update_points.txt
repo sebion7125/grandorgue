@@ -1,0 +1,115 @@
+Progress‑Update‑Punkte (Extrahiert aus src/grandorgue)
+
+Hinweis: Dies ist eine statische Extraktion der Code‑Stellen, an denen die Progress‑Anzeige aktualisiert oder deren Range gesetzt wird. Laufzeit‑Zeitstempel müssen durch tatsächliche Logdateien gewonnen werden (z.B. durch Ausführen der Binary und Grep nach "Progress:" / "Timing:"). Unten: Datei:Zeile (kontext) + was an die Progress‑UI gesendet wird.
+
+1) Parsing sample set definition file
+- Datei: src/grandorgue/GOOrganController.cpp
+- Stelle:
+    if (dlg) dlg->ResetRange(100, 0, 4, _("Parsing sample set definition file"));
+    ...
+    bool ok = odf_ini_file.ReadWithProgress(
+      opened.get(),
+      _("Parsing sample set definition file"),
+      [dlg](unsigned pc, const wxString &msg) {
+        dlg->Update(pc, msg);
+      });
+- Bedeutung: ReadWithProgress liefert Prozentwerte 0..100; ResetRange mappt diese in das Fenster 0%..4% der Gesamt‑Progressbar. Laufzeit‑Updates: dlg->Update(pc, msg) mit pc in 0..100.
+
+2) Reading organ settings (.cmb)
+- Datei: src/grandorgue/GOOrganController.cpp
+- Stelle:
+    if (dlg) dlg->ResetRange(100, 4, 10, _("Reading organ settings (.cmb)"));
+    ...
+    extra_odf_config.ReadWithProgress(...,
+      [dlg](unsigned pc, const wxString &msg) { dlg->Update(pc, msg); })
+- Bedeutung: .cmb wird als Prozentphase (0..100) gemeldet, gemappt auf 4%..10%.
+
+3) Building model (ranks + rest)
+- Datei: src/grandorgue/GOOrganController.cpp
+- Stelle:
+    if (dlg) dlg->ResetRange(100, 10, 35, _("Building model"));
+    ReadOrganFile(cfg, dlg);
+- Bedeutung: Die Model‑Build‑Phase (GOOrganModel::Load + Unterphasen) wird als Prozent (0..100) gemeldet und in 10%..35% Fenster der Haupt‑Progressbar gemappt. Intern ruft GOOrganModel::ReportProgress -> m_onProgress -> dlg->Update.
+
+4) Panels (GUI) — initial panel + loop
+- Datei: src/grandorgue/GOOrganController.cpp
+- Stelle (GUI_GAP_TRACER path + non‑tracer identical logic):
+    m_panels.push_back(new GOGUIPanel(this));
+    if (dlg) dlg->ResetRange(totalPanels, 35, 40, _("Loading panels"));
+    for (unsigned i = 0; i < NumberOfPanels; i++) {
+      buffer.Printf(wxT("Panel%03d"), i + 1);
+      m_panels.push_back(new GOGUIPanel(this));
+      if (dlg) {
+        wxString msg = _("Loading panel: ");
+        msg += buffer;
+        msg += wxString::Format(_(" (%u/%u)"), (unsigned)m_panels.size(), totalPanels);
+        if (!dlg->Update(i + 1, msg))
+          throw GOLoadAborted();
+      } else {
+        wxLogMessage(wxString::Format("Progress: Loading panels (%u/%u)", (unsigned)m_panels.size(), totalPanels));
+      }
+      m_panels[i + 1]->Load(cfg, buffer);
+    }
+- Bedeutung: ResetRange mit units = totalPanels (not percent) mapped to 35%..40%. Update called with unit = i+1 and msg "Loading panel: PanelNNN (x/y)". Wenn dlg==null, es gibt alternativ wxLogMessage mit "Progress: Loading panels ...".
+
+5) Preparing audio objects -> Loading audio data (cache/disk)
+- Datei: src/grandorgue/GOOrganController.cpp
+- Stelle:
+    GOCacheObjectDistributor objectDistributor(GetCacheObjects());
+    if (dlg) dlg->ResetRange(objectDistributor.GetNObjects(), 40, 100, _("Loading audio data (cache/disk)"));
+    else dlg->Reset(objectDistributor.GetNObjects(), _("Loading audio data (cache/disk)"));
+    ...
+    while ((obj = objectDistributor.FetchNext())) {
+      ...
+      if (!dlg->Update(objectDistributor.GetPos(), obj->GetLoadTitle()))
+        throw GOLoadAborted();
+    }
+- Bedeutung: ResetRange mit totalUnits = number of audio objects; mapping units to 40%..100%. Update called with current position and object title. Wird sowohl während Cache‑Deserialization als auch beim File‑Load ausgeführt. In UpdateCache / cache write there are similar dlg->Update calls when saving.
+
+6) Cache save progress (UpdateCache)
+- Datei: src/grandorgue/GOOrganController.cpp (UpdateCache)
+- Stelle:
+    dlg->Setup(objectDistributor.GetNObjects(), _("Creating sample cache"));
+    ...
+    while (isOk) {
+      GOCacheObject *obj = objectDistributor.FetchNext();
+      ...
+      if (!dlg->Update(objectDistributor.GetPos(), obj->GetLoadTitle())) {
+        writer.Close();
+        DeleteCache();
+        isOk = false;
+      }
+    }
+- Bedeutung: Beim Erzeugen des Cache werden ebenfalls units/Update mit obj titles an dlg gemeldet.
+
+7) Generic progress sink install / removal
+- Datei: src/grandorgue/GOOrganController.cpp
+- Stelle:
+    SetProgressSink([dlg](unsigned pc, const wxString &msg) {
+      dlg->Update(pc, msg);
+    });
+    ...
+    SetProgressSink({});
+- Bedeutung: GOOrganModel & subcomponents rufen ReportProgress/SetProgressSink; hier wird die ProgressSink auf dlg->Update gesetzt, später entfernt.
+
+8) GOOrganModel::SetProgressSink / ReportProgress
+- Datei: src/grandorgue/model/GOOrganModel.cpp / .h
+- Stelle:
+    void GOOrganModel::SetProgressSink(std::function<void(unsigned, const wxString &)> cb) { ... }
+    inline void ReportProgress(unsigned pct, const wxString &label) { if (m_onProgress) m_onProgress(pct, label); }
+- Bedeutung: Model‑internes ReportProgress sendet percent [0..100] to installed sink.
+
+9) GOProgressDialog wrapper
+- Datei: src/grandorgue/gui/dialogs/GOProgressDialog.cpp
+- Stelle:
+    if (!m_dlg->Update(newValue, msg))
+      return false;
+- Bedeutung: Die Implementierung von Update() kann false zurückgeben (Benutzerabbruch). Diese Rückgabe wird im Code geprüft und als GOLoadAborted behandelt.
+
+Zusammenfassung / Empfehlungen:
+- Laufzeit‑Extraktion der wirklichen Update‑Zeitpunkte:
+  - Starte die App mit Log‑Umleitung und grep nach:
+    - "Progress: "  (für fallback‑wxLogMessage)
+    - Objekt‑Titel‑Strings (z.B. Panel names oder object titles)
+    - oder überwache die Konsole/Log direkt; konkrete grep‑Befehle sind in docs/ODFLoad_PROFILING_INSTRUCTIONS.md vorgeschlagen.
+- Falls du möchtest, kann ich die exakte Liste als CSV mit Spalten (phase, mapped_range_start, mapped_range_end, unit_mode(percent|units), update_call_signature) erzeugen. Sag "schreibe csv" und ich erstelle die Datei logs/progress_update_points.csv.

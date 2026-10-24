@@ -1,0 +1,28 @@
+# Copyright 2006 Milan Digital Audio LLC
+# Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
+# License GPL-2.0 or later
+# (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
+
+include(${CMAKE_SOURCE_DIR}/cmake/AddCpuOptions.cmake)
+include(UsewxWidgets)
+include_directories(${CMAKE_BINARY_DIR}/src/core/go_defs.h ${CMAKE_SOURCE_DIR}/src/core)
+
+add_subdirectory(common)
+add_subdirectory(testing)
+
+add_executable(GOTestExe GOTestExe.cpp)
+
+
+target_link_libraries(GOTestExe GOTestLib)
+target_link_libraries(GOTestExe golib)
+target_link_libraries(GOTestExe GOTests)
+target_include_directories(GOTestExe PUBLIC ${CMAKE_SOURCE_DIR}/src/tests)
+target_include_directories(GOTestExe PUBLIC ${CMAKE_SOURCE_DIR}/src/tests/common)
+target_include_directories(GOTestExe PUBLIC ${CMAKE_SOURCE_DIR}/src/tests/testing)
+target_include_directories(GOTestExe PUBLIC ${CMAKE_SOURCE_DIR}/src/tests/testing/model)
+target_include_directories(GOTests PUBLIC ${CMAKE_SOURCE_DIR}/src/tests/common)
+BUILD_EXECUTABLE(GOTestExe)
+
+add_test(NAME GOTestFunctional COMMAND GOTestExe --no-perf)
+add_test(NAME GOTestPerf       COMMAND GOTestExe --perf-only)
+include(CTest)

@@ -1,0 +1,266 @@
+#!/bin/bash
+set -e
+
+
+# $1..: Optionen/Versionen
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "📄 Kopiere GO_Attack_Parameters.[cpp/h] ins src-Verzeichnis (falls vorhanden) ..."
+# Ziel relativ zum Skriptverzeichnis bestimmen (script-local), nicht relativ zum Aufruf-cwd
+TARGET_SOUND_DIR="$(readlink -f "$SCRIPT_DIR/../../src/grandorgue/sound")"
+mkdir -p "$TARGET_SOUND_DIR"
+if [ -e /media/sf_Code_Exchange/GO_Attack_Parameters.cpp ]; then
+  cp -v /media/sf_Code_Exchange/GO_Attack_Parameters.cpp "$TARGET_SOUND_DIR/"
+else
+  echo "Warnung: /media/sf_Code_Exchange/GO_Attack_Parameters.cpp nicht gefunden, überspringe."
+fi
+if [ -e /media/sf_Code_Exchange/GO_Attack_Parameters.h ]; then
+  cp -v /media/sf_Code_Exchange/GO_Attack_Parameters.h "$TARGET_SOUND_DIR/"
+else
+  echo "Warnung: /media/sf_Code_Exchange/GO_Attack_Parameters.h nicht gefunden, überspringe."
+fi
+
+BUILD_DIR="$SCRIPT_DIR/build/win64"     # <<< früh setzen!
+
+# ---- CLI-Optionen ----------------------------------------------------------
+EXTRA_LABEL=""   # wird zu GO_VERSION_EXTRA
+DO_CLEAN=false
+DO_RECONF=false
+LOG_RELEASE_ALIGN=false
+LOG_RELEASE_ALIGN_VERBOSE=false
+KEEP_DEBUG_INFO=false   # --debug-symbols: -Og -g statt -O3 -DNDEBUG -g0, fuer Crash-Diagnose
+PROFILE_BUILD=false     # --profile: -O3 -g -fno-omit-frame-pointer, kein Strip, fuer perf/VTune
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --clean) DO_CLEAN=true; shift ;;
+    --reconfigure) DO_RECONF=true; shift ;;
+    --extra) EXTRA_LABEL="$2"; shift 2 ;;
+    --log-release-align) LOG_RELEASE_ALIGN=true; shift ;;
+    --log-release-align-verbose) LOG_RELEASE_ALIGN=true; LOG_RELEASE_ALIGN_VERBOSE=true; shift ;;
+    --debug-symbols) KEEP_DEBUG_INFO=true; shift ;;
+    --profile) PROFILE_BUILD=true; shift ;;
+    *) break ;;  # Rest bleibt für set-ver-prms.sh (z.B. numerische Version)
+  esac
+done
+
+# --debug-symbols und --profile erzwingen --reconfigure
+if $KEEP_DEBUG_INFO || $PROFILE_BUILD; then
+  DO_RECONF=true
+fi
+
+# set-ver-prms.sh immer sourcen: ohne Args werden CMAKE_VERSION_PRMS und
+# CMAKE_RELEASE_FLAG_PRM sauber auf ihre Defaults zurückgesetzt, mit Args
+# werden die übergebenen Versionen übernommen.
+source "$SCRIPT_DIR/../set-ver-prms.sh" "$@"
+
+# ---- Cache-Schutz (jetzt mit korrekt gesetztem BUILD_DIR) ------------------
+if [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+  if grep -q 'VERSION.*="\|VERSION.*=--' "$BUILD_DIR/CMakeCache.txt"; then
+    echo "⚠️  Entferne ungültigen VERSION-Eintrag aus CMakeCache.txt"
+    rm -v "$BUILD_DIR/CMakeCache.txt"
+  fi
+fi
+
+# ---- Quellverzeichnis bestimmen -------------------------------------------
+if [[ -n "$3" ]]; then
+  SRC_DIR="$3"
+else
+  SRC_DIR=$(readlink -f "$SCRIPT_DIR/../..")
+fi
+
+# ---- Parallelisierung ------------------------------------------------------
+PARALLEL_PRMS="-j$(nproc)"
+
+# === Build-Tools erzeugen ===
+if [[ ! -f build/build-tools/ImportExecutables.cmake ]]; then
+  echo "Baue Build-Tools (ImportExecutables.cmake) …"
+  mkdir -p build/build-tools
+  pushd build/build-tools
+  cmake "$SRC_DIR/src/build"
+  make
+  popd
+else
+  echo "Build-Tools bereits vorhanden – überspringe."
+fi
+
+# === Haupt-Buildverzeichnis vorbereiten ===
+mkdir -p "$BUILD_DIR"
+pushd "$BUILD_DIR"
+
+# Optional: Build-Verzeichnis leeren
+if $DO_CLEAN; then
+  echo "Lösche Inhalte von $BUILD_DIR …"
+  rm -rf ./*
+fi
+
+export LANG=C
+# This script performs a win64 cross-build — always load mingw vars so
+# cmake is configured to find the MinGW toolchain and headers.
+source "$SCRIPT_DIR/set-mingw-vars.sh"
+# set WX_CONFIG if mingw wx-config exists
+if [[ -x "${MINGW_DIR:-}/bin/wx-config" ]]; then
+  export WX_CONFIG="$MINGW_DIR/bin/wx-config"
+fi
+
+# ⚙️ Compiler-Flags
+# Standard (-O3 -DNDEBUG -g0): kleinster/schnellster Build, aber Crash-Stacks
+# lassen sich nicht auf Quelltext zurueckfuehren.
+#
+# Bei --debug-symbols reicht es NICHT, nur CMAKE_*_FLAGS_RELEASE zu
+# ueberschreiben: CMakeLists.txt selbst haengt im else-Zweig (Zeile ~186-192,
+# "if (CMAKE_BUILD_TYPE STREQUAL Debug) ... else ...") fuer JEDEN
+# Nicht-Debug-Build *zusaetzlich und unconditional* -O3 -g -DNDEBUG
+# -fomit-frame-pointer -funroll-loops -ffast-math an - das stand bisher
+# trotz unserer Og/-g-Ueberschreibung weiter im Kompilierbefehl, und
+# -fomit-frame-pointer war vermutlich der Hauptgrund, warum Application-
+# Verifier-Stacks bisher voellig unplausible Aufruferketten zeigten (ohne
+# Frame-Pointer kann kein Stack-Walker zuverlaessig entrollen). Deshalb
+# schaltet --debug-symbols jetzt komplett auf CMAKE_BUILD_TYPE=Debug um -
+# das ist der Zweig, den CMakeLists.txt selbst fuer genau diesen Zweck
+# vorsieht (-g3 -Og, kein NDEBUG, kein -fomit-frame-pointer/-ffast-math).
+if $KEEP_DEBUG_INFO; then
+  DIAG_CFLAGS="-Og -g"
+elif $PROFILE_BUILD; then
+  DIAG_CFLAGS="-O3 -DNDEBUG -g"
+else
+  DIAG_CFLAGS="-O3 -DNDEBUG -g0"
+fi
+export CXXFLAGS="$DIAG_CFLAGS"
+export CFLAGS="$DIAG_CFLAGS"
+
+# ---- Release-Align-Logging / Parity-Build -----------------------------------
+# The marker headers are intentionally allowed to change more than pure I/O:
+#   * GOLogReleaseAlignEnable.h enables CSV/verify logging, label plumbing,
+#     and strict parity numerics for Python/C++ comparison.
+#   * It also changes some public signatures / class layouts. Therefore the
+#     toggle is ABI-affecting and must invalidate all translation units that
+#     see the affected headers.
+#
+# Important: __has_include on a file that may not exist is not a reliable CMake
+# dependency. Touch the affected headers as well as direct users, so both
+# enable and disable transitions rebuild consistently in incremental builds.
+LOG_HEADER="$SRC_DIR/src/grandorgue/sound/playing/GOLogReleaseAlignEnable.h"
+LOG_VERBOSE_HEADER="$SRC_DIR/src/grandorgue/sound/playing/GOLogReleaseAlignVerbose.h"
+
+STREAM_SRC="$SRC_DIR/src/grandorgue/sound/playing/GOSoundStream.cpp"
+ALIGN_SRC="$SRC_DIR/src/grandorgue/sound/playing/GOSoundReleaseAlignTable.cpp"
+ALIGN_HDR="$SRC_DIR/src/grandorgue/sound/playing/GOSoundReleaseAlignTable.h"
+PROVIDER_SRC="$SRC_DIR/src/grandorgue/sound/providers/GOSoundProvider.cpp"
+PROVIDER_HDR="$SRC_DIR/src/grandorgue/sound/providers/GOSoundProvider.h"
+AUDIO_SECTION_SRC="$SRC_DIR/src/grandorgue/sound/playing/GOSoundAudioSection.cpp"
+AUDIO_SECTION_HDR="$SRC_DIR/src/grandorgue/sound/playing/GOSoundAudioSection.h"
+# Files with __has_include on the toggle headers — add here when new callers appear:
+SOUNDING_PIPE_SRC="$SRC_DIR/src/grandorgue/model/GOSoundingPipe.cpp"
+ORGAN_ENGINE_SRC="$SRC_DIR/src/grandorgue/sound/GOSoundOrganEngine.cpp"
+
+touch_release_align_toggle_deps() {
+  touch \
+    "$STREAM_SRC" \
+    "$ALIGN_SRC" "$ALIGN_HDR" \
+    "$PROVIDER_SRC" "$PROVIDER_HDR" \
+    "$AUDIO_SECTION_SRC" "$AUDIO_SECTION_HDR" \
+    "$SOUNDING_PIPE_SRC" \
+    "$ORGAN_ENGINE_SRC"
+}
+
+if $LOG_RELEASE_ALIGN; then
+  echo "// generated — delete to disable release-align logging/parity build" > "$LOG_HEADER"
+  echo "Release-Align-Logging/Parity aktiviert ($LOG_HEADER)"
+  touch_release_align_toggle_deps
+else
+  if [[ -f "$LOG_HEADER" ]]; then
+    rm -v "$LOG_HEADER"
+    touch_release_align_toggle_deps
+  fi
+fi
+if $LOG_RELEASE_ALIGN_VERBOSE; then
+  echo "// generated — delete to disable verbose sample logging" > "$LOG_VERBOSE_HEADER"
+  echo "Release-Align-Verbose-Logging aktiviert ($LOG_VERBOSE_HEADER)"
+  touch "$STREAM_SRC"
+else
+  if [[ -f "$LOG_VERBOSE_HEADER" ]]; then
+    rm -v "$LOG_VERBOSE_HEADER"
+    touch "$STREAM_SRC"
+  fi
+fi
+
+# ---- Version/Extra immer setzen -------------------------------------------
+# 1) Wenn --extra nicht gesetzt wurde, Standard setzen:
+if [[ -z "$EXTRA_LABEL" ]]; then
+  EXTRA_LABEL="sebion7125-WIP"
+fi
+# GO_VERSION_EXTRA ist an keiner Stelle im C++/CMake-Code verdrahtet (totes
+# Flag). Der Titel/Version-String (APP_VERSION in go_defs.h.in) speist sich
+# aus BUILD_VERSION (CMakeLists.txt: FULL_VERSION = PROJECT_VERSION-BUILD_VERSION).
+VERSION_PRMS="-DBUILD_VERSION=0.${EXTRA_LABEL}"
+
+# Falls set-ver-prms.sh vorher CMAKE_VERSION_PRMS gesetzt hat: anhängen
+if [[ -n "$CMAKE_VERSION_PRMS" ]]; then
+  VERSION_PRMS="$VERSION_PRMS $CMAKE_VERSION_PRMS"
+fi
+
+# CMake nur bei Bedarf ausführen
+if [[ ! -f CMakeCache.txt || $DO_RECONF || $DO_CLEAN ]]; then
+  echo "Führe CMake-Konfiguration aus …"
+  CMAKE_APP_PRMS="-DGO_USE_JACK=ON $VERSION_PRMS"
+
+  # Siehe Kommentar oben bei DIAG_CFLAGS: --debug-symbols braucht
+  # CMAKE_BUILD_TYPE=Debug, damit CMakeLists.txt selbst den passenden
+  # Flag-Zweig waehlt (kein -fomit-frame-pointer, kein -DNDEBUG). Die
+  # CMAKE_*_FLAGS_RELEASE-Werte unten bleiben unveraendert fuer den
+  # Default-Fall (Release) - bei BUILD_TYPE=Debug werden sie von CMake
+  # schlicht nicht verwendet.
+  BUILD_TYPE="Release"
+  LINKER_FLAGS_RELEASE="-s"
+  RELEASE_C_FLAGS="-O3 -DNDEBUG -g0"
+  if $KEEP_DEBUG_INFO; then
+    BUILD_TYPE="Debug"
+    LINKER_FLAGS_RELEASE=""
+    RELEASE_C_FLAGS="-O3 -DNDEBUG -g0"  # unused in Debug mode
+  elif $PROFILE_BUILD; then
+    LINKER_FLAGS_RELEASE=""  # kein Strip: Symbole bleiben erhalten
+    RELEASE_C_FLAGS="-O3 -DNDEBUG -g"
+  fi
+
+  cmake "$SRC_DIR" \
+    $CMAKE_MINGW_PRMS \
+    $CMAKE_APP_PRMS \
+    -DASIO_SDK_DIR=/usr/local/asio-sdk \
+    -DCV2PDB_EXE=/usr/local/share/wine/cv2pdb/cv2pdb.exe \
+    -DIMPORT_EXECUTABLES=../build-tools/ImportExecutables.cmake \
+    -DINSTALL_DEPEND=ON \
+    -DMSYS=1 -DSTATIC=0 \
+    -DRTAUDIO_USE_ASIO=ON \
+    -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS_USE_ARGUMENTS=ON \
+    "-DCMAKE_C_FLAGS_RELEASE:STRING=$RELEASE_C_FLAGS" \
+    "-DCMAKE_CXX_FLAGS_RELEASE:STRING=$RELEASE_C_FLAGS" \
+    "-DCMAKE_EXE_LINKER_FLAGS_RELEASE:STRING=$LINKER_FLAGS_RELEASE" \
+    -DVC_PATH=/usr/local/share/wine/msvc/VC/Tools/MSVC/14.29.30133/bin/Hostx86/x86
+else
+  echo "CMake-Konfiguration bereits vorhanden – überspringe Konfiguration."
+fi
+
+# 🔨 Bauen
+# GrandOrgue.pdb ist ein eigenes add_custom_target(... ALL ...) in
+# cmake/BuildExecutable.cmake und hängt nicht am "GrandOrgue"-Target selbst —
+# "make GrandOrgue" allein erzeugt keine PDB. Für --profile explizit mitbauen,
+# weil cv2pdb sonst mehrere Minuten kostet und für normale Builds nicht gebraucht wird.
+if $PROFILE_BUILD; then
+  make $PARALLEL_PRMS VERBOSE=1 GrandOrgue GrandOrgue.pdb
+else
+  make $PARALLEL_PRMS VERBOSE=1 GrandOrgue
+fi
+popd
+
+# === Ergebnis kopieren ===
+BUILD_BIN_DIR="$BUILD_DIR/bin"
+EXPORT_DIR="/media/sf_Code_Exchange/GrandOrgue Dev/bin"
+mkdir -p "$EXPORT_DIR"
+echo "Kopiere Build-Ergebnis von \"$BUILD_BIN_DIR\" nach \"$EXPORT_DIR\" …"
+cp -v "$BUILD_BIN_DIR/"* "$EXPORT_DIR/" || {
+  echo "FEHLER: Kopieren nach \"$EXPORT_DIR\" fehlgeschlagen."
+  exit 1
+}
+echo "✅ Kopie abgeschlossen."

@@ -1,0 +1,689 @@
+/*
+ * Copyright 2006 Milan Digital Audio LLC
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
+ * License GPL-2.0 or later
+ * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
+ */
+
+#include "GOManual.h"
+
+#include <wx/intl.h>
+
+#include "combinations/control/GODivisionalButtonControl.h"
+#include "config/GOConfig.h"
+#include "config/GOConfigReader.h"
+#include "gui/GOGuiOrgan.h"
+
+#include "GOCoupler.h"
+#include "GOOrganModel.h"
+#include "GOStop.h"
+#include "GOSwitch.h"
+#include "GOTremulant.h"
+
+const wxString WX_ODF_OBJ_NUM_FMT = wxT("%03u");
+
+GOManual::GOManual(
+  GOOrganModel &organModel,
+  unsigned manualNumber,
+  const GOMidiObjectContext *pParentContext)
+  : GOMidiObjectWithDivision(
+    organModel, OBJECT_TYPE_MANUAL, MIDI_SEND_MANUAL, MIDI_RECV_MANUAL),
+    m_InputCouplers(),
+    m_KeyVelocity(0),
+    m_RemoteVelocity(),
+    m_Velocity(),
+    m_DivisionKeyVelocities(),
+    m_KeyVelocitiesByCoupler(),
+    m_manual_number(manualNumber),
+    m_ShortName(wxString::Format(WX_ODF_OBJ_NUM_FMT, manualNumber)),
+    m_MidiContext(m_ShortName, m_ShortName, pParentContext),
+    m_MidiContextCouplers(wxT("couplers"), _("couplers"), &m_MidiContext),
+    m_MidiContextDivisionals(
+      wxT("divisionals"), _("divisionals"), &m_MidiContext),
+    m_MidiContextStops(wxT("stops"), _("stops"), &m_MidiContext),
+    m_MidiContextSwitches(wxT("switches"), _("switches"), &m_MidiContext),
+    m_MidiContextVirtualCouplers(
+      wxT("virtual-couplers"), _("virtual-couplers"), &m_MidiContext),
+    m_first_accessible_logical_key_nb(0),
+    m_nb_logical_keys(0),
+    m_first_accessible_key_midi_note_nb(0),
+    m_nb_accessible_keys(0),
+    m_UnisonOff(0),
+    m_tremulant_ids(0),
+    m_GlobalSwitchIds(0),
+    m_stops(0),
+    m_couplers(0),
+    m_divisionals(0),
+    m_ODFCouplerCount(0),
+    m_displayed(false),
+    m_DivisionalTemplate(organModel) {
+  SetHardName(m_ShortName);
+  SetContext(pParentContext);
+  SetReceiverKeyMap(&m_MidiKeyMap);
+  m_InputCouplers.push_back(NULL);
+  r_OrganModel.RegisterCombinationButtonSet(this);
+}
+
+GOManual::~GOManual(void) {
+  r_OrganModel.UnRegisterCombinationButtonSet(this);
+  SetReceiverKeyMap(nullptr);
+}
+
+unsigned GOManual::RegisterCoupler(GOCoupler *coupler) {
+  m_InputCouplers.push_back(coupler);
+  Resize();
+  return m_InputCouplers.size() - 1;
+}
+
+void GOManual::Resize() {
+  m_Velocity.resize(m_nb_logical_keys);
+  m_DivisionKeyVelocities.resize(m_nb_logical_keys);
+  m_RemoteVelocity.resize(m_nb_logical_keys);
+  m_KeyVelocitiesByCoupler.resize(m_nb_logical_keys);
+  for (unsigned i = 0; i < m_KeyVelocitiesByCoupler.size(); i++)
+    m_KeyVelocitiesByCoupler[i].resize(m_InputCouplers.size());
+}
+
+void GOManual::Init(
+  GOConfigReader &cfg,
+  const wxString &group,
+  unsigned firstMidi,
+  unsigned keys) {
+  GOMidiReceivingSendingObject::Init(
+    cfg,
+    group,
+    wxString::Format(
+      _("Coupling manual %d"),
+      m_manual_number - r_OrganModel.GetODFManualCount() + 1));
+  m_nb_logical_keys = keys;
+  m_first_accessible_logical_key_nb = 1;
+  m_first_accessible_key_midi_note_nb = firstMidi;
+  m_nb_accessible_keys = keys;
+  m_displayed = false;
+  for (unsigned i = 0; i < GOMidiReceiver::KEY_MAP_SIZE; i++)
+    m_MidiKeyMap[i] = (uint8_t)i;
+
+  m_stops.resize(0);
+  m_couplers.resize(0);
+  m_ODFCouplerCount = 0;
+  m_tremulant_ids.resize(0);
+  m_GlobalSwitchIds.resize(0);
+  m_divisionals.resize(0);
+
+  SetElementId(r_OrganModel.GetRecorderElementID(
+    wxString::Format(wxT("M%d"), m_manual_number)));
+
+  Resize();
+  m_KeyVelocity.resize(m_nb_accessible_keys);
+  std::fill(m_KeyVelocity.begin(), m_KeyVelocity.end(), 0x00);
+}
+
+void GOManual::Load(GOConfigReader &cfg, const wxString &group) {
+  GOMidiReceivingSendingObject::Load(
+    cfg, group, cfg.ReadStringNotEmpty(ODFSetting, group, wxT("Name")), true);
+  m_nb_logical_keys
+    = cfg.ReadInteger(ODFSetting, group, wxT("NumberOfLogicalKeys"), 1, 192);
+  m_first_accessible_logical_key_nb = cfg.ReadInteger(
+    ODFSetting,
+    group,
+    wxT("FirstAccessibleKeyLogicalKeyNumber"),
+    1,
+    m_nb_logical_keys);
+  m_first_accessible_key_midi_note_nb = cfg.ReadInteger(
+    ODFSetting, group, wxT("FirstAccessibleKeyMIDINoteNumber"), 0, 127);
+  m_nb_accessible_keys
+    = cfg.ReadInteger(ODFSetting, group, wxT("NumberOfAccessibleKeys"), 0, 85);
+  m_displayed
+    = cfg.ReadBoolean(ODFSetting, group, wxT("Displayed"), false, false);
+  unsigned nb_stops
+    = cfg.ReadInteger(ODFSetting, group, wxT("NumberOfStops"), 0, 999);
+  m_ODFCouplerCount = cfg.ReadInteger(
+    ODFSetting, group, wxT("NumberOfCouplers"), 0, 999, false);
+  unsigned nb_tremulants = cfg.ReadInteger(
+    ODFSetting,
+    group,
+    wxT("NumberOfTremulants"),
+    0,
+    r_OrganModel.GetTremulantCount(),
+    false);
+  unsigned nb_switches = cfg.ReadInteger(
+    ODFSetting,
+    group,
+    wxT("NumberOfSwitches"),
+    0,
+    r_OrganModel.GetSwitchCount(),
+    false);
+
+  // Prepare manual-local progress mapping into global model progress:
+  const unsigned firstManual = r_OrganModel.GetFirstManualIndex();
+  unsigned manualCount = 0;
+  if (r_OrganModel.GetODFManualCount() > firstManual)
+    manualCount = r_OrganModel.GetODFManualCount() - firstManual;
+  if (manualCount == 0)
+    manualCount = 1;
+  unsigned idx = m_manual_number - firstManual + 1; // 1..manualCount
+  unsigned baseStart = 70 + ((idx - 1) * 10) / manualCount;
+  unsigned baseEnd = 70 + (idx * 10) / manualCount;
+
+  // Account for heavy work inside some stops: if a Stop defines zero ranks,
+  // GOStop::Load creates a new rank and that rank will load pipes which can
+  // be costly. Add those pipe counts into the manual-local total so the
+  // manual progress slice covers this work.
+  unsigned extraPipeParts = 0;
+  for (unsigned si = 0; si < nb_stops; ++si) {
+    wxString stopGroup = wxString::Format(wxT("Stop%03d"), si + 1);
+    unsigned stopRanks = cfg.ReadInteger(
+      ODFSetting, stopGroup, wxT("NumberOfRanks"), 0, 999, false, 0);
+    if (stopRanks == 0) {
+      // When a stop has no ranks defined, GOStop::Load will create a rank
+      // using the manual's NumberOfAccessibleKeys as the pipe count.
+      extraPipeParts += m_nb_accessible_keys ? m_nb_accessible_keys : 1;
+    }
+  }
+
+  unsigned localTotalParts
+    = nb_stops + m_ODFCouplerCount + nb_tremulants + extraPipeParts;
+  if (localTotalParts == 0)
+    localTotalParts = 1;
+  unsigned localProcessed = 0;
+
+  for (unsigned i = 0; i < GOMidiReceiver::KEY_MAP_SIZE; i++)
+    m_MidiKeyMap[i] = (uint8_t)cfg.ReadInteger(
+      ODFSetting,
+      group,
+      wxString::Format(wxT("MIDIKey%03d"), i),
+      0,
+      127,
+      false,
+      i);
+
+  wxString buffer;
+
+  m_stops.resize(0);
+  for (unsigned i = 0; i < nb_stops; i++) {
+    GOStop *pStop = new GOStop(
+      r_OrganModel, GetFirstLogicalKeyMIDINoteNumber(), &m_MidiContextStops);
+    unsigned localNumber = i + 1;
+
+    pStop->SetHardName(wxString::Format(WX_ODF_OBJ_NUM_FMT, localNumber));
+    buffer.Printf(wxT("Stop%03d"), localNumber);
+    buffer.Printf(
+      wxT("Stop%03d"), cfg.ReadInteger(ODFSetting, group, buffer, 1, 999));
+    cfg.MarkGroupInUse(buffer);
+
+    // Pre-report: announce start of this stop so UI updates before potentially
+    // heavy pStop->Load execution. Use the same manual slice mapping.
+    {
+      unsigned aboutIndex = localProcessed + 1;
+      unsigned aboutPct = baseStart
+        + (unsigned)((uint64_t)aboutIndex * (baseEnd - baseStart)
+                     / localTotalParts);
+      r_OrganModel.ReportProgress(
+        aboutPct,
+        wxString::Format(
+          _("Building: manual %d stops (%u/%u) - starting").c_str(),
+          m_manual_number,
+          aboutIndex > nb_stops ? nb_stops : aboutIndex,
+          nb_stops));
+    }
+
+#ifdef GO_PROFILE_ODFLOAD
+    wxStopWatch __go_stopwatch;
+    __go_stopwatch.Start();
+#endif
+    pStop->Load(cfg, buffer);
+#ifdef GO_PROFILE_ODFLOAD
+    {
+      long __go_ms = __go_stopwatch.Time();
+      wxLogMessage(wxString::Format(
+        "Timing: GOManual %d Stop %u Load %ld ms",
+        m_manual_number,
+        localNumber,
+        __go_ms));
+    }
+#endif
+    pStop->SetElementId(r_OrganModel.GetRecorderElementID(
+      wxString::Format(wxT("M%dS%d"), m_manual_number, i)));
+    m_stops.push_back(pStop);
+
+    // report local progress mapped into model progress window (finished this
+    // stop)
+    localProcessed++;
+    unsigned subPct = baseStart
+      + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart)
+                   / localTotalParts);
+    r_OrganModel.ReportProgress(
+      subPct,
+      wxString::Format(
+        _("Building: manual %d stops (%u/%u)").c_str(),
+        m_manual_number,
+        localProcessed > nb_stops ? nb_stops : localProcessed,
+        nb_stops));
+  }
+
+  m_couplers.resize(0);
+  for (unsigned i = 0; i < m_ODFCouplerCount; i++) {
+    m_couplers.push_back(new GOCoupler(
+      r_OrganModel, m_manual_number, false, &m_MidiContextCouplers));
+    buffer.Printf(wxT("Coupler%03d"), i + 1);
+    buffer.Printf(
+      wxT("Coupler%03d"), cfg.ReadInteger(ODFSetting, group, buffer, 1, 999));
+    cfg.MarkGroupInUse(buffer);
+    m_couplers[i]->Load(cfg, buffer);
+    m_couplers[i]->SetElementId(r_OrganModel.GetRecorderElementID(
+      wxString::Format(wxT("M%dC%d"), m_manual_number, i)));
+    // report local progress
+    localProcessed++;
+    unsigned subPct = baseStart
+      + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart)
+                   / localTotalParts);
+    r_OrganModel.ReportProgress(
+      subPct,
+      wxString::Format(
+        _("Building: manual %d couplers (%u/%u)").c_str(),
+        m_manual_number,
+        localProcessed > m_ODFCouplerCount ? m_ODFCouplerCount : localProcessed,
+        m_ODFCouplerCount));
+  }
+
+  m_tremulant_ids.resize(0);
+  for (unsigned i = 0; i < nb_tremulants; i++) {
+    buffer.Printf(wxT("Tremulant%03d"), i + 1);
+    unsigned new_id = cfg.ReadInteger(
+      ODFSetting, group, buffer, 1, r_OrganModel.GetTremulantCount());
+    for (unsigned j = 0; j < m_tremulant_ids.size(); j++)
+      if (m_tremulant_ids[j] == new_id)
+        throw wxString::Format(
+          _("Manual %d: Tremulant%03d already in use"),
+          m_manual_number,
+          new_id);
+    m_tremulant_ids.push_back(new_id);
+
+    // report local progress
+    localProcessed++;
+    unsigned subPct = baseStart
+      + (unsigned)((uint64_t)localProcessed * (baseEnd - baseStart)
+                   / localTotalParts);
+    r_OrganModel.ReportProgress(
+      subPct,
+      wxString::Format(
+        _("Building: manual %d tremulants (%u/%u)").c_str(),
+        m_manual_number,
+        localProcessed > nb_tremulants ? nb_tremulants : localProcessed,
+        nb_tremulants));
+  }
+
+  m_GlobalSwitchIds.resize(0);
+  for (unsigned i = 0; i < nb_switches; i++) {
+    buffer.Printf(wxT("Switch%03d"), i + 1);
+    unsigned globalSwitchId = cfg.ReadInteger(
+      ODFSetting, group, buffer, 1, r_OrganModel.GetSwitchCount());
+    for (unsigned j = 0; j < m_GlobalSwitchIds.size(); j++)
+      if (m_GlobalSwitchIds[j] == globalSwitchId)
+        throw wxString::Format(
+          _("Manual %d: Switch%03d already in use"),
+          m_manual_number,
+          globalSwitchId);
+    m_GlobalSwitchIds.push_back(globalSwitchId);
+    r_OrganModel.GetSwitch(globalSwitchId - 1)
+      ->AssociateWithManual(m_manual_number, i);
+  }
+
+  SetElementId(r_OrganModel.GetRecorderElementID(
+    wxString::Format(wxT("M%d"), m_manual_number)));
+
+  Resize();
+  m_KeyVelocity.resize(m_nb_accessible_keys);
+  std::fill(m_KeyVelocity.begin(), m_KeyVelocity.end(), 0x00);
+}
+
+void GOManual::LoadDivisionals(GOConfigReader &cfg) {
+  unsigned nDivisionals = cfg.ReadInteger(
+    ODFSetting, m_group, wxT("NumberOfDivisionals"), 0, 999, false);
+  wxString buffer;
+
+  m_DivisionalTemplate.InitDivisional(*this);
+  m_divisionals.resize(0);
+
+  // Compute mapping for this manual into the global model progress range
+  const unsigned firstManual = r_OrganModel.GetFirstManualIndex();
+  unsigned manualCount = 0;
+  if (r_OrganModel.GetODFManualCount() > firstManual)
+    manualCount = r_OrganModel.GetODFManualCount() - firstManual;
+  if (manualCount == 0)
+    manualCount = 1;
+  unsigned idx = m_manual_number - firstManual + 1; // 1..manualCount
+  unsigned baseStart = 70 + ((idx - 1) * 10) / manualCount;
+  unsigned baseEnd = 70 + (idx * 10) / manualCount;
+
+  unsigned localTotalParts = nDivisionals ? nDivisionals : 1;
+
+  for (unsigned i = 0; i < nDivisionals; i++) {
+    m_divisionals.push_back(new GODivisionalButtonControl(
+      r_OrganModel, m_manual_number, i, &m_MidiContextDivisionals));
+
+    buffer.Printf(wxT("Divisional%03d"), i + 1);
+    buffer.Printf(
+      wxT("Divisional%03d"),
+      cfg.ReadInteger(ODFSetting, m_group, buffer, 1, 999));
+    cfg.MarkGroupInUse(buffer);
+    m_divisionals[i]->Load(cfg, buffer);
+
+    // report divisional progress mapped to model (use same manual range)
+    unsigned partIndex = i + 1;
+    unsigned subPct = baseStart
+      + (unsigned)((uint64_t)partIndex * (baseEnd - baseStart)
+                   / localTotalParts);
+    r_OrganModel.ReportProgress(
+      subPct,
+      wxString::Format(
+        _("Building: manual %d divisionals (%u/%u)").c_str(),
+        m_manual_number,
+        partIndex,
+        nDivisionals));
+  }
+}
+
+void GOManual::SetDivisionKeyState(unsigned keyIndex, unsigned velocity) {
+  if (keyIndex < 0 || keyIndex >= m_DivisionKeyVelocities.size())
+    return;
+  velocity >>= 2;
+
+  if (m_DivisionKeyVelocities[keyIndex] == velocity)
+    return;
+  m_DivisionKeyVelocities[keyIndex] = velocity;
+
+  for (unsigned i = 0; i < m_stops.size(); i++)
+    m_stops[i]->SetKeyState(keyIndex + 1, velocity);
+
+  int midi_note = keyIndex + m_first_accessible_key_midi_note_nb
+    - m_first_accessible_logical_key_nb + 1;
+  if (midi_note >= 0 && midi_note < 127)
+    SendDivisionMidiKey(midi_note, velocity);
+}
+
+void GOManual::PropagateKeyToCouplers(unsigned keyIndex) {
+  if (keyIndex < m_Velocity.size()) {
+    auto &keyVelocities = m_KeyVelocitiesByCoupler[keyIndex];
+
+    for (auto pCoupler : m_couplers)
+      pCoupler->SetKey(keyIndex, keyVelocities, m_InputCouplers);
+  }
+}
+
+void GOManual::SetKeyState(
+  unsigned keyIndex, unsigned velocity, unsigned couplerID) {
+  if (keyIndex >= m_Velocity.size())
+    return;
+
+  if (m_KeyVelocitiesByCoupler[keyIndex][couplerID] == velocity)
+    return;
+
+  m_KeyVelocitiesByCoupler[keyIndex][couplerID] = velocity;
+  m_Velocity[keyIndex] = m_KeyVelocitiesByCoupler[keyIndex][0];
+  m_RemoteVelocity[keyIndex] = 0;
+  for (unsigned i = 1; i < m_KeyVelocitiesByCoupler[keyIndex].size(); i++) {
+    if (m_Velocity[keyIndex] < m_KeyVelocitiesByCoupler[keyIndex][i])
+      m_Velocity[keyIndex] = m_KeyVelocitiesByCoupler[keyIndex][i];
+    if (m_RemoteVelocity[keyIndex] < m_KeyVelocitiesByCoupler[keyIndex][i])
+      m_RemoteVelocity[keyIndex] = m_KeyVelocitiesByCoupler[keyIndex][i];
+  }
+
+  PropagateKeyToCouplers(keyIndex);
+  SetDivisionKeyState(
+    keyIndex,
+    m_UnisonOff > 0 ? m_RemoteVelocity[keyIndex] : m_Velocity[keyIndex]);
+
+  if (
+    m_first_accessible_logical_key_nb <= keyIndex + 1
+    && keyIndex <= m_first_accessible_logical_key_nb + m_nb_accessible_keys)
+    r_OrganModel.SendControlChanged(this);
+}
+
+void GOManual::SetMidiNoteState(unsigned midiNote, unsigned velocity) {
+  if (
+    midiNote < m_first_accessible_key_midi_note_nb
+    || midiNote >= m_first_accessible_key_midi_note_nb + m_KeyVelocity.size())
+    return;
+  if (m_KeyVelocity[midiNote - m_first_accessible_key_midi_note_nb] == velocity)
+    return;
+  m_KeyVelocity[midiNote - m_first_accessible_key_midi_note_nb] = velocity;
+  SendMidiKey(midiNote, velocity);
+  if (velocity)
+    velocity = (velocity << 2) + 3;
+  SetKeyState(
+    midiNote - m_first_accessible_key_midi_note_nb
+      + m_first_accessible_logical_key_nb - 1,
+    velocity,
+    0);
+}
+
+void GOManual::SetUnisonOff(bool on) {
+  if (on) {
+    if (m_UnisonOff++)
+      return;
+  } else {
+    if (--m_UnisonOff)
+      return;
+  }
+  for (unsigned note = 0; note < m_Velocity.size(); note++)
+    SetDivisionKeyState(note, on ? m_RemoteVelocity[note] : m_Velocity[note]);
+}
+
+unsigned GOManual::GetLogicalKeyCount() { return m_nb_logical_keys; }
+
+unsigned GOManual::GetNumberOfAccessibleKeys() { return m_nb_accessible_keys; }
+
+/* TODO: I suspect this could be made private or into something better... */
+unsigned GOManual::GetFirstAccessibleKeyMIDINoteNumber() {
+  return m_first_accessible_key_midi_note_nb;
+}
+
+int GOManual::GetFirstLogicalKeyMIDINoteNumber() {
+  return m_first_accessible_key_midi_note_nb - m_first_accessible_logical_key_nb
+    + 1;
+}
+
+GOStop *GOManual::GetStop(unsigned index) {
+  assert(index < m_stops.size());
+  return m_stops[index];
+}
+
+int GOManual::FindStopByName(const wxString &name) const {
+  int resIndex = -1;
+
+  for (unsigned l = m_stops.size(), i = 0; i < l; i++)
+    if (m_stops[i]->GetName() == name) {
+      resIndex = i;
+      break;
+    }
+  return resIndex;
+}
+
+GOCoupler *GOManual::GetCoupler(unsigned index) {
+  assert(index < m_couplers.size());
+  return m_couplers[index];
+}
+
+int GOManual::FindCouplerByName(const wxString &name) const {
+  int resIndex = -1;
+
+  for (unsigned l = m_couplers.size(), i = 0; i < l; i++)
+    if (m_couplers[i]->GetName() == name) {
+      resIndex = i;
+      break;
+    }
+  return resIndex;
+}
+
+void GOManual::AddCoupler(GOCoupler *coupler) { m_couplers.push_back(coupler); }
+
+GODivisionalButtonControl *GOManual::GetDivisional(unsigned index) {
+  assert(index < m_divisionals.size());
+  return m_divisionals[index];
+}
+
+void GOManual::AddDivisional(GODivisionalButtonControl *divisional) {
+  m_divisionals.push_back(divisional);
+}
+
+GOCombinationDefinition &GOManual::GetDivisionalTemplate() {
+  return m_DivisionalTemplate;
+}
+
+GOTremulant *GOManual::GetTremulant(unsigned index) {
+  assert(index < m_tremulant_ids.size());
+  return r_OrganModel.GetTremulant(m_tremulant_ids[index] - 1);
+}
+
+int GOManual::FindTremulantByName(const wxString &name) const {
+  int resIndex = -1;
+
+  for (unsigned l = m_tremulant_ids.size(), i = 0; i < l; i++) {
+    int globalIndex = m_tremulant_ids[i] - 1;
+
+    if (
+      globalIndex >= 0
+      && r_OrganModel.GetTremulant(globalIndex)->GetName() == name) {
+      resIndex = globalIndex;
+      break;
+    }
+  }
+  return resIndex;
+}
+
+GOSwitch *GOManual::GetSwitch(unsigned index) {
+  assert(index < m_GlobalSwitchIds.size());
+  return r_OrganModel.GetSwitch(m_GlobalSwitchIds[index] - 1);
+}
+
+int GOManual::FindSwitchByName(const wxString &name) const {
+  int resIndex = -1;
+
+  for (unsigned l = m_GlobalSwitchIds.size(), i = 0; i < l; i++) {
+    int globalIndex = m_GlobalSwitchIds[i] - 1;
+
+    if (
+      globalIndex >= 0
+      && r_OrganModel.GetSwitch(globalIndex)->GetName() == name) {
+      resIndex = globalIndex;
+      break;
+    }
+  }
+  return resIndex;
+}
+
+void GOManual::AllNotesOff() {
+  for (unsigned j = 0; j < m_nb_accessible_keys; j++)
+    SetMidiNoteState(m_first_accessible_key_midi_note_nb + j, 0x00);
+}
+
+bool GOManual::IsKeyDown(unsigned midiNoteNumber) {
+  if (midiNoteNumber < m_first_accessible_key_midi_note_nb)
+    return false;
+  if (
+    midiNoteNumber
+    >= m_first_accessible_key_midi_note_nb + m_nb_accessible_keys)
+    return false;
+  if (
+    midiNoteNumber - m_first_accessible_key_midi_note_nb
+      + m_first_accessible_logical_key_nb - 1
+    >= m_Velocity.size())
+    return false;
+  return m_Velocity
+           [midiNoteNumber - m_first_accessible_key_midi_note_nb
+            + m_first_accessible_logical_key_nb - 1]
+    > 0;
+}
+
+bool GOManual::IsDisplayed() { return m_displayed; }
+
+void GOManual::PreparePlayback() {
+  GOMidiReceivingSendingObject::PreparePlayback();
+  m_KeyVelocity.resize(m_nb_accessible_keys);
+  std::fill(m_KeyVelocity.begin(), m_KeyVelocity.end(), 0x00);
+  ResetDivisionMidiKey();
+  m_UnisonOff = 0;
+  for (unsigned i = 0; i < m_Velocity.size(); i++)
+    m_Velocity[i] = 0;
+  for (unsigned i = 0; i < m_DivisionKeyVelocities.size(); i++)
+    m_DivisionKeyVelocities[i] = 0;
+  for (unsigned i = 0; i < m_RemoteVelocity.size(); i++)
+    m_RemoteVelocity[i] = 0;
+  for (unsigned i = 0; i < m_KeyVelocitiesByCoupler.size(); i++)
+    for (unsigned j = 0; j < m_KeyVelocitiesByCoupler[i].size(); j++)
+      m_KeyVelocitiesByCoupler[i][j] = 0;
+}
+
+void GOManual::PrepareRecording() {
+  SendEmptyMidiKey();
+  GOMidiReceivingSendingObject::PrepareRecording();
+  for (unsigned i = 0; i < m_KeyVelocity.size(); i++)
+    if (m_KeyVelocity[i] > 0)
+      SendMidiKey(i + m_first_accessible_key_midi_note_nb, m_KeyVelocity[i]);
+}
+
+void GOManual::AbortPlayback() {
+  AllNotesOff();
+  GOMidiReceivingSendingObject::AbortPlayback();
+}
+
+void GOManual::Update() {
+  for (unsigned i = 0; i < m_stops.size(); i++)
+    m_stops[i]->Update();
+
+  for (unsigned i = 0; i < m_couplers.size(); i++)
+    m_couplers[i]->Update();
+}
+
+void GOManual::OnMidiReceived(
+  const GOMidiEvent &event, GOMidiMatchType matchType, int key, int value) {
+  switch (matchType) {
+  case MIDI_MATCH_ON:
+    if (value <= 0)
+      value = 1;
+    SetMidiNoteState(key, value);
+    break;
+
+  case MIDI_MATCH_OFF:
+    SetMidiNoteState(key, 0x00);
+    break;
+
+  case MIDI_MATCH_RESET:
+    AllNotesOff();
+    break;
+
+  default:
+    break;
+  }
+}
+
+void GOManual::HandleKey(int key) {}
+
+void GOManual::Reset() {
+  for (unsigned j = 0; j < GetCouplerCount(); j++)
+    GetCoupler(j)->Reset();
+  for (unsigned j = 0; j < GetDivisionalCount(); j++)
+    GetDivisional(j)->Display(false);
+
+  for (unsigned j = 0; j < GetStopCount(); j++)
+    GetStop(j)->Reset();
+}
+
+wxString GOManual::GetElementStatus() { return _("-"); }
+
+std::vector<wxString> GOManual::GetElementActions() {
+  std::vector<wxString> actions;
+  return actions;
+}
+
+void GOManual::TriggerElementActions(unsigned no) {
+  // Never called
+}
+
+void GOManual::UpdateAllButtonsLight(
+  GOButtonControl *buttonToLight, int manualIndexOnlyFor) {
+  if (manualIndexOnlyFor < 0 || (unsigned)manualIndexOnlyFor == m_manual_number)
+    for (GOButtonControl *pDivisional : m_divisionals)
+      updateOneButtonLight(pDivisional, buttonToLight);
+}

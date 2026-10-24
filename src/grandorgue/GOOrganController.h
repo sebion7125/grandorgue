@@ -1,0 +1,291 @@
+/*
+ * Copyright 2006 Milan Digital Audio LLC
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
+ * License GPL-2.0 or later
+ * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
+ */
+
+#ifndef GOORGANCONTROLLER_H
+#define GOORGANCONTROLLER_H
+
+#include <atomic>
+#include <vector>
+
+#include <wx/filefn.h>
+#include <wx/string.h>
+
+#include "ptrvector.h"
+
+#include "config/GOConfig.h"
+#include "control/GOEventDistributor.h"
+#include "control/GOLabelControl.h"
+#include "gui/frames/GOMainWindowData.h"
+#include "gui/panels/GOGUIMouseState.h"
+#include "loader/GOFileStore.h"
+#include "loader/GOProgressMonitor.h"
+#include "model/GOOrganModel.h"
+#include "modification/GOModificationProxy.h"
+
+#include "sound/GOSoundOrganEngine.h"
+
+#include "GOMemoryPool.h"
+#include "GOVirtualCouplerController.h"
+
+class GOArchive;
+class GOAudioRecorder;
+class GOButtonControl;
+class GOCache;
+class GODialogSizeSet;
+class GODivisionalSetter;
+class GOElementCreator;
+class GOGUICouplerPanel;
+class GOGuiImageCache;
+class GOGuiOrgan;
+class GOGUIPanel;
+class GOGUIPanelCreator;
+class GOMidiEvent;
+class GOAutoMidiArchiver;
+class GOMidiPlayer;
+class GOMidiRecorder;
+class GOMidiSystem;
+class GOOrgan;
+class GOSetter;
+class GOSoundProvider;
+class GOSoundRecorder;
+class GOSoundSystem;
+class GOTemperament;
+class GOTimer;
+typedef struct _GOHashType GOHashType;
+
+class GOOrganController : public GOEventDistributor,
+                          public GOOrganModel,
+                          public GOModificationProxy {
+private:
+  GOConfig &m_config;
+  wxString m_odf;
+  wxString m_ArchiveID;
+  wxString m_ArchivePath;
+  wxString m_hash;
+  GOFileStore m_FileStore;
+  wxString m_CacheFilename;
+  wxString m_SettingFilename;
+  wxString m_ODFHash;
+  bool m_Cacheable;
+  // Total number of release sections across all pipes, set after each load.
+  // Used as releaseCount in the LUT cache file header.
+  unsigned m_lutReleaseCount;
+  GOSetter *m_setter;
+  GODivisionalSetter *m_DivisionalSetter;
+  GOAudioRecorder *m_AudioRecorder;
+  GOMidiPlayer *m_MidiPlayer;
+  GOMidiRecorder *m_MidiRecorder;
+  GOMidiRecorder *m_AutoMidiRecorder;
+  GOAutoMidiArchiver *m_AutoMidiArchiver;
+  GOSizeKeeper m_StopWindowSizeKeeper;
+  GOTimer *m_timer;
+  GOButtonControl *p_OnStateButton;
+  int m_volume;
+  wxString m_Temperament;
+
+  bool m_b_customized;
+  float m_CurrentPitch; // organ pitch
+  bool m_OrganModified; // always m_IsOrganModified >= IsModelModified()
+
+  wxString m_ChurchAddress;
+  wxString m_OrganBuilder;
+  wxString m_OrganBuildDate;
+  wxString m_OrganComments;
+  wxString m_RecordingDetails;
+  wxString m_InfoFilename;
+
+  GOVirtualCouplerController m_VirtualCouplers;
+
+  ptr_vector<GOGUIPanel> m_panels;
+  ptr_vector<GOGUIPanelCreator> m_panelcreators;
+  ptr_vector<GOElementCreator> m_elementcreators;
+
+  GOSoundOrganEngine *m_soundengine;
+  GOMidiSystem *m_midi;
+  std::vector<bool> m_MidiSamplesetMatch;
+  int m_SampleSetId1, m_SampleSetId2;
+  GOGUIMouseState m_MouseState;
+
+  GOMemoryPool m_pool;
+  GOSoundOrganEngine m_SoundEngine;
+
+  // timing variables for profiling (ms)
+  long long __tim_parse_ms;
+  long long __tim_cmb_ms;
+  long long __tim_readorgan_ms;
+  long long __tim_cache_ms;
+  long long __tim_panels_ms;
+  long long __tim_ranks_ms;
+  long long __tim_modelrest_ms;
+
+public:
+  /* Diagnostics (audio monitor report): how long THIS load's cache phase
+   * took. The 46GB cache mmap+touch runs seconds when the file is warm in
+   * the standby cache and minutes from disk - the report line makes the
+   * difference visible per start (executable-alternation investigation,
+   * 2026-07-17). */
+  long long GetCacheLoadMs() const { return __tim_cache_ms; }
+  long long GetTotalLoadMs() const {
+    return __tim_parse_ms + __tim_cmb_ms + __tim_readorgan_ms + __tim_cache_ms
+      + __tim_panels_ms + __tim_ranks_ms + __tim_modelrest_ms;
+  }
+
+private:
+
+  GOGuiImageCache *mp_ImageCache;
+  GOLabelControl m_PitchLabel;
+  GOLabelControl m_TemperamentLabel;
+  GOMainWindowData m_MainWindowData;
+
+  // if modified changes m_IsOrganModified then make a side effect
+  void SetOrganModified(bool modified);
+  // Called when the IsModelModified changed
+  // if modified then sets m_IsOrganModified
+  void OnIsModifiedChanged(bool modified);
+
+  void ReadOrganFile(GOConfigReader &cfg, GOProgressMonitor &monitor);
+  GOHashType GenerateCacheHash();
+  wxString GenerateSettingFileName();
+  wxString GenerateCacheFileName();
+  void SetTemperament(const GOTemperament &temperament);
+  void PreconfigRecorder();
+  void PreconfigRecorderTo(GOMidiRecorder *pTarget);
+
+  const wxString &GetOrganHash() const { return m_hash; }
+
+public:
+  GOOrganController(GOConfig &config, bool isAppInitialized = false);
+  virtual ~GOOrganController();
+
+  GOSizeKeeper &GetStopWindowSizeKeeper() { return m_StopWindowSizeKeeper; }
+
+  // Returns organ modification flag
+  bool IsOrganModified() const { return m_OrganModified; }
+  // Sets the organ modification flag
+  void SetOrganModified() { SetOrganModified(true); }
+  // Clears the organ modification flag
+  void ResetOrganModified();
+
+  const GOFileStore &GetFileStore() const { return m_FileStore; }
+  GODialogSizeSet &GetDialogSizeSet() { return m_config.m_DialogSizes; }
+
+  /**
+   * Set the organ directory without providing any odf.
+   * Called only from GOPerfTest.
+   * @param dir the directory for loading objects from
+   */
+  void InitOrganDirectory(const wxString &dir) {
+    m_FileStore.SetDirectory(dir);
+  }
+
+  wxString Load(
+    const GOOrgan &organ,
+    const wxString &cmb,
+    bool isGuiOnly,
+    GOProgressMonitor &monitor);
+  /**
+   * Exports organ combinations in the yaml file
+   * @param fileName - the path to the yaml file to export
+   * @return an empty string if succeeded otherwise the error message
+   */
+  wxString ExportCombination(const wxString &fileName);
+  void LoadCombination(const wxString &cmb);
+  bool Save();
+  bool Export(const wxString &cmb);
+  bool CachePresent() const { return wxFileExists(m_CacheFilename); }
+  bool IsCacheable() const { return m_Cacheable; }
+  bool UpdateCache(bool compress, GOProgressMonitor &monitor);
+  unsigned GetLutReleaseCount() const { return m_lutReleaseCount; }
+  const wxString &GetOdfHash() const { return m_ODFHash; }
+  wxString GetLutCachePath() const;
+  unsigned EnumerateReleaseParseIndices();
+  bool GenerateLutCache(
+    wxString &errorMsg,
+    bool forceAll = false,
+    std::atomic<unsigned> *p_progress = nullptr,
+    std::atomic<bool> *p_cancel = nullptr);
+  void DeleteLutCache();
+  void ClearAllCachedLuts();
+  bool ApplyLutCacheNow();
+  void DeleteCache();
+  void DeleteSettings();
+  void Abort();
+  void PreparePlayback(
+    GOSoundOrganEngine *engine, GOMidiSystem *midi, GOSoundRecorder *recorder);
+  // Re-sends the full organ state into pTarget only, using the recording-target
+  // gate in the proxy so that any already-running recorder is not disturbed.
+  void PrepareRecording(GOMidiRecorder *pTarget);
+  void Update();
+  void Reset();
+  void ProcessMidi(const GOMidiEvent &event);
+  void AllNotesOff();
+  // GODocument *GetDocument();
+
+  /* Access to internal ODF objects */
+  GOSetter *GetSetter() const { return m_setter; }
+  bool IsMidiPlayerPlaying() const;
+
+  GOGUIPanel *GetPanel(unsigned index) { return m_panels[index]; }
+  unsigned GetPanelCount() const { return m_panels.size(); }
+  void AddPanel(GOGUIPanel *panel) { m_panels.push_back(panel); }
+  GOMemoryPool &GetMemoryPool() { return m_pool; }
+  GOConfig &GetSettings() { return m_config; }
+  GOGuiImageCache &GetImageCache() const { return *mp_ImageCache; }
+  void SetTemperament(const wxString &name);
+  const wxString &GetTemperament() const { return m_Temperament; }
+
+  GOLabelControl *GetPitchLabel() { return &m_PitchLabel; }
+  GOLabelControl *GetTemperamentLabel() { return &m_TemperamentLabel; }
+  GOMainWindowData *GetMainWindowData() { return &m_MainWindowData; }
+
+  void LoadMIDIFile(const wxString &filename);
+
+  void SetVolume(int volume) { m_volume = volume; }
+  int GetVolume() const { return m_volume; }
+
+  unsigned GetReleaseTail() {
+    return GetRootPipeConfigNode().GetEffectiveReleaseTail();
+  }
+  void SetReleaseTail(unsigned releaseTail) {
+    GetRootPipeConfigNode().GetPipeConfig().SetReleaseTail(releaseTail);
+  }
+
+  GOEnclosure *GetEnclosure(const wxString &name, bool is_panel = false);
+  GOLabelControl *GetLabel(const wxString &name, bool is_panel = false);
+  GOButtonControl *GetButtonControl(
+    const wxString &name, bool is_panel = false);
+
+  /* TODO: can somebody figure out what this thing is */
+  bool IsCustomized() const { return m_b_customized; }
+
+  /* Filename of the organ definition used to load */
+  const wxString &GetODFFilename() const { return m_odf; }
+  const wxString GetOrganPathInfo();
+  GOOrgan GetOrganInfo();
+  const wxString &GetSettingFilename() const { return m_SettingFilename; }
+  const wxString &GetCacheFilename() const { return m_CacheFilename; }
+  wxString GetCombinationsDir() const;
+
+  /* Organ and Building general information */
+  const wxString &GetChurchAddress() const { return m_ChurchAddress; }
+  const wxString &GetOrganBuilder() const { return m_OrganBuilder; }
+  const wxString &GetOrganBuildDate() const { return m_OrganBuildDate; }
+  const wxString &GetOrganComments() const { return m_OrganComments; }
+  const wxString &GetRecordingDetails() const { return m_RecordingDetails; }
+  const wxString &GetInfoFilename() const { return m_InfoFilename; }
+
+  GOMidiSystem *GetMidi() { return m_midi; }
+
+  GOGUIMouseState &GetMouseState() { return m_MouseState; }
+
+  /**
+   * Return the Timer Manager for Metronome, Midi recorder, ...
+   */
+  GOTimer *GetTimer() const { return m_timer; }
+};
+
+#endif

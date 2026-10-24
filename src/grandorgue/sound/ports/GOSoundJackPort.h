@@ -1,0 +1,70 @@
+/*
+ * Copyright 2006 Milan Digital Audio LLC
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
+ * License GPL-2.0 or later
+ * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
+ */
+
+#ifndef GOSOUNDJACKPORT_H
+#define GOSOUNDJACKPORT_H
+
+#include <vector>
+
+#if defined(GO_USE_JACK)
+#if defined(_WIN32) && !defined(WIN32)
+// workaround of the bug in the old jack that was fixed in
+// https://github.com/jackaudio/jack2/commit/49f06118a105f480634d9728ffdd4bfe2310860a
+// otherwise it couldnt compiled with mingw
+#define WIN32 1
+#endif
+#include <jack/jack.h>
+
+#include "sound/buffer/GOSoundBufferManaged.h"
+#endif
+
+#include "GOSoundPort.h"
+#include "GOSoundPortFactory.h"
+
+class GOSoundJackPort : public GOSoundPort {
+public:
+  static const wxString PORT_NAME;
+
+  GOSoundJackPort(GOSoundSystem *sound, wxString name);
+  ~GOSoundJackPort();
+
+#if defined(GO_USE_JACK)
+private:
+  jack_client_t *mp_JackClient = nullptr;
+  std::vector<jack_port_t *> mp_JackOutPorts;
+  GOSoundBufferManaged m_GoBuffer;
+  bool m_IsOpen = false;
+  bool m_IsStarted = false;
+
+  static void jackLatencyCallback(
+    jack_latency_callback_mode_t mode, void *pData);
+  static int jackProcessCallback(jack_nframes_t nFrames, void *pData);
+  static void jackShutdownCallback(void *pData);
+  static int jackXrunCallback(void *pData);
+
+  static wxString getName();
+
+public:
+  void Open();
+  void StartStream();
+#endif /* GO_USE_JACK */
+
+public:
+  void Close(bool deviceMaybeLost = false);
+
+  static const std::vector<wxString> &getApis() {
+    return GOSoundPortFactory::c_NoApis;
+  }
+  static GOSoundPort *create(
+    const GOPortsConfig &portsConfig,
+    GOSoundSystem *sound,
+    GODeviceNamePattern &pattern);
+  static void addDevices(
+    const GOPortsConfig &portsConfig, std::vector<GOSoundDevInfo> &list);
+};
+
+#endif /* GOSOUNDJACKPORT_H */

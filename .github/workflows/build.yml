@@ -1,0 +1,240 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      asan:
+        description: 'Build with ASAN'
+        type: boolean
+        default: false
+permissions:
+  contents: write
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - actions: "functional coverage"
+            build_type: Debug
+            coverage: "ON"
+          - actions: "perf"
+            build_type: Debug
+            coverage: "OFF"
+          - actions: "perf"
+            build_type: Release
+            coverage: "OFF"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Install Test Dependencies
+        run: ${{github.workspace}}/build-scripts/for-linux/prepare-debian-based.sh tests
+
+      - name: Build
+        working-directory: ${{github.workspace}}
+        run: ${{github.workspace}}/build-scripts/for-linux/build-for-tests.sh amd64 ${{ matrix.build_type }} ${{ matrix.coverage }}
+
+      - name: Run tests
+        working-directory: ${{github.workspace}}
+        run: ${{github.workspace}}/build-scripts/for-linux/do-tests.sh ${{ matrix.actions }}
+
+      - name: Upload coverage
+        if: contains(matrix.actions, 'coverage')
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+        
+  calc_ver:
+    # calculate versions from git tags
+    runs-on: ubuntu-latest
+    outputs:
+      project_ver: ${{steps.vers.outputs.project_ver}}
+      build_ver: ${{steps.vers.outputs.build_ver}}
+      full_ver: ${{steps.vers.outputs.full_ver}}
+      release_flag: ${{steps.vers.outputs.release_flag}}
+      release_id: ${{ steps.create_release.outputs.id }}
+      release_upload_url: ${{ steps.create_release.outputs.upload_url }}
+      asan_flag: ${{steps.vers.outputs.asan_flag}}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4.1.1
+
+    - name: Set git tags and compose RELNOTES.md
+      shell: bash
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: ${{github.workspace}}/build-scripts/for-github/autotag.sh
+      if: ${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release-') }}
+
+    - name: Calculate relnotes file
+      id: relnotes
+      shell: bash
+      run: |
+        [[ -e RELNOTES.md ]] && RELNOTES_FILE=RELNOTES.md
+        echo "file=$RELNOTES_FILE" >>$GITHUB_OUTPUT
+
+    - name: Calculate versions
+      id: vers
+      shell: bash
+      run: |
+        git fetch --prune --unshallow --tags || true
+        GIT_VERSION=`git describe --tags`
+        PROJECT_VERSION=`echo $GIT_VERSION | cut -d- -f1`
+        BUILD_VERSION=`echo $GIT_VERSION | cut -d- -f2-3 --output-delimiter=.`
+        GIT_CHANGE_NUM=`echo $GIT_VERSION | cut -d- -f3`
+        if [[ -n "$GIT_CHANGE_NUM" ]] || [[ "$BUILD_VERSION" < "1" ]]; then
+          RELEASE_FLAG=OFF
+        else
+          RELEASE_FLAG=ON
+        fi
+
+        if [[ "${{ github.event.inputs.asan }}" == "true" ]]; then
+          ASAN_FLAG=asan
+        else
+          ASAN_FLAG=
+        fi
+
+        echo "project_ver=$PROJECT_VERSION" >>$GITHUB_OUTPUT
+        echo "build_ver=$BUILD_VERSION" >>$GITHUB_OUTPUT
+        echo "full_ver=$PROJECT_VERSION-$BUILD_VERSION" >>$GITHUB_OUTPUT
+        echo "release_flag=$RELEASE_FLAG" >>$GITHUB_OUTPUT
+        echo "asan_flag=$ASAN_FLAG" >>$GITHUB_OUTPUT
+
+    - name: Display versions
+      run: |
+        echo "project_ver=${{steps.vers.outputs.project_ver}}"
+        echo "build_ver=${{steps.vers.outputs.build_ver}}"
+        echo "full_ver=${{steps.vers.outputs.full_ver}}"
+        echo "release_flag=${{steps.vers.outputs.release_flag}}"
+        echo "asan_flag=${{steps.vers.outputs.asan_flag}}"
+
+    - name: Create Draft Release
+      if: ${{ steps.vers.outputs.release_flag == 'ON' }}
+      id: create_release
+      uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
+      with:
+        tag: "${{ steps.vers.outputs.full_ver }}"
+        name: "v${{ steps.vers.outputs.full_ver }}"
+        draft: true
+        bodyFile: "${{ steps.relnotes.outputs.file }}"
+        allowUpdates: true
+        updateOnlyUnreleased: true
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+  build:
+    needs: [calc_ver]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - run_on: ubuntu-22.04
+            for: linux
+            prepare: "debian-based"
+            build_on: linux
+            wx_version: wx30
+            pkg_suffix: wx30
+
+          - run_on: ubuntu-22.04
+            for: linux
+            prepare: "debian-based"
+            build_on: linux
+            wx_version: wx32
+
+          - run_on: ubuntu-22.04
+            for: appimage-x86_64
+            prepare: "debian-based"
+            build_on: linux
+            wx_version: wx32
+
+          - run_on: ubuntu-22.04
+            for: linux-armhf
+            prepare: "debian-based"
+            build_on: linux
+            wx_version: wx30
+            pkg_suffix: wx30
+    
+          - run_on: ubuntu-22.04
+            for: linux-armhf
+            prepare: "debian-based"
+            build_on: linux
+            wx_version: wx32
+
+          - run_on: ubuntu-22.04
+            for: linux-aarch64
+            prepare: "debian-based"
+            build_on: linux
+            wx_version: wx30
+            pkg_suffix: wx30
+
+          - run_on: ubuntu-22.04
+            for: linux-aarch64
+            prepare: "debian-based"
+            build_on: linux
+            wx_version: wx32
+
+          - run_on: macos-15-intel # x86_64
+            for: osx
+            prepare: osx
+            build_on: osx
+
+          - run_on: macos-14 # arm64
+            for: osx
+            prepare: osx
+            build_on: osx
+
+          - run_on: ubuntu-latest
+            for: win64
+            prepare: "debian-based"
+            build_on: linux
+
+    runs-on: ${{ matrix.run_on }}
+    steps:
+    - uses: actions/checkout@v4.1.1
+      with:
+        submodules: true
+    
+    - name: Install Dependencies
+      run: ${{github.workspace}}/build-scripts/for-${{ matrix.for }}/prepare-${{ matrix.prepare }}.sh "${{ matrix.wx_version }}"
+      
+    - name: Build
+      working-directory: ${{github.workspace}}
+      run: >
+        ${{github.workspace}}/build-scripts/for-${{ matrix.for }}/build-on-${{ matrix.build_on }}.sh
+        ${{needs.calc_ver.outputs.project_ver}}
+        ${{needs.calc_ver.outputs.build_ver}}
+        ${{github.workspace}}
+        "${{ matrix.pkg_suffix }}"
+        ${{needs.calc_ver.outputs.release_flag}}
+        ""
+        ${{needs.calc_ver.outputs.asan_flag}}
+
+    - name: Upload result
+      uses: nanoufo/action-upload-artifacts-and-release-assets@v2
+      with:
+        path: |
+          ${{github.workspace}}/build/${{ matrix.for }}/grandorgue*${{needs.calc_ver.outputs.full_ver}}*
+        upload-release-files: ${{ needs.calc_ver.outputs.release_flag }}
+        release-upload-url: ${{ needs.calc_ver.outputs.release_upload_url }}
+        if-no-files-found: error
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    needs: [calc_ver, build]
+    if: ${{ needs.calc_ver.outputs.release_flag == 'ON' }}
+    runs-on: ubuntu-latest
+    steps:
+      
+    - uses: eregon/publish-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        release_id: ${{ needs.calc_ver.outputs.release_id }}

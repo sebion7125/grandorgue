@@ -1,0 +1,60 @@
+libzita-convolver.so.4 libzita-convolver4 #MINVER#
+ (c++)"zita_convolver_major_version()@Base" 4.0.3
+ (c++)"zita_convolver_minor_version()@Base" 4.0.3
+ (c++)"Inpnode::alloc_ffta(unsigned short, int)@Base" 4.0.3
+ (c++)"Inpnode::free_ffta()@Base" 4.0.3
+ (c++)"Inpnode::Inpnode(unsigned short)@Base" 4.0.3
+ (c++)"Inpnode::Inpnode(unsigned short)@Base" 4.0.3
+ (c++)"Inpnode::~Inpnode()@Base" 4.0.3
+ (c++)"Inpnode::~Inpnode()@Base" 4.0.3
+ (c++)"Macnode::alloc_fftb(unsigned short)@Base" 4.0.3
+ (c++)"Macnode::free_fftb()@Base" 4.0.3
+ (c++)"Macnode::Macnode(Inpnode*)@Base" 4.0.3
+ (c++)"Macnode::Macnode(Inpnode*)@Base" 4.0.3
+ (c++)"Macnode::~Macnode()@Base" 4.0.3
+ (c++)"Macnode::~Macnode()@Base" 4.0.3
+ (c++)"Outnode::Outnode(unsigned short, int)@Base" 4.0.3
+ (c++)"Outnode::Outnode(unsigned short, int)@Base" 4.0.3
+ (c++)"Outnode::~Outnode()@Base" 4.0.3
+ (c++)"Outnode::~Outnode()@Base" 4.0.3
+ (c++)"Convproc::check_stop()@Base" 4.0.3
+ (c++)"Convproc::set_options(unsigned int)@Base" 4.0.3
+ (c++)"Convproc::set_skipcnt(unsigned int)@Base" 4.0.3
+ (c++)"Convproc::impdata_link(unsigned int, unsigned int, unsigned int, unsigned int)@Base" 4.0.3
+ (c++)"Convproc::stop_process()@Base" 4.0.3
+ (c++)"Convproc::impdata_clear(unsigned int, unsigned int)@Base" 4.0.3
+ (c++)"Convproc::start_process(int, int)@Base" 4.0.3
+ (c++)"Convproc::impdata_create(unsigned int, unsigned int, int, float*, int, int)@Base" 4.0.3
+ (c++)"Convproc::impdata_update(unsigned int, unsigned int, int, float*, int, int)@Base" 4.0.3
+ (c++)"Convproc::print(_IO_FILE*)@Base" 4.0.3
+ (c++)"Convproc::reset()@Base" 4.0.3
+ (c++)"Convproc::cleanup()@Base" 4.0.3
+ (c++)"Convproc::process(bool)@Base" 4.0.3
+ (c++)"Convproc::_fft_cost@Base" 4.0.3
+ (c++)"Convproc::_mac_cost@Base" 4.0.3
+ (c++)"Convproc::configure(unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, float)@Base" 4.0.3
+ (c++)"Convproc::Convproc()@Base" 4.0.3
+ (c++)"Convproc::Convproc()@Base" 4.0.3
+ (c++)"Convproc::~Convproc()@Base" 4.0.3
+ (c++)"Convproc::~Convproc()@Base" 4.0.3
+ (c++)"Convlevel::findmacnode(unsigned int, unsigned int, bool)@Base" 4.0.3
+ (c++)"Convlevel::static_main(void*)@Base" 4.0.3
+ (c++)"Convlevel::impdata_link(unsigned int, unsigned int, unsigned int, unsigned int)@Base" 4.0.3
+ (c++)"Convlevel::impdata_clear(unsigned int, unsigned int)@Base" 4.0.3
+ (c++)"Convlevel::impdata_write(unsigned int, unsigned int, int, float*, int, int, bool)@Base" 4.0.3
+ (c++)"Convlevel::main()@Base" 4.0.3
+ (c++)"Convlevel::stop()@Base" 4.0.3
+ (c++)"Convlevel::print(_IO_FILE*)@Base" 4.0.3
+ (c++)"Convlevel::reset(unsigned int, unsigned int, float**, float**)@Base" 4.0.3
+ (c++)"Convlevel::start(int, int)@Base" 4.0.3
+ (c++)"Convlevel::cleanup()@Base" 4.0.3
+ (c++)"Convlevel::fftswap(float (*) [2])@Base" 4.0.3
+ (c++)"Convlevel::process(bool)@Base" 4.0.3
+ (c++)"Convlevel::readout(bool, unsigned int)@Base" 4.0.3
+ (c++)"Convlevel::configure(int, unsigned int, unsigned int, unsigned int, unsigned int)@Base" 4.0.3
+ (c++)"Convlevel::Convlevel()@Base" 4.0.3
+ (c++)"Convlevel::Convlevel()@Base" 4.0.3
+ (c++)"Convlevel::~Convlevel()@Base" 4.0.3
+ (c++)"Convlevel::~Convlevel()@Base" 4.0.3
+ (c++)"typeinfo for Converror@Base" 4.0.3
+ (c++)"typeinfo name for Converror@Base" 4.0.3

@@ -1,0 +1,56 @@
+/*
+ * Copyright 2006 Milan Digital Audio LLC
+ * Copyright 2009-2025 GrandOrgue contributors (see AUTHORS)
+ * License GPL-2.0 or later
+ * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
+ */
+
+#include "GOMidiSendingObject.h"
+
+#include "model/GOOrganModel.h"
+
+GOMidiSendingObject::GOMidiSendingObject(
+  GOOrganModel &organModel, ObjectType objectType, GOMidiSenderType senderType)
+  : GOMidiPlayingObject(organModel, objectType), m_sender(senderType) {
+  m_sender.SetProxy(&organModel);
+  SetMidiSender(&m_sender);
+}
+
+GOMidiSendingObject::~GOMidiSendingObject() {
+  SetMidiSender(nullptr);
+  m_sender.SetProxy(nullptr);
+}
+
+void GOMidiSendingObject::LoadMidiObject(
+  GOConfigReader &cfg, const wxString &group, GOMidiMap &midiMap) {
+  GOMidiPlayingObject::LoadMidiObject(cfg, group, midiMap);
+  m_sender.Load(cfg, group, midiMap);
+}
+
+void GOMidiSendingObject::SetElementId(int id) { m_sender.SetElementID(id); }
+
+void GOMidiSendingObject::ResendMidi() {
+  m_sender.SetName(GetName());
+  SendCurrentMidiValue();
+}
+
+void GOMidiSendingObject::OnSettingsApplied() {
+  ResendMidi();
+  GOMidiPlayingObject::OnSettingsApplied();
+}
+
+void GOMidiSendingObject::PreparePlayback() {
+  GOMidiPlayingObject::PreparePlayback();
+  m_sender.SetName(GetName());
+}
+
+void GOMidiSendingObject::PrepareRecording() {
+  GOMidiPlayingObject::PrepareRecording();
+  SendCurrentMidiValue();
+}
+
+void GOMidiSendingObject::AbortPlayback() {
+  SendEmptyMidiValue();
+  GOMidiPlayingObject::AbortPlayback();
+  m_sender.SetName(wxEmptyString);
+}

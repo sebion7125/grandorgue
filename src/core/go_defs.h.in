@@ -1,0 +1,45 @@
+/*
+ * Copyright 2006 Milan Digital Audio LLC
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
+ * License GPL-2.0 or later
+ * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
+ */
+
+#ifndef GODEFS_H
+#define GODEFS_H
+
+/* Timing / tracing logging macros
+ * - LOG_TIMING(...) : general timing messages, enabled by -DGO_PROFILE_ODFLOAD
+ * - LOG_GUI_GAP(...) : GUI gap tracer messages, enabled by -DGO_GUI_GAP_TRACER
+ *
+ * Both expand to no-ops when disabled to avoid changing control flow.
+ */
+#cmakedefine GO_PROFILE_ODFLOAD
+#cmakedefine GO_GUI_GAP_TRACER
+
+#ifdef GO_PROFILE_ODFLOAD
+# define LOG_TIMING(...) do { wxLogMessage(__VA_ARGS__); wxLog::FlushActive(); } while(0)
+#else
+# define LOG_TIMING(...) do{}while(0)
+#endif
+
+#ifdef GO_GUI_GAP_TRACER
+# define LOG_GUI_GAP(...) LOG_TIMING(__VA_ARGS__)
+#else
+# define LOG_GUI_GAP(...) do{}while(0)
+#endif
+
+
+#define GITHUB_PROJECT "@GITHUB_PROJECT@"
+#define APP_VERSION "v@FULL_VERSION@"
+#define APP_WIN_VERSION @NUM_WIN_VERSION@
+
+/* Value which is used to identify a valid cached organ data file. 
+  It must be changed every time when the cache structure is modefied
+*/
+#define GRANDORGUE_CACHE_MAGIC 0x12341237
+
+#cmakedefine HAVE_ATOMIC
+#cmakedefine HAVE_MUTEX
+
+#endif

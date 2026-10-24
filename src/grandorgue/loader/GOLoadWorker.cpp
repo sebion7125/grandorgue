@@ -1,0 +1,66 @@
+/*
+ * Copyright 2006 Milan Digital Audio LLC
+ * Copyright 2009-2026 GrandOrgue contributors (see AUTHORS)
+ * License GPL-2.0 or later
+ * (https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
+ */
+
+#include "GOLoadWorker.h"
+
+#include "model/GOCacheObject.h"
+
+#include <wx/log.h>
+
+#include "GOAlloc.h"
+#include "GOCacheObjectDistributor.h"
+#include "GOLoadExceptions.h"
+#include "GOMemoryPool.h"
+
+GOLoadWorker::GOLoadWorker(
+  const GOFileStore &fileStore,
+  GOMemoryPool &pool,
+  GOCacheObjectDistributor &distributor)
+  : m_FileStore(fileStore),
+    m_pool(pool),
+    m_distributor(distributor),
+    m_WereExceptions(false),
+    m_OutOfMemory(false) {}
+
+void GOLoadWorker::LoadObjectNoExc(GOCacheObject *obj) {
+  try {
+    m_WereExceptions |= !obj->LoadFromFileWithoutExc(m_FileStore, m_pool);
+  } catch (GOOutOfMemory e) {
+    m_OutOfMemory = true;
+    m_WereExceptions = true;
+  } catch (const GOLoadAbortedPartial &) {
+    // Cooperative user-abort signal, not a load error - both derive from
+    // std::exception, so they must be caught (and rethrown) here, before the
+    // generic std::exception handler below would otherwise swallow them as
+    // a spurious "GOLoadWorker caught std::exception" error. Let it escape
+    // to GOLoadThread::Entry(), which handles it as a clean user cancel.
+    throw;
+  } catch (const GOLoadAbortedEarly &) {
+    throw;
+  } catch (const std::exception &e) {
+    // Capture and log unexpected std::exception derived errors to avoid
+    // uncaught exceptions escaping the worker thread.
+    wxLogError("GOLoadWorker caught std::exception: %s", e.what());
+    m_WereExceptions = true;
+  } catch (...) {
+    wxLogError("GOLoadWorker caught unknown exception");
+    m_WereExceptions = true;
+  }
+}
+
+bool GOLoadWorker::LoadNextObject(GOCacheObject *&obj) {
+  if (
+    !m_OutOfMemory && !m_pool.IsPoolFull() && (obj = m_distributor.FetchNext()))
+    LoadObjectNoExc(obj);
+  return obj && !m_OutOfMemory;
+}
+
+bool GOLoadWorker::WereExceptions() const {
+  if (m_OutOfMemory)
+    throw GOOutOfMemory();
+  return m_WereExceptions;
+}
