@@ -31,9 +31,13 @@ pushd build/win64
 rm -rf *
 export LANG=C
 
-WX_CONFIG=$MINGW_DIR/bin/wx-config; export WX_CONFIG
-
 source $(dirname $0)/set-mingw-vars.sh
+
+# Must come AFTER set-mingw-vars.sh, which is what actually defines
+# MINGW_DIR - with the old order this silently resolved to /bin/wx-config
+# (found 2026-10-25 alongside the wxWidgets package removal below, same
+# root cause and fix as upstream GrandOrgue/grandorgue#2672).
+WX_CONFIG=$MINGW_DIR/bin/wx-config; export WX_CONFIG
 
 CMAKE_WIN_PRMS="-DASIO_SDK_DIR=/usr/local/asio-sdk \
   -DCV2PDB_EXE=/usr/local/share/wine/cv2pdb/cv2pdb.exe \

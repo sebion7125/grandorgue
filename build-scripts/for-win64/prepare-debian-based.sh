@@ -40,7 +40,12 @@ pushd deb
 
 # MSYS2 packages are built against newer libstdc++.
 # It will be downloaded as a dependency for the packages below.
-PACKAGES_FROM_MSYS2=(curl-winssl fftw jack2 wavpack yaml-cpp wxwidgets3.2-msw)
+# wxwidgets3.2-msw removed from this list: MSYS2 dropped all wxWidgets
+# packages from the MINGW64 environment (found 2026-10-25, "Package
+# mingw-w64-x86_64-wxwidgets3.2-msw not found" - matches upstream
+# GrandOrgue/grandorgue#2672). Installed separately below instead, from a
+# prebuilt GrandOrgue/WxWidgetsCross release.
+PACKAGES_FROM_MSYS2=(curl-winssl fftw jack2 wavpack yaml-cpp)
 DEB_PACKAGES_FROM_MSYS2=("${PACKAGES_FROM_MSYS2[@]/%/-msys2-mingw64}")
 if ! dpkg -l "${DEB_PACKAGES_FROM_MSYS2[@]}" &>/dev/null; then
   # Download packages from MSYS2 repositories and convert them to .deb.
@@ -51,6 +56,29 @@ if ! dpkg -l "${DEB_PACKAGES_FROM_MSYS2[@]}" &>/dev/null; then
 fi
 
 popd
+
+# wxWidgets is no longer available in MSYS2 MINGW64 (see above), so use our
+# own build from https://github.com/GrandOrgue/WxWidgetsCross instead - same
+# fix and source as upstream GrandOrgue/grandorgue#2672.
+
+# remove the old wxWidgets from MSYS2 if it was installed earlier (e.g. on a
+# cached/reused runner from before the MSYS2 removal): it conflicts with the
+# new one.
+OLD_WX_DEBS=$(dpkg-query -W -f='${Package}\n' 'wxwidgets3.2-*-msys2-mingw64' 2>/dev/null || true)
+if [[ -n "$OLD_WX_DEBS" ]]; then
+  sudo dpkg -r $OLD_WX_DEBS
+fi
+
+WX_CROSS_VERSION=3.3.4-1.go
+WX_CROSS_INSTALLED_VERSION=$(dpkg-query -W -f='${Version}' wxwidgets3-mingw-w64 2>/dev/null || true)
+
+if [[ "$WX_CROSS_INSTALLED_VERSION" != "$WX_CROSS_VERSION" ]]; then
+  rm -rf deb/wx
+  mkdir -p deb/wx
+  wget -P deb/wx \
+    https://github.com/GrandOrgue/WxWidgetsCross/releases/download/${WX_CROSS_VERSION}/wxwidgets3-mingw-w64_${WX_CROSS_VERSION}_all.deb
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ./deb/wx/*.deb
+fi
 
 # download and install ASIO sdk
 if [ ! -d /usr/local/asio-sdk ]; then
