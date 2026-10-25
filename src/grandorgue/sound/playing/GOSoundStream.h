@@ -583,6 +583,7 @@ public:
    * output buffer - no 1 KB temp round-trip, no separate fader pass.
    * dGain == 0 keeps the former constant kernel bit-identically. Only
    * for voices whose fader confirmed TrySteadyLinearGain(). */
+#ifdef GO_POLYPHASE_AVX2
   void RenderBlockFromPlanesAccum(
     const int32_t *plane0,
     const int32_t *plane1,
@@ -611,6 +612,7 @@ public:
         m_ResamplingPos, vec, out, nFrames, gain, dGain);
     }
   }
+#endif // GO_POLYPHASE_AVX2
 
   void RenderBlockFromPlanes(
     const int32_t *plane0,

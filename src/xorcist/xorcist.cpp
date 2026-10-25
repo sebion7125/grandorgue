@@ -25,6 +25,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "fftw3.h"
@@ -292,6 +293,7 @@ static std::atomic<bool> s_WisdomTried{false};
 #include <CL/cl.h>
 #include <dlfcn.h>
 #include <mutex>
+#include <string>
 #include <string>
 
 namespace {

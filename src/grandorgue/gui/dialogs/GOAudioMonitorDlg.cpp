@@ -517,7 +517,7 @@ wxString BuildSysInfo() {
   if (freeMem > 0)
     s += wxString::Format(
       wxT("RAM available: %.1f GB\n"),
-      (double)freeMem / (1024.0 * 1024.0 * 1024.0));
+      freeMem.ToDouble() / (1024.0 * 1024.0 * 1024.0));
 #endif
 
   return s;
