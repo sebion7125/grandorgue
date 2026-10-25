@@ -305,7 +305,14 @@ void GOSoundFader::Process(
  * GO_RESAMPLE_BATCH_FN) keeps every element bit-identical to the scalar
  * mulss+addss sequence. Only the STEADY loops are vectorized - active
  * envelope loops are short-lived and the template path carries a serial
- * sanitize_vol(vol, lastVol) dependency. */
+ * sanitize_vol(vol, lastVol) dependency.
+ *
+ * x86/x86_64 only: immintrin.h and the AVX2 intrinsics it declares are not
+ * portable (found on macOS/arm64 via a CI cross-build, 2026-10-25). The
+ * non-x86 branch below keeps the exact same scalar tail loops that the
+ * AVX2 versions already fall back to for their remainder elements, so
+ * results stay bit-identical, just without the vectorized prefix. */
+#if defined(__x86_64__) || defined(__i386__)
 #ifndef __clang__
 #define GO_FADER_AVX2_FN                                                       \
   __attribute__((target("avx2"), optimize("fp-contract=off")))
@@ -377,6 +384,33 @@ GO_FADER_AVX2_FN void accumRampClosedAvx2(
 }
 
 } // namespace
+#else // !(x86/x86_64) - portable scalar fallback, no vectorized prefix.
+namespace {
+
+inline bool faderAvx2Supported() { return false; }
+
+void accumConstAvx2(const float *src, float *dst, unsigned nFloats, float g) {
+  for (unsigned i = 0; i < nFloats; i++)
+    dst[i] += src[i] * g;
+}
+
+void accumRampClosedAvx2(
+  const float *src,
+  float *dst,
+  unsigned nFrames,
+  float target,
+  float startExt,
+  float dExt) {
+  for (unsigned i = 0; i < nFrames; i++) {
+    const float vol = target * (startExt + (float)i * dExt);
+
+    dst[(size_t)i * 2] += src[(size_t)i * 2] * vol;
+    dst[(size_t)i * 2 + 1] += src[(size_t)i * 2 + 1] * vol;
+  }
+}
+
+} // namespace
+#endif // defined(__x86_64__) || defined(__i386__)
 
 GOFadeKernelKind GOSoundFader::ComputeFrameGains(
   unsigned nFrames, float externalVolume, float &outG0, float &outDg) {

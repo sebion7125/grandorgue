@@ -9,6 +9,7 @@
 #define GOAUDIOMONITORGRAPH_H
 
 #include <array>
+#include <cstdint>
 #include <vector>
 
 #include <wx/bitmap.h>

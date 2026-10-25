@@ -672,10 +672,19 @@ public:
  *
  * If this fires, prefer moving the new member out of the stream (section
  * metadata, a side array indexed like the streams) over updating the
- * number. */
+ * number.
+ *
+ * Also conditioned on sizeof(void*) == 8: the 448-byte figure was measured
+ * and validated only on 64-bit x86-64 (the performance-ceiling platform
+ * this stream was tuned for). On a 32-bit target (e.g. 32-bit ARM, found
+ * 2026-10-25 via a CI cross-build) the embedded raw pointer members make
+ * the struct smaller - a real, expected size difference from pointer
+ * width, not an accidental regression this gate exists to catch. */
 static_assert(
-  MAX_OUTPUT_CHANNELS != 2 || sizeof(GOSoundStream) == 448,
-  "GOSoundStream must stay 448 bytes - it is embedded per sampler and "
-  "feeds the sampler slot stride; see the size-gate comment above");
+  MAX_OUTPUT_CHANNELS != 2 || sizeof(void *) != 8
+    || sizeof(GOSoundStream) == 448,
+  "GOSoundStream must stay 448 bytes on 64-bit platforms - it is embedded "
+  "per sampler and feeds the sampler slot stride; see the size-gate "
+  "comment above");
 
 #endif /* GOSOUNDSTREAM_H */
