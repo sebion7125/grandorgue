@@ -34,6 +34,13 @@ pushd build/linux-aarch64
 rm -rf *
 export LANG=C
 export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+# PKG_CONFIG_PATH alone only ADDS to pkg-config's default search path, which
+# still includes the host's own (x86_64) pkgconfig dirs - a target .pc file
+# that is missing (e.g. glib-2.0, not installed for the foreign arch) then
+# silently resolves to the HOST's library, which fails at link time with
+# "file in wrong format" for a foreign-arch target. PKG_CONFIG_LIBDIR
+# REPLACES the search path instead, keeping it host-free.
+export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
 
 GO_ARM_PRMS="-DCMAKE_SYSTEM_NAME=Linux \
   -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
