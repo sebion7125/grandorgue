@@ -1357,9 +1357,9 @@ void GOSoundStream::BuildBlocksBatch(
   const unsigned validSamples[],
   unsigned count,
   unsigned channels) {
+#ifdef GO_V3_BATCH_AVX2
   assert(count <= GOSoundCompressionCacheV3Batch::LANES);
 
-#ifdef GO_V3_BATCH_AVX2
   /* The 8-lane kernel always pays the full 8-lane SIMD cost (unused lanes
    * are padded), so with a single voice needing a rebuild the scalar path
    * is cheaper - matches the original shared-cache design's rule. */
