@@ -46,7 +46,17 @@
  * granularity; the saved temp round-trip does not pay for losing the
  * vector accumulate. A correct fusion would need vector-tile output
  * (e.g. 4-frame hsum batching + vector RMW) - future option. */
+// RenderBlockFromPlanesAccum (GOSoundStream.h) hard-depends on the
+// AVX2-only ResampleBlockAccum (GOSoundResample.h), unguarded itself -
+// found 2026-10-25 building on ARM (aarch64/armhf), where
+// GO_POLYPHASE_AVX2 is correctly undefined but this flag still enabled
+// the call site. Tying it to GO_POLYPHASE_AVX2 directly falls back to
+// the always-present classic two-pass path below on any non-x86 build.
+#ifdef GO_POLYPHASE_AVX2
 #define GO_V3_FUSED_CONST_GAIN 1
+#else
+#define GO_V3_FUSED_CONST_GAIN 0
+#endif
 #if GO_STAGE_PROF
 #include <x86intrin.h>
 #endif

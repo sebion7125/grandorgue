@@ -1777,7 +1777,15 @@ static wxString BenchmarkActiveTip(bool haveOrgan) {
    * Relax the minimum (the sizers compress fine) and clamp the initial
    * size to the actual work area so the dialog never opens off-screen. */
   const wxSize fitted = GetSize(); // what the controls actually need
-  const wxSize workArea = wxDisplay(this).GetClientArea().GetSize();
+  // wxDisplay(const wxWindow*) isn't available/resolved consistently
+  // across every wx build config in CI (invalid conversion to unsigned
+  // int on some) - the portable idiom is GetFromWindow() + the
+  // always-present index constructor.
+  const int displayIdx = wxDisplay::GetFromWindow(this);
+  const wxSize workArea
+    = wxDisplay(displayIdx == wxNOT_FOUND ? 0u : (unsigned)displayIdx)
+        .GetClientArea()
+        .GetSize();
   /* The minimum follows the content, but never exceeds the screen.
    *
    * SetSizerAndFit had made the fitted size the hard minimum, which on
