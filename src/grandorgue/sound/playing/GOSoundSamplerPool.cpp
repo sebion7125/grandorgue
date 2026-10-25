@@ -74,11 +74,18 @@ static_assert(
  * 1ed770a63). The stride survived, but the reserve went from 80 to 64
  * bytes. Treat the remaining line as a budget, not as slack: if this
  * assert fires, shrink or relocate the new member rather than accepting
- * the next stride. */
+ * the next stride.
+ *
+ * Also conditioned on sizeof(void*) == 8: GOSoundSampler embeds a
+ * GOSoundStream, whose own size gate already exempts 32-bit targets (e.g.
+ * 32-bit ARM, found 2026-10-25 via a CI cross-build) for the same reason -
+ * narrower raw pointer members. That configuration was never measured
+ * against a cache-line budget, so no equivalent fixed stride is asserted
+ * for it here. */
 static_assert(
-  MAX_OUTPUT_CHANNELS != 2 || SAMPLER_SLOT_SIZE == 960,
-  "sampler slot stride must stay 960 bytes (15 cache lines over an "
-  "896-byte sampler); see the size-gate comment above");
+  MAX_OUTPUT_CHANNELS != 2 || sizeof(void *) != 8 || SAMPLER_SLOT_SIZE == 960,
+  "sampler slot stride must stay 960 bytes on 64-bit platforms (15 cache "
+  "lines over an 896-byte sampler); see the size-gate comment above");
 
 char *AllocAlignedArena(size_t bytes) {
   return static_cast<char *>(
